@@ -109,6 +109,20 @@ address {
   padding: 0 var(--container-pad);
 }
 
+/* Visually hidden, still read by screen readers & search engines */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
 .section {
   padding: var(--section-padding) 0;
   position: relative;
@@ -296,6 +310,55 @@ address {
 
 
 /* ============================================
+   BRAND / LOGO
+   The letterforms live once in <defs> (#mark-the,
+   #mark-lab) and every lockup composes them with
+   <use> + freshly drawn brackets, so the artwork
+   is never duplicated or distorted.
+   ============================================ */
+.brand-defs {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+/* Horizontal lockup — [ TheLab ] */
+.wordmark {
+  display: block;
+  height: 1.7rem;
+  width: auto;
+  overflow: visible; /* lets the brackets travel outside the viewBox */
+  transition: height var(--transition-base);
+}
+
+.wordmark-word {
+  fill: currentColor;
+}
+
+.wordmark-bracket {
+  fill: var(--color-accent);
+  transition: transform var(--transition-base), fill var(--transition-base);
+}
+
+/* Brackets open up on hover — like the space itself */
+.nav-logo:hover .wordmark-bracket,
+.nav-logo:focus-visible .wordmark-bracket {
+  fill: var(--color-accent-hover);
+}
+
+.nav-logo:hover .wordmark-bracket--l,
+.nav-logo:focus-visible .wordmark-bracket--l {
+  transform: translateX(-320px);
+}
+
+.nav-logo:hover .wordmark-bracket--r,
+.nav-logo:focus-visible .wordmark-bracket--r {
+  transform: translateX(320px);
+}
+
+
+/* ============================================
    NAVIGATION
    ============================================ */
 .navbar {
@@ -324,17 +387,19 @@ address {
 }
 
 .nav-logo {
-  font-family: var(--font-heading);
-  font-size: 1.75rem;
-  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
   text-decoration: none;
-  display: flex;
-  align-items: baseline;
   color: var(--color-heading);
 }
 
 .nav-logo:hover {
   color: var(--color-heading);
+}
+
+/* Logo shrinks with the navbar once the page scrolls */
+.navbar.scrolled .nav-logo .wordmark {
+  height: 1.45rem;
 }
 
 .nav-menu {
@@ -474,14 +539,56 @@ address {
   padding: 2rem 0;
 }
 
+/* The h1 is the logo itself; the accessible name lives in .sr-only */
 .hero-title {
-  font-family: var(--font-heading);
-  font-size: clamp(4rem, 12vw, 8rem);
-  font-weight: 700;
-  letter-spacing: -0.03em;
-  line-height: 1;
-  margin-bottom: 0.5rem;
-  color: var(--color-heading);
+  margin-bottom: 1.5rem;
+  line-height: 0;
+}
+
+.hero-logo {
+  display: block;
+  width: clamp(190px, 22vw, 280px);
+  height: auto;
+  margin: 0 auto;
+  overflow: visible;
+  filter: drop-shadow(0 12px 32px rgba(0, 0, 0, 0.55));
+}
+
+.hero-logo-word {
+  fill: var(--color-heading);
+  animation: logoWordIn 800ms 200ms ease-out both;
+}
+
+.hero-logo-word--2 {
+  animation-delay: 340ms;
+}
+
+.hero-logo-bracket {
+  fill: var(--color-accent);
+  filter: drop-shadow(0 0 28px var(--color-accent-glow));
+}
+
+.hero-logo-bracket--l {
+  animation: logoBracketInL 900ms cubic-bezier(0.2, 0.85, 0.3, 1) both;
+}
+
+.hero-logo-bracket--r {
+  animation: logoBracketInR 900ms cubic-bezier(0.2, 0.85, 0.3, 1) both;
+}
+
+@keyframes logoBracketInL {
+  from { opacity: 0; transform: translateX(-500px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes logoBracketInR {
+  from { opacity: 0; transform: translateX(500px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes logoWordIn {
+  from { opacity: 0; transform: translateY(220px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 
 .hero-tagline {
@@ -850,6 +957,10 @@ address {
   margin-bottom: 0.75rem;
 }
 
+.footer-logo .wordmark {
+  height: 2rem;
+}
+
 .footer-tagline {
   font-family: var(--font-heading);
   font-size: 1rem;
@@ -1080,8 +1191,8 @@ address {
     opacity: 1;
   }
 
-  .hero-title {
-    font-size: clamp(3.5rem, 15vw, 5rem);
+  .hero-logo {
+    width: clamp(190px, 52vw, 240px);
   }
 
   .hero-ctas {
@@ -1125,6 +1236,17 @@ address {
 
   .scroll-arrow {
     animation: none;
+  }
+
+  .hero-logo-word,
+  .hero-logo-bracket--l,
+  .hero-logo-bracket--r {
+    animation: none;
+  }
+
+  .wordmark,
+  .wordmark-bracket {
+    transition: none;
   }
 
   .card,
