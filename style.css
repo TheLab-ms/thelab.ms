@@ -397,6 +397,24 @@ address {
   color: var(--color-heading);
 }
 
+/* At the top of the page the bar is transparent and the hero logo is
+   already on screen — hide the nav wordmark so it isn't duplicated.
+   visibility (not display) keeps the layout stable and pulls the link
+   out of the tab order while it's invisible. */
+.navbar .nav-logo {
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-0.35rem);
+  transition: opacity var(--transition-base), transform var(--transition-base),
+    visibility var(--transition-base);
+}
+
+.navbar.scrolled .nav-logo {
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+}
+
 /* Logo shrinks with the navbar once the page scrolls */
 .navbar.scrolled .nav-logo .wordmark {
   height: 1.45rem;
@@ -1246,6 +1264,11 @@ address {
 
   .wordmark,
   .wordmark-bracket {
+    transition: none;
+  }
+
+  .navbar .nav-logo {
+    transform: none;
     transition: none;
   }
 
