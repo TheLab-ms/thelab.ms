@@ -1080,6 +1080,25 @@ address {
   margin-bottom: 0.5rem;
 }
 
+.footer-leadership li {
+  margin-bottom: 0.9rem;
+  line-height: 1.35;
+}
+
+.footer-leadership .leader-name {
+  display: block;
+  color: var(--color-text-muted);
+  font-size: 0.95rem;
+}
+
+.footer-leadership .leader-role {
+  display: block;
+  color: var(--color-text-dim);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
 /* Consolidated footer link styles */
 .footer-links a,
 .footer-contact-email a {
