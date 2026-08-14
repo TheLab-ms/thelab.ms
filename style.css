@@ -523,6 +523,12 @@ address {
   background:
     url('assets/streetview.jpg') center center / cover no-repeat;
   z-index: 0;
+  opacity: 0;
+  transition: opacity 2s ease;
+}
+
+.hero-bg.loaded {
+  opacity: 1;
 }
 
 .hero-overlay {
@@ -1132,21 +1138,6 @@ address {
 
 
 /* ============================================
-   FADE-IN ANIMATION
-   ============================================ */
-.fade-in {
-  opacity: 0;
-  transform: translateY(24px);
-  transition: opacity 0.6s ease-out, transform 0.6s ease-out;
-}
-
-.fade-in.visible {
-  opacity: 1;
-  transform: translateY(0);
-}
-
-
-/* ============================================
    RESPONSIVE — TABLET (768px+)
    ============================================ */
 @media (min-width: 768px) {
@@ -1334,14 +1325,13 @@ address {
     scroll-behavior: auto;
   }
 
-  .fade-in {
-    opacity: 1;
-    transform: none;
-    transition: none;
-  }
-
   .scroll-arrow {
     animation: none;
+  }
+
+  .hero-bg {
+    opacity: 1;
+    transition: none;
   }
 
   .hero-logo-word,

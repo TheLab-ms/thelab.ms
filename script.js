@@ -1,7 +1,6 @@
 /* ============================================
    TheLab - script.js
-   Mobile nav, sticky navbar, scroll animations,
-   and contact form handling
+   Mobile nav, sticky navbar, and smooth scroll
    ============================================ */
 
 (function () {
@@ -12,7 +11,6 @@
   const navToggle = document.getElementById('nav-toggle');
   const navMenu   = document.getElementById('nav-menu');
   const navLinks  = document.querySelectorAll('.nav-link');
-  const fadeEls   = document.querySelectorAll('.fade-in');
 
   // ---- Sticky Navbar on Scroll ----
   let lastScroll = 0;
@@ -111,38 +109,20 @@
 
   window.addEventListener('scroll', highlightNavLink, { passive: true });
 
-  // ---- Intersection Observer for Fade-In Animations ----
-  if ('IntersectionObserver' in window) {
-    const fadeObserver = new IntersectionObserver(
-      function (entries) {
-        entries.forEach(function (entry) {
-          if (entry.isIntersecting) {
-            entry.target.classList.add('visible');
-            fadeObserver.unobserve(entry.target);
-          }
-        });
-      },
-      {
-        threshold: 0.15,
-        rootMargin: '0px 0px -40px 0px',
-      }
-    );
-
-    fadeEls.forEach(function (el) {
-      fadeObserver.observe(el);
-    });
-  } else {
-    // Fallback: just show everything
-    fadeEls.forEach(function (el) {
-      el.classList.add('visible');
-    });
+  // ---- Hero Background Image Fade-In ----
+  // The image is a CSS background; preload it in JS and fade the
+  // layer in once it has actually loaded.
+  const heroBg = document.querySelector('.hero-bg');
+  if (heroBg) {
+    const img = new Image();
+    img.onload = function () {
+      heroBg.classList.add('loaded');
+    };
+    img.onerror = function () {
+      heroBg.classList.add('loaded');
+    };
+    img.src = 'assets/streetview.jpg';
   }
-
-  // ---- Staggered Fade-In for Grid Items ----
-  // Add a small delay to each card in a grid for a cascading effect
-  document.querySelectorAll('.shops-grid .shop-card').forEach(function (card, i) {
-    card.style.transitionDelay = (i * 0.08) + 's';
-  });
 
   // ---- Smooth Scroll for anchor links (fallback for older browsers) ----
   document.querySelectorAll('a[href^="#"]').forEach(function (anchor) {
