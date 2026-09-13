@@ -82,7 +82,16 @@
   <!-- ======= HERO ======= -->
   <header class="hero" id="hero">
     <div class="hero-bg">
-      <!-- Street view photo as background -->
+      <!-- Account for the 4:3 photo covering a viewport-height hero. -->
+      <picture>
+        <source type="image/webp"
+          srcset="assets/streetview-640.webp 640w, assets/streetview-960.webp 960w, assets/streetview-1280.webp 1280w, assets/streetview-1920.webp 1920w, assets/streetview-2560.webp 2560w"
+          sizes="max(100vw, calc(133.333vh - 4.667rem))">
+        <img src="assets/streetview-1280.jpg"
+          srcset="assets/streetview-640.jpg 640w, assets/streetview-960.jpg 960w, assets/streetview-1280.jpg 1280w, assets/streetview-1920.jpg 1920w, assets/streetview-2560.jpg 2560w"
+          sizes="max(100vw, calc(133.333vh - 4.667rem))"
+          width="4032" height="3024" alt="" fetchpriority="high">
+      </picture>
     </div>
     <div class="hero-overlay"></div>
     <div class="container hero-content">

@@ -4,6 +4,7 @@
   "type": "module",
   "engines": { "node": ">=22.12.0" },
   "scripts": {
+    "images:hero": "node scripts/generate-hero-images.js",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "test": "vitest run",
@@ -11,6 +12,7 @@
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.22.0",
+    "sharp": "^0.35.4",
     "vitest": "~4.1.0",
     "wrangler": "^4.130.0"
   },

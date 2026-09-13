@@ -110,18 +110,16 @@
   window.addEventListener('scroll', highlightNavLink, { passive: true });
 
   // ---- Hero Background Image Fade-In ----
-  // The image is a CSS background; preload it in JS and fade the
-  // layer in once it has actually loaded.
+  // Watch the browser-selected responsive image, including cached loads.
   const heroBg = document.querySelector('.hero-bg');
-  if (heroBg) {
-    const img = new Image();
-    img.onload = function () {
+  const heroImage = heroBg && heroBg.querySelector('img');
+  if (heroImage) {
+    const revealHero = function () {
       heroBg.classList.add('loaded');
     };
-    img.onerror = function () {
-      heroBg.classList.add('loaded');
-    };
-    img.src = 'assets/streetview.jpg';
+    heroImage.addEventListener('load', revealHero, { once: true });
+    heroImage.addEventListener('error', revealHero, { once: true });
+    if (heroImage.complete) revealHero();
   }
 
   // ---- Smooth Scroll for anchor links (fallback for older browsers) ----
