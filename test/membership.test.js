@@ -5,7 +5,7 @@ import worker, { processMessage } from '../src/index.js';
 import { coordinated, registerMember } from '../src/membership.js';
 import { hash, now } from '../src/http.js';
 import { provider } from '../src/providers.js';
-import { issueToken, memberToken, verifyToken } from '../src/auth.js';
+import { issueToken, loginDestination, memberToken, verifyToken } from '../src/auth.js';
 
 // Global fetch spies also apply inside the bound Durable Object in this runtime.
 // Every unexpected provider request fails; no tests can reach live services.
@@ -437,6 +437,91 @@ describe('member administration', () => {
     expect((await api('/admin?page=3', { headers: { Cookie: cookie } })).headers.get('Location')).toBe('/admin?page=2');
     role();
     expect((await api('/admin?page=-1', { headers: { Cookie: cookie } })).status).toBe(400);
+  });
+
+  it.each([
+    ['discord_user_id', id, id.slice(3)],
+    ['discord_username', 'Workshop.Handle', 'SHOP.han'],
+    ['discord_email', 'discord-contact@example.com', 'CORD-contact@'],
+    ['billing_name', 'Stripe Billing Person', 'BILLING per'],
+    ['billing_email', 'stripe-contact@example.com', 'IPE-contact@'],
+    ['name_override', 'Preferred Member Name', 'FERRED mem'],
+  ])('searches partial values in %s', async (column, value, query) => {
+    await seed({ [column]: value });
+    const otherID = '555555555555555555';
+    await env.DB.prepare('INSERT INTO members (discord_user_id, discord_username, discord_email) VALUES (?, ?, ?)')
+      .bind(otherID, 'unrelated', 'unrelated@example.com').run();
+    await authenticate(); role();
+    const response = await api(`/admin?${new URLSearchParams({ q: `  ${query}  ` })}`, { headers: { Cookie: cookie } });
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html).toContain('1 matching member');
+    expect(html).toContain(`href="/admin/members/${id}"`);
+    expect(html).not.toContain(`href="/admin/members/${otherID}"`);
+    expect(html).toContain(`value="${query}"`);
+  });
+
+  it('treats search wildcards literally, escapes HTML, and handles empty and invalid searches', async () => {
+    await seed({ billing_name: '100%_\\special' });
+    await authenticate();
+    for (const query of ['%', '_', '\\']) {
+      role();
+      const html = await (await api(`/admin?${new URLSearchParams({ q: query })}`, { headers: { Cookie: cookie } })).text();
+      expect(html).toContain(`href="/admin/members/${id}"`);
+    }
+    await env.DB.prepare("UPDATE members SET billing_name = ''").run();
+    for (const query of ['%', '_', '\\', "' OR 1=1 --", '"><script>alert(1)</script>']) {
+      role();
+      const html = await (await api(`/admin?${new URLSearchParams({ q: query })}`, { headers: { Cookie: cookie } })).text();
+      expect(html).toContain('0 matching members');
+      expect(html).toContain('No members match your search.');
+      expect(html).not.toContain(`href="/admin/members/${id}"`);
+      expect(html).not.toContain('<script>');
+      if (query.includes('<script>')) expect(html).toContain('&lt;script&gt;');
+    }
+    role();
+    const empty = await (await api('/admin?q=++', { headers: { Cookie: cookie } })).text();
+    expect(empty).toContain('1 registered member');
+    for (const query of ['q=one&q=two', `q=${'x'.repeat(255)}`]) {
+      role();
+      expect((await api(`/admin?${query}`, { headers: { Cookie: cookie } })).status).toBe(400);
+    }
+  });
+
+  it('paginates filtered results and preserves the query in links and page redirects', async () => {
+    await seed();
+    await env.DB.batch(Array.from({ length: 26 }, (_, i) => env.DB.prepare('INSERT INTO members (discord_user_id, discord_username, discord_email, billing_name, created) VALUES (?, ?, ?, ?, ?)')
+      .bind(String(BigInt(id) + BigInt(i + 1)), `person-${i}`, '', 'Search & Match', 1000)));
+    await authenticate(); role();
+    const first = await (await api('/admin?q=Search+%26+Match', { headers: { Cookie: cookie } })).text();
+    expect(first).toContain('26 matching members');
+    expect(first.match(/href="\/admin\/members\//g)).toHaveLength(25);
+    expect(first).toContain('href="/admin?page=2&amp;q=Search+%26+Match"');
+    expect(first).toContain('href="/admin">Clear</a>');
+    expect(first).toContain('method="get" action="/admin"');
+    expect(first).not.toContain('name="page"');
+    role();
+    const second = await (await api('/admin?page=2&q=Search+%26+Match', { headers: { Cookie: cookie } })).text();
+    expect(second.match(/href="\/admin\/members\//g)).toHaveLength(1);
+    expect(second).toContain('href="/admin?page=1&amp;q=Search+%26+Match"');
+    role();
+    expect((await api('/admin?page=3&q=Search+%26+Match', { headers: { Cookie: cookie } })).headers.get('Location'))
+      .toBe('/admin?page=2&q=Search+%26+Match');
+    role();
+    expect((await api('/admin?page=3&q=absent', { headers: { Cookie: cookie } })).headers.get('Location')).toBe('/admin?page=1&q=absent');
+  });
+
+  it('preserves searches through admin OAuth and only accepts known return destinations', async () => {
+    const destination = '/admin?q=Maker+%26+Co%40example.com&page=2';
+    const response = await api(destination);
+    const state = new URL(response.headers.get('Location')).searchParams.get('state');
+    expect((await verifyToken(env, state, 'oauth')).return_to).toBe(destination);
+    oauthMock({ roles: [env.DISCORD_ADMIN_ROLE_ID] });
+    const signedIn = await api(`/login/discord/callback?state=${state}&code=test`, { headers: { Cookie: response.headers.get('Set-Cookie').split(';')[0] } });
+    expect(signedIn.headers.get('Location')).toBe(`${env.SITE_URL}${destination}`);
+    for (const invalid of ['//evil.example/admin?q=x', '/admin?redirect=https://evil.example', '/admin?q=x&q=y', '/admin?q=x&page=-1', '/admin?q=x#fragment']) {
+      expect(loginDestination(invalid, 'admin')).toBe('/admin');
+    }
   });
 
   it('saves editable metadata without changing Stripe state, escapes HTML, and rejects stale forms', async () => {

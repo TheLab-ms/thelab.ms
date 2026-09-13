@@ -1,6 +1,7 @@
 import { escapeHTML as e } from './http.js';
 import { discounts, grantsMembership } from './membership-policy.js';
 import { memberName } from './member-metadata.js';
+import { MAX_SEARCH_LENGTH, memberListURL } from './admin-search.js';
 
 export function page(title, content, csrf, status = 200) {
 	return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>${e(title)} | TheLab admin</title><link rel="icon" href="/assets/favicon.svg"><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/membership.css"><link rel="stylesheet" href="/admin.css"></head>
@@ -28,9 +29,13 @@ function subscriptionLink(member, env) {
 	return `<a href="https://dashboard.stripe.com/${mode}subscriptions/${e(member.stripe_subscription_id)}" target="_blank" rel="noopener noreferrer">View subscription in Stripe ↗</a>`;
 }
 
-export function memberList(members, { total, current, pages }, env, csrf) {
+export function memberList(members, { total, current, pages, query = '' }, env, csrf) {
 	const rows = members.map(m => `<tr><td><a href="/admin/members/${e(m.discord_user_id)}">${e(memberName(m))}</a><small>${e(m.discord_user_id)}</small></td><td>${e(m.discord_email)}</td><td>${e(date(m.created))}</td><td>${m.bill_annually ? 'Yearly' : 'Monthly'}</td><td>${e(labelDiscount(m.discount_type))}</td><td><strong>${e(subscriptionStatus(m))}</strong><small>Last synced: ${e(date(m.stripe_synced_at))}</small>${subscriptionLink(m, env)}</td></tr>`).join('');
-	return page('Registered members', `<p>${total} registered member${total === 1 ? '' : 's'}. Includes pending and inactive memberships.</p><div class="admin-table"><table><thead><tr><th scope="col">Member</th><th scope="col">Discord email</th><th scope="col">Registered</th><th scope="col">Saved billing</th><th scope="col">Discount</th><th scope="col">Last-synced subscription</th></tr></thead><tbody>${rows || '<tr><td colspan="6">No members have registered yet.</td></tr>'}</tbody></table></div><nav class="admin-pagination" aria-label="Member pages">${current > 1 ? `<a class="btn btn-outline" href="/admin?page=${current - 1}">Previous</a>` : ''}<span>Page ${current} of ${pages}</span>${current < pages ? `<a class="btn btn-outline" href="/admin?page=${current + 1}">Next</a>` : ''}</nav>`, csrf);
+	const empty = query ? 'No members match your search.' : 'No members have registered yet.';
+	return page('Registered members', `<form method="get" action="/admin" role="search" class="admin-form admin-search">
+    <label for="member-search">Search members</label><p id="member-search-help">Search by Discord ID, handle or email, Stripe billing name or email, or name override. Partial matches are supported.</p>
+    <div class="admin-search-controls"><input id="member-search" type="search" name="q" value="${e(query)}" maxlength="${MAX_SEARCH_LENGTH}" aria-describedby="member-search-help"><button class="btn btn-primary" type="submit">Search</button>${query ? '<a class="btn btn-outline" href="/admin">Clear</a>' : ''}</div></form>
+    <p>${total} ${query ? 'matching' : 'registered'} member${total === 1 ? '' : 's'}${query ? ` for “${e(query)}”` : ''}. Includes pending and inactive memberships.</p><div class="admin-table"><table><thead><tr><th scope="col">Member</th><th scope="col">Discord email</th><th scope="col">Registered</th><th scope="col">Saved billing</th><th scope="col">Discount</th><th scope="col">Last-synced subscription</th></tr></thead><tbody>${rows || `<tr><td colspan="6">${empty}</td></tr>`}</tbody></table></div><nav class="admin-pagination" aria-label="Member pages">${current > 1 ? `<a class="btn btn-outline" href="${e(memberListURL(current - 1, query))}">Previous</a>` : ''}<span>Page ${current} of ${pages}</span>${current < pages ? `<a class="btn btn-outline" href="${e(memberListURL(current + 1, query))}">Next</a>` : ''}</nav>`, csrf);
 }
 
 function input(name, label, value, max, type = 'text', required = false, readonly = false) {

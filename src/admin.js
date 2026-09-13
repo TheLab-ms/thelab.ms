@@ -4,6 +4,7 @@ import { finishLogin, issueToken, loginDestination, startLogin, verifyToken } fr
 import { coordinated } from './membership.js';
 import { logError, requestContext } from './logging.js';
 import { editor, memberList, page } from './admin-views.js';
+import { memberListParams, memberListURL } from './admin-search.js';
 
 const PAGE_SIZE = 25;
 
@@ -22,18 +23,18 @@ export async function finishAdminLogin(env, user, guildMember, destination) {
 }
 
 async function list(request, env, csrf) {
-  const params = new URL(request.url).searchParams;
-  const raw = params.get('page') || '1';
-  if (!/^[1-9]\d{0,7}$/.test(raw) || params.getAll('page').length > 1) throw new HttpError(400, 'Invalid page number.');
-  const current = Number(raw);
+  const { current, query } = memberListParams(new URL(request.url).searchParams);
+  const columns = ['discord_user_id', 'discord_username', 'discord_email', 'billing_name', 'billing_email', 'name_override'];
+  const filter = query ? ` WHERE ${columns.map(column => `${column} LIKE ? ESCAPE '\\'`).join(' OR ')}` : '';
+  const values = query ? columns.map(() => `%${query.replace(/[\\%_]/g, '\\$&')}%`) : [];
   const [count, members] = await env.DB.batch([
-    env.DB.prepare('SELECT COUNT(*) AS total FROM members'),
+    env.DB.prepare(`SELECT COUNT(*) AS total FROM members${filter}`).bind(...values),
     env.DB.prepare(`SELECT discord_user_id, discord_username, discord_email, created, bill_annually, discount_type,
-      name_override, billing_name, stripe_subscription_id, stripe_subscription_state, stripe_synced_at FROM members ORDER BY created DESC, discord_user_id DESC LIMIT ? OFFSET ?`).bind(PAGE_SIZE, (current - 1) * PAGE_SIZE),
+      name_override, billing_name, stripe_subscription_id, stripe_subscription_state, stripe_synced_at FROM members${filter} ORDER BY created DESC, discord_user_id DESC LIMIT ? OFFSET ?`).bind(...values, PAGE_SIZE, (current - 1) * PAGE_SIZE),
   ]);
   const total = count.results[0].total, pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  if (current > pages) return redirect(`/admin?page=${pages}`);
-  return memberList(members.results, { total, current, pages }, env, csrf);
+  if (current > pages) return redirect(memberListURL(pages, query));
+  return memberList(members.results, { total, current, pages, query }, env, csrf);
 }
 
 async function readForm(request, env, csrf) {

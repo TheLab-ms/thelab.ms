@@ -1,5 +1,6 @@
 import { cookie, cookieHeader, discordID, hash, HttpError, now, opaque, origin, randomToken, redirect } from './http.js';
 import { encodeBase64URL as encode, decodeBase64URL as decode, encodeJSON as json } from './encoding.js';
+import { memberListParams } from './admin-search.js';
 
 export const TOKEN_AGE = { member: 86400, admin: 8 * 3600, oauth: 600 };
 const encoder = new TextEncoder();
@@ -55,7 +56,17 @@ export function finishLogin(env, destination, audience, token) {
 
 // Only known GET destinations can survive the OAuth round-trip.
 export function loginDestination(value, purpose) {
-  if (purpose === 'admin') return /^\/admin\/?(?:\?page=[1-9]\d{0,7})?$/.test(value) || /^\/admin\/members\/[1-9][0-9]{16,19}$/.test(value) ? value : '/admin';
+  if (purpose === 'admin') {
+    if (/^\/admin\/members\/[1-9][0-9]{16,19}$/.test(value)) return value;
+    if (/^\/admin\/?(?:\?[^#]*)?$/.test(value)) {
+      const params = new URLSearchParams(value.split('?')[1]);
+      try {
+        memberListParams(params);
+        if ([...params.keys()].every(key => key === 'page' || key === 'q')) return value;
+      } catch { /* Invalid list parameters fall back to the first page. */ }
+    }
+    return '/admin';
+  }
   if (purpose === 'member' && /^\/machines\?state=[a-f0-9]{64}$/.test(value)) return value;
   return /^\/payment\/success\?session_id=cs_[A-Za-z0-9_]+$/.test(value) ? value : '/payment/resume';
 }
