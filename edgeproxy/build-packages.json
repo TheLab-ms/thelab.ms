@@ -1,0 +1,1770 @@
+{
+  "alpine": "3.23",
+  "architecture": "aarch64",
+  "packages": [
+    {
+      "name": "alsa-lib",
+      "version": "1.2.14-r2",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/alsa-lib-1.2.14-r2.apk",
+      "license": "LGPL-2.1-or-later",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "cmd:aserver=1.2.14-r2",
+        "so:libasound.so.2=2.0.0",
+        "so:libatopology.so.2=2.0.0"
+      ],
+      "sha256": "ebb1d37703901e8f9f0f57e14dfff82d31b084f7f01e15a95cb9825320912e92"
+    },
+    {
+      "name": "aom-libs",
+      "version": "3.14.1-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/aom-libs-3.14.1-r0.apk",
+      "license": "BSD-2-Clause AND custom",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libaom.so.3=3.14.1"
+      ],
+      "sha256": "c7fd1ab868bcd9bb751d154bf68243630e2ed82190bd455aa00e8078b2f8f792"
+    },
+    {
+      "name": "brotli-libs",
+      "version": "1.2.0-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/brotli-libs-1.2.0-r0.apk",
+      "license": "MIT",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libbrotlicommon.so.1=1.2.0",
+        "so:libbrotlidec.so.1=1.2.0",
+        "so:libbrotlienc.so.1=1.2.0"
+      ],
+      "sha256": "c8a9113b0007d40291e55cfc196744b64004253707e37b3c07e188166fb2d0a0"
+    },
+    {
+      "name": "busybox",
+      "version": "1.37.0-r30",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/busybox-1.37.0-r30.apk",
+      "license": "GPL-2.0-only",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "cmd:busybox=1.37.0-r30"
+      ],
+      "sha256": "d3c919f1f142e41ba83c7dbcc392388f23f840dda6867719e660ebb9cc681254"
+    },
+    {
+      "name": "busybox-binsh",
+      "version": "1.37.0-r30",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/busybox-binsh-1.37.0-r30.apk",
+      "license": "GPL-2.0-only",
+      "dependencies": [
+        "busybox=1.37.0-r30"
+      ],
+      "provides": [
+        "/bin/sh",
+        "cmd:sh=1.37.0-r30"
+      ],
+      "sha256": "311c832f7b05a545b8d18dbddff23b1d6d0c6085970735398064f91ed55cd575"
+    },
+    {
+      "name": "ca-certificates-bundle",
+      "version": "20260611-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/ca-certificates-bundle-20260611-r0.apk",
+      "license": "MPL-2.0 AND MIT",
+      "dependencies": [],
+      "provides": [
+        "ca-certificates-cacert=20260611-r0"
+      ],
+      "sha256": "9cc6938c1950bfa84d15aeb61bd6dee294b0b856804f36252796e340975c264e"
+    },
+    {
+      "name": "cjson",
+      "version": "1.7.19-r1",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/cjson-1.7.19-r1.apk",
+      "license": "MIT",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libcjson.so.1=1.7.19"
+      ],
+      "sha256": "eb4327ccf0be2c0de7c318aef54688bf95d03e23f1e7df5c02eaa80d7e093cec"
+    },
+    {
+      "name": "dbus-libs",
+      "version": "1.16.2-r1",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/dbus-libs-1.16.2-r1.apk",
+      "license": "AFL-2.1 OR GPL-2.0-or-later",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libdbus-1.so.3=3.38.3"
+      ],
+      "sha256": "7d8f2b7bb25430d440d36ade181cd77d11e0ef4172a5a57e767985ca33670fb3"
+    },
+    {
+      "name": "ffmpeg",
+      "version": "8.0.1-r1",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/ffmpeg-8.0.1-r1.apk",
+      "license": "GPL-2.0-or-later AND LGPL-2.1-or-later",
+      "dependencies": [
+        "so:libavcodec.so.62",
+        "so:libavdevice.so.62",
+        "so:libavfilter.so.11",
+        "so:libavformat.so.62",
+        "so:libavutil.so.60",
+        "so:libc.musl-aarch64.so.1",
+        "so:libswresample.so.6",
+        "so:libswscale.so.9",
+        "so:libz.so.1"
+      ],
+      "provides": [
+        "cmd:ffmpeg=8.0.1-r1",
+        "cmd:ffprobe=8.0.1-r1",
+        "cmd:qt-faststart=8.0.1-r1"
+      ],
+      "sha256": "9629e9a7f9c711604abc7e61408196aca1aa882e53afcf8802af8103413259ab"
+    },
+    {
+      "name": "ffmpeg-libavcodec",
+      "version": "8.0.1-r1",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/ffmpeg-libavcodec-8.0.1-r1.apk",
+      "license": "GPL-2.0-or-later AND LGPL-2.1-or-later",
+      "dependencies": [
+        "so:libSvtAv1Enc.so.3",
+        "so:libaom.so.3",
+        "so:libavutil.so.60",
+        "so:libc.musl-aarch64.so.1",
+        "so:libdav1d.so.7",
+        "so:libjxl.so.0.11",
+        "so:libjxl_threads.so.0.11",
+        "so:libmp3lame.so.0",
+        "so:libopus.so.0",
+        "so:librav1e.so.0.8",
+        "so:libshaderc_shared.so.1",
+        "so:libswresample.so.6",
+        "so:libtheoradec.so.2",
+        "so:libtheoraenc.so.2",
+        "so:libva.so.2",
+        "so:libvorbis.so.0",
+        "so:libvorbisenc.so.2",
+        "so:libvpx.so.11",
+        "so:libwebp.so.7",
+        "so:libwebpmux.so.3",
+        "so:libx264.so.164",
+        "so:libx265.so.215",
+        "so:libxvidcore.so.4",
+        "so:libz.so.1"
+      ],
+      "provides": [
+        "so:libavcodec.so.62=62.11.100"
+      ],
+      "sha256": "4812122cea333ebf4c8e6c964a8a835a4cb7ee9e41f51e4d62ac8cce47bbe76e"
+    },
+    {
+      "name": "ffmpeg-libavdevice",
+      "version": "8.0.1-r1",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/ffmpeg-libavdevice-8.0.1-r1.apk",
+      "license": "GPL-2.0-or-later AND LGPL-2.1-or-later",
+      "dependencies": [
+        "so:libasound.so.2",
+        "so:libavcodec.so.62",
+        "so:libavfilter.so.11",
+        "so:libavformat.so.62",
+        "so:libavutil.so.60",
+        "so:libc.musl-aarch64.so.1",
+        "so:libdrm.so.2",
+        "so:libpulse.so.0",
+        "so:libv4l2.so.0",
+        "so:libxcb-shape.so.0",
+        "so:libxcb-shm.so.0",
+        "so:libxcb-xfixes.so.0",
+        "so:libxcb.so.1"
+      ],
+      "provides": [
+        "so:libavdevice.so.62=62.1.100"
+      ],
+      "sha256": "5f2be3bd8f66137fc819303b073fb1a64302cb4da30938b781cee666b9c816a2"
+    },
+    {
+      "name": "ffmpeg-libavfilter",
+      "version": "8.0.1-r1",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/ffmpeg-libavfilter-8.0.1-r1.apk",
+      "license": "GPL-2.0-or-later AND LGPL-2.1-or-later",
+      "dependencies": [
+        "so:libass.so.9",
+        "so:libavcodec.so.62",
+        "so:libavformat.so.62",
+        "so:libavutil.so.60",
+        "so:libc.musl-aarch64.so.1",
+        "so:libfontconfig.so.1",
+        "so:libfreetype.so.6",
+        "so:libfribidi.so.0",
+        "so:libharfbuzz.so.0",
+        "so:liblilv-0.so.0",
+        "so:libplacebo.so.351",
+        "so:libshaderc_shared.so.1",
+        "so:libswresample.so.6",
+        "so:libswscale.so.9",
+        "so:libva.so.2",
+        "so:libvidstab.so.1.2",
+        "so:libzimg.so.2",
+        "so:libzmq.so.5"
+      ],
+      "provides": [
+        "so:libavfilter.so.11=11.4.100"
+      ],
+      "sha256": "7fbbf19fa5c4c862c3ae68c605d4a52d8d2117d4e1b481486d86d9c9eede8cbc"
+    },
+    {
+      "name": "ffmpeg-libavformat",
+      "version": "8.0.1-r1",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/ffmpeg-libavformat-8.0.1-r1.apk",
+      "license": "GPL-2.0-or-later AND LGPL-2.1-or-later",
+      "dependencies": [
+        "so:libavcodec.so.62",
+        "so:libavutil.so.60",
+        "so:libbluray.so.3",
+        "so:libbz2.so.1",
+        "so:libc.musl-aarch64.so.1",
+        "so:libcrypto.so.3",
+        "so:libopenmpt.so.0",
+        "so:librist.so.4",
+        "so:libsrt.so.1.5",
+        "so:libssh.so.4",
+        "so:libssl.so.3",
+        "so:libxml2.so.2",
+        "so:libz.so.1",
+        "so:libzmq.so.5"
+      ],
+      "provides": [
+        "so:libavformat.so.62=62.3.100"
+      ],
+      "sha256": "098dc35b736df68a01b23c5ae64f8f84155dcae17832b6b0d35ef366f88a4a45"
+    },
+    {
+      "name": "ffmpeg-libavutil",
+      "version": "8.0.1-r1",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/ffmpeg-libavutil-8.0.1-r1.apk",
+      "license": "GPL-2.0-or-later AND LGPL-2.1-or-later",
+      "dependencies": [
+        "so:libX11.so.6",
+        "so:libc.musl-aarch64.so.1",
+        "so:libcrypto.so.3",
+        "so:libdrm.so.2",
+        "so:libva-drm.so.2",
+        "so:libva-x11.so.2",
+        "so:libva.so.2",
+        "so:libvdpau.so.1"
+      ],
+      "provides": [
+        "so:libavutil.so.60=60.8.100"
+      ],
+      "sha256": "f8e91184356aad6a4c05c53305b675ca0daf15fedadabe4730ffa5f8335ef988"
+    },
+    {
+      "name": "ffmpeg-libswresample",
+      "version": "8.0.1-r1",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/ffmpeg-libswresample-8.0.1-r1.apk",
+      "license": "GPL-2.0-or-later AND LGPL-2.1-or-later",
+      "dependencies": [
+        "so:libavutil.so.60",
+        "so:libc.musl-aarch64.so.1",
+        "so:libsoxr.so.0"
+      ],
+      "provides": [
+        "so:libswresample.so.6=6.1.100"
+      ],
+      "sha256": "a56cee9e3fa042cac9ee736378c10a1595837a9b043c11093f1e91e31f53bf56"
+    },
+    {
+      "name": "ffmpeg-libswscale",
+      "version": "8.0.1-r1",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/ffmpeg-libswscale-8.0.1-r1.apk",
+      "license": "GPL-2.0-or-later AND LGPL-2.1-or-later",
+      "dependencies": [
+        "so:libavutil.so.60",
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libswscale.so.9=9.1.100"
+      ],
+      "sha256": "86d932779e691eab37dc1d2f14172c90225ad6403ca3058adf5c97638054c315"
+    },
+    {
+      "name": "fontconfig",
+      "version": "2.17.1-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/fontconfig-2.17.1-r0.apk",
+      "license": "MIT",
+      "dependencies": [
+        "/bin/sh",
+        "so:libc.musl-aarch64.so.1",
+        "so:libexpat.so.1",
+        "so:libfreetype.so.6"
+      ],
+      "provides": [
+        "cmd:fc-cache=2.17.1-r0",
+        "cmd:fc-cat=2.17.1-r0",
+        "cmd:fc-conflist=2.17.1-r0",
+        "cmd:fc-list=2.17.1-r0",
+        "cmd:fc-match=2.17.1-r0",
+        "cmd:fc-pattern=2.17.1-r0",
+        "cmd:fc-query=2.17.1-r0",
+        "cmd:fc-scan=2.17.1-r0",
+        "cmd:fc-validate=2.17.1-r0",
+        "so:libfontconfig.so.1=1.16.1"
+      ],
+      "sha256": "38e815b8f898482e3c8111ac158208ba0a6a9aa13dbef49ccc36b36df77c793e"
+    },
+    {
+      "name": "freetype",
+      "version": "2.14.3-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/freetype-2.14.3-r0.apk",
+      "license": "FTL OR GPL-2.0-or-later",
+      "dependencies": [
+        "so:libbrotlidec.so.1",
+        "so:libbz2.so.1",
+        "so:libc.musl-aarch64.so.1",
+        "so:libpng16.so.16",
+        "so:libz.so.1"
+      ],
+      "provides": [
+        "so:libfreetype.so.6=6.20.6"
+      ],
+      "sha256": "b1012afa50bdebe872fab255b1c6db8c2c05b0dc4fc274c48d714e1887401b4e"
+    },
+    {
+      "name": "fribidi",
+      "version": "1.0.16-r2",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/fribidi-1.0.16-r2.apk",
+      "license": "LGPL-2.1-or-later",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "cmd:fribidi=1.0.16-r2",
+        "so:libfribidi.so.0=0.4.0"
+      ],
+      "sha256": "efc14ff4a90088c5e5f9fb265a1b1f0feba791fd0bae0790fa31429b0492a2d9"
+    },
+    {
+      "name": "glib",
+      "version": "2.86.3-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/glib-2.86.3-r0.apk",
+      "license": "LGPL-2.1-or-later",
+      "dependencies": [
+        "/bin/sh",
+        "so:libc.musl-aarch64.so.1",
+        "so:libffi.so.8",
+        "so:libintl.so.8",
+        "so:libmount.so.1",
+        "so:libpcre2-8.so.0",
+        "so:libz.so.1"
+      ],
+      "provides": [
+        "cmd:gapplication=2.86.3-r0",
+        "cmd:gdbus=2.86.3-r0",
+        "cmd:gi-compile-repository=2.86.3-r0",
+        "cmd:gi-decompile-typelib=2.86.3-r0",
+        "cmd:gi-inspect-typelib=2.86.3-r0",
+        "cmd:gio-querymodules=2.86.3-r0",
+        "cmd:gio=2.86.3-r0",
+        "cmd:glib-compile-schemas=2.86.3-r0",
+        "cmd:gsettings=2.86.3-r0",
+        "so:libgio-2.0.so.0=0.8600.3",
+        "so:libgirepository-2.0.so.0=0.8600.3",
+        "so:libglib-2.0.so.0=0.8600.3",
+        "so:libgmodule-2.0.so.0=0.8600.3",
+        "so:libgobject-2.0.so.0=0.8600.3",
+        "so:libgthread-2.0.so.0=0.8600.3"
+      ],
+      "sha256": "8b6f4681bf86f870b07e5752ef3e7d5feb1c8cfe84c7a9ee329155e5e9e3a13a"
+    },
+    {
+      "name": "glslang-libs",
+      "version": "1.4.321.0-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/glslang-libs-1.4.321.0-r0.apk",
+      "license": "BSD-3-Clause AND BSD-2-Clause AND MIT AND Apache-2.0 AND GPL-3.0-or-later",
+      "dependencies": [
+        "so:libSPIRV-Tools-opt.so",
+        "so:libSPIRV-Tools.so",
+        "so:libc.musl-aarch64.so.1",
+        "so:libstdc++.so.6"
+      ],
+      "provides": [
+        "so:libSPIRV.so.15=15.4.0",
+        "so:libSPVRemapper.so.15=15.4.0",
+        "so:libglslang-default-resource-limits.so.15=15.4.0",
+        "so:libglslang.so.15=15.4.0"
+      ],
+      "sha256": "230d338dc0bc6ce9efc008a90e944cbc506d3b012058d338a8605e7c33345f6e"
+    },
+    {
+      "name": "graphite2",
+      "version": "1.3.14-r6",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/graphite2-1.3.14-r6.apk",
+      "license": "LGPL-2.1-or-later OR MPL-1.1",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libgraphite2.so.3=3.2.1"
+      ],
+      "sha256": "b339e4580d1e9210df5b7194ec162fcbd301d511f71cc6631e9f727fa147fa75"
+    },
+    {
+      "name": "harfbuzz",
+      "version": "12.2.0-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/harfbuzz-12.2.0-r0.apk",
+      "license": "MIT",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:libfreetype.so.6",
+        "so:libglib-2.0.so.0",
+        "so:libgraphite2.so.3"
+      ],
+      "provides": [
+        "so:libharfbuzz.so.0=0.61220.0"
+      ],
+      "sha256": "1d5df0ff5ef983778643bccf248b78cc0d33e7d445e111c00c38fe1817121cd3"
+    },
+    {
+      "name": "hwdata-pci",
+      "version": "0.401-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/hwdata-pci-0.401-r0.apk",
+      "license": "GPL-2.0-or-later OR XFree86-1.1",
+      "dependencies": [],
+      "provides": [
+        "hwids-pci=20220101-r0"
+      ],
+      "sha256": "cfaf56560dde6b2fd554a58b9f67d62e60368f5d1d94de8ca695e5b8808c74e8"
+    },
+    {
+      "name": "json-c",
+      "version": "0.18-r1",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/json-c-0.18-r1.apk",
+      "license": "MIT",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libjson-c.so.5=5.4.0"
+      ],
+      "sha256": "8392ce4b0563f3f833334bfc58c1a3b9204978fb79fb65879d0e53dcb90d54c6"
+    },
+    {
+      "name": "lame-libs",
+      "version": "3.100-r5",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/lame-libs-3.100-r5.apk",
+      "license": "LGPL-2.0-or-later",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libmp3lame.so.0=0.0.0"
+      ],
+      "sha256": "d3750275875e83ac8374d64885af0753e7edc4529bb7d7161c2cc262d8ee419b"
+    },
+    {
+      "name": "lcms2",
+      "version": "2.19-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/lcms2-2.19-r0.apk",
+      "license": "MIT",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:liblcms2.so.2=2.0.19"
+      ],
+      "sha256": "28c36142aec7fab7fe05ba548183f935a68882c89e536fe43ba3973913cb09f6"
+    },
+    {
+      "name": "libSvtAv1Enc",
+      "version": "3.1.2-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/libSvtAv1Enc-3.1.2-r0.apk",
+      "license": "BSD-3-Clause-Clear",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libSvtAv1Enc.so.3=3.1.2"
+      ],
+      "sha256": "6b6ccc9d141a428af8b36ccbebcd685de7968e554bc9d8ccc915173d680f23ae"
+    },
+    {
+      "name": "libass",
+      "version": "0.17.4-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/libass-0.17.4-r0.apk",
+      "license": "ISC",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:libfontconfig.so.1",
+        "so:libfreetype.so.6",
+        "so:libfribidi.so.0",
+        "so:libharfbuzz.so.0",
+        "so:libunibreak.so.6"
+      ],
+      "provides": [
+        "so:libass.so.9=9.4.1"
+      ],
+      "sha256": "18ea2055672ad7a172c678d951351d5f411940aca32f645e33c770d67e6510e0"
+    },
+    {
+      "name": "libasyncns",
+      "version": "0.8-r4",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/libasyncns-0.8-r4.apk",
+      "license": "LGPL-2.0-or-later",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libasyncns.so.0=0.3.1"
+      ],
+      "sha256": "9df23f4a236124bf4938af7900b1df3a1fb3b430d82fbe4264b944608af0460c"
+    },
+    {
+      "name": "libblkid",
+      "version": "2.41.6-r1",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libblkid-2.41.6-r1.apk",
+      "license": "LGPL-2.1-or-later",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:libeconf.so.0"
+      ],
+      "provides": [
+        "so:libblkid.so.1=1.1.0"
+      ],
+      "sha256": "0372923ddcaa28ec8f97992d2a03338ab6dde89686727c6ee54c210725e84724"
+    },
+    {
+      "name": "libbluray",
+      "version": "1.4.0-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/libbluray-1.4.0-r0.apk",
+      "license": "LGPL-2.1-or-later",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:libudfread.so.3"
+      ],
+      "provides": [
+        "cmd:bd_info=1.4.0-r0",
+        "cmd:bd_list_titles=1.4.0-r0",
+        "cmd:bd_splice=1.4.0-r0",
+        "so:libbluray.so.3=3.0.0"
+      ],
+      "sha256": "3fcd17765f271e3c60f34e26bb68bae35061b061cde7bcb25e000c7afb16f03d"
+    },
+    {
+      "name": "libbsd",
+      "version": "0.12.2-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libbsd-0.12.2-r0.apk",
+      "license": "BSD-3-Clause",
+      "dependencies": [
+        "musl",
+        "so:libc.musl-aarch64.so.1",
+        "so:libmd.so.0"
+      ],
+      "provides": [
+        "so:libbsd.so.0=0.12.2"
+      ],
+      "sha256": "358715f27bfe492dcb11f3589c8f106c37071780f55adafc52b2c5cfd3771e4d"
+    },
+    {
+      "name": "libbz2",
+      "version": "1.0.8-r6",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libbz2-1.0.8-r6.apk",
+      "license": "bzip2-1.0.6",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libbz2.so.1=1.0.8"
+      ],
+      "sha256": "ccd478f4d5346a25911d4ee977690e2695e0ca3acf3e6b1a8c1300b2f4311e2f"
+    },
+    {
+      "name": "libcrypto3",
+      "version": "3.5.8-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libcrypto3-3.5.8-r0.apk",
+      "license": "Apache-2.0",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libcrypto.so.3=3"
+      ],
+      "sha256": "2be40da5877bce1780361cb58cc499bc17b9d747c0286dccad46c026f48c95f8"
+    },
+    {
+      "name": "libdav1d",
+      "version": "1.5.2-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libdav1d-1.5.2-r0.apk",
+      "license": "BSD-2-Clause",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libdav1d.so.7=7.0.0"
+      ],
+      "sha256": "1d2dd251af8b14a58f408e1a53543384fabac13831e1bb6cb25e7eae074f2ce5"
+    },
+    {
+      "name": "libdovi",
+      "version": "3.3.2-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/libdovi-3.3.2-r0.apk",
+      "license": "MIT",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:libgcc_s.so.1"
+      ],
+      "provides": [
+        "so:libdovi.so.3=3.3.2"
+      ],
+      "sha256": "6ad42d02c7ae48fd8c79e0a5f23874ae34bc3307f8210190f8ec0a7dc3b12e0f"
+    },
+    {
+      "name": "libdrm",
+      "version": "2.4.131-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libdrm-2.4.131-r0.apk",
+      "license": "MIT",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:libpciaccess.so.0"
+      ],
+      "provides": [
+        "so:libdrm.so.2=2.131.0",
+        "so:libdrm_amdgpu.so.1=1.131.0",
+        "so:libdrm_etnaviv.so.1=1.131.0",
+        "so:libdrm_exynos.so.1=1.131.0",
+        "so:libdrm_freedreno.so.1=1.131.0",
+        "so:libdrm_intel.so.1=1.131.0",
+        "so:libdrm_nouveau.so.2=2.131.0",
+        "so:libdrm_omap.so.1=1.131.0",
+        "so:libdrm_radeon.so.1=1.131.0",
+        "so:libdrm_tegra.so.0=0.131.0"
+      ],
+      "sha256": "74f98a36698cbeaa3220b92c37ebbe0d7df5295ae6a47fd53bda02bcc9dfb41d"
+    },
+    {
+      "name": "libeconf",
+      "version": "0.8.3-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libeconf-0.8.3-r0.apk",
+      "license": "MIT",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "cmd:econftool=0.8.3-r0",
+        "so:libeconf.so.0=0.8.3"
+      ],
+      "sha256": "d450d85a7ee3b9940639c0f6ea2f8b7feea821bbc3828256ec784437082aefde"
+    },
+    {
+      "name": "libexpat",
+      "version": "2.8.4-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libexpat-2.8.4-r0.apk",
+      "license": "MIT",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libexpat.so.1=1.12.4"
+      ],
+      "sha256": "bb8c839e63bc75dda85e422280791438fccfb17930f10216b5cf9c998d6a0b09"
+    },
+    {
+      "name": "libffi",
+      "version": "3.5.2-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libffi-3.5.2-r0.apk",
+      "license": "MIT",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libffi.so.8=8.2.0"
+      ],
+      "sha256": "ebf430b246a6b1167350431e2af59a09f4edbc42dc3e03f3b9d74800ba5f9e7f"
+    },
+    {
+      "name": "libflac",
+      "version": "1.4.3-r2",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libflac-1.4.3-r2.apk",
+      "license": "BSD-3-Clause AND GPL-2.0-or-later",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:libogg.so.0"
+      ],
+      "provides": [
+        "so:libFLAC.so.12=12.1.0"
+      ],
+      "sha256": "a68412ee71df8c03f18b46afd9c4bcac6291ee7edf5ae786e5997d070d95d6ea"
+    },
+    {
+      "name": "libgcc",
+      "version": "15.2.0-r2",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libgcc-15.2.0-r2.apk",
+      "license": "GPL-2.0-or-later AND LGPL-2.1-or-later",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libgcc_s.so.1=1"
+      ],
+      "sha256": "eaaafda78fde1c904e1741680ddea91649f051e29a343152c8a4327605704b0f"
+    },
+    {
+      "name": "libgomp",
+      "version": "15.2.0-r2",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libgomp-15.2.0-r2.apk",
+      "license": "GPL-2.0-or-later AND LGPL-2.1-or-later",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libgomp.so.1=1.0.0"
+      ],
+      "sha256": "d2989f9476a67085442d916c1e55ebe213e269f3221225b3285585f3e47a33af"
+    },
+    {
+      "name": "libhwy",
+      "version": "1.3.0-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/libhwy-1.3.0-r0.apk",
+      "license": "Apache-2.0",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:libgcc_s.so.1",
+        "so:libstdc++.so.6"
+      ],
+      "provides": [
+        "so:libhwy.so.1=1.3.0"
+      ],
+      "sha256": "d9255d34546b4602f79b1866ef1a38c53d66e14494768fe8aee4ab4454bc2e07"
+    },
+    {
+      "name": "libintl",
+      "version": "0.24.1-r1",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libintl-0.24.1-r1.apk",
+      "license": "LGPL-2.1-or-later",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libintl.so.8=8.4.3"
+      ],
+      "sha256": "291a89bbb0e511e9875ff7aa9d6d07dc9a2fec8bf94c2a686d1a9153b8c58903"
+    },
+    {
+      "name": "libjpeg-turbo",
+      "version": "3.1.2-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libjpeg-turbo-3.1.2-r0.apk",
+      "license": "BSD-3-Clause AND IJG AND Zlib",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libjpeg.so.8=8.3.2"
+      ],
+      "sha256": "9c6856085cc9a61f737fc821170bc04976d0a0b7958a1b76fbc5c6cc8f85d430"
+    },
+    {
+      "name": "libjxl",
+      "version": "0.11.2-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/libjxl-0.11.2-r0.apk",
+      "license": "Apache-2.0",
+      "dependencies": [
+        "so:libbrotlidec.so.1",
+        "so:libbrotlienc.so.1",
+        "so:libc.musl-aarch64.so.1",
+        "so:libhwy.so.1",
+        "so:liblcms2.so.2",
+        "so:libstdc++.so.6"
+      ],
+      "provides": [
+        "so:libjxl.so.0.11=0.11.2",
+        "so:libjxl_cms.so.0.11=0.11.2",
+        "so:libjxl_threads.so.0.11=0.11.2"
+      ],
+      "sha256": "bbdc3bf9413dafd171338e4de47a97e9d6bb8588a3935f8f69bd4fd8b0c9b5c8"
+    },
+    {
+      "name": "libltdl",
+      "version": "2.5.4-r2",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libltdl-2.5.4-r2.apk",
+      "license": "LGPL-2.0-or-later AND GPL-2.0-or-later",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libltdl.so.7=7.3.3"
+      ],
+      "sha256": "b27062095febb09b6becf613e666402c32e35106141aa51e95e499f045cf7abf"
+    },
+    {
+      "name": "libmd",
+      "version": "1.1.0-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libmd-1.1.0-r0.apk",
+      "license": "BSD-3-Clause AND BSD-2-Clause AND ISC AND Beerware AND Public Domain",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libmd.so.0=0.1.0"
+      ],
+      "sha256": "8818536cdc38dd3c252d6c6915f65ddd49390aa209cc7f70b87c446adedf820c"
+    },
+    {
+      "name": "libmount",
+      "version": "2.41.6-r1",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libmount-2.41.6-r1.apk",
+      "license": "LGPL-2.1-or-later",
+      "dependencies": [
+        "so:libblkid.so.1",
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libmount.so.1=1.1.0"
+      ],
+      "sha256": "81aa5a35ec63c681f2b4d585f66d8fc5f9c531711f2c3daadb9d7a8c58d086c8"
+    },
+    {
+      "name": "libogg",
+      "version": "1.3.6-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libogg-1.3.6-r0.apk",
+      "license": "BSD-3-Clause",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libogg.so.0=0.8.6"
+      ],
+      "sha256": "7c075055b7fc4280ecd26d120f6e84a40785c180af3697295c0d317e380e3c7a"
+    },
+    {
+      "name": "libopenmpt",
+      "version": "0.8.6-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/libopenmpt-0.8.6-r0.apk",
+      "license": "BSD-3-Clause",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:libgcc_s.so.1",
+        "so:libmpg123.so.0",
+        "so:libstdc++.so.6",
+        "so:libvorbis.so.0",
+        "so:libvorbisfile.so.3",
+        "so:libz.so.1"
+      ],
+      "provides": [
+        "so:libopenmpt.so.0=0.5.5"
+      ],
+      "sha256": "c292872810b485ed599aa3b204096fe11b802ed3534f00aa55984b05eaea1a2b"
+    },
+    {
+      "name": "libpciaccess",
+      "version": "0.18.1-r1",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libpciaccess-0.18.1-r1.apk",
+      "license": "X11",
+      "dependencies": [
+        "hwdata-pci",
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libpciaccess.so.0=0.11.1"
+      ],
+      "sha256": "1272723b4ce086956b9e46a771440a372e722a9b2571a82fd82506c471afd595"
+    },
+    {
+      "name": "libplacebo",
+      "version": "7.351.0-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/libplacebo-7.351.0-r0.apk",
+      "license": "LGPL-2.1-or-later",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:libdovi.so.3",
+        "so:libgcc_s.so.1",
+        "so:libglslang-default-resource-limits.so.15",
+        "so:libglslang.so.15",
+        "so:liblcms2.so.2",
+        "so:libshaderc_shared.so.1",
+        "so:libstdc++.so.6",
+        "so:libvulkan.so.1"
+      ],
+      "provides": [
+        "so:libplacebo.so.351=351"
+      ],
+      "sha256": "c4a5b4fdbf8d22ba1fc44050f5088b334a722b2cbc0ae67d7ee5c652d2d41b0c"
+    },
+    {
+      "name": "libpng",
+      "version": "1.6.58-r1",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libpng-1.6.58-r1.apk",
+      "license": "Libpng",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:libz.so.1"
+      ],
+      "provides": [
+        "so:libpng16.so.16=16.58.0"
+      ],
+      "sha256": "9d3b01de32cc90a2e7366e04a57eaf84e08688481a5badf6c7bd32d2890a31f6"
+    },
+    {
+      "name": "libpulse",
+      "version": "17.0-r5",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/libpulse-17.0-r5.apk",
+      "license": "LGPL-2.1-or-later",
+      "dependencies": [
+        "so:libX11-xcb.so.1",
+        "so:libX11.so.6",
+        "so:libasyncns.so.0",
+        "so:libc.musl-aarch64.so.1",
+        "so:libdbus-1.so.3",
+        "so:libintl.so.8",
+        "so:libltdl.so.7",
+        "so:liborc-0.4.so.0",
+        "so:libsndfile.so.1",
+        "so:libsoxr.so.0",
+        "so:libspeexdsp.so.1",
+        "so:libtdb.so.1",
+        "so:libxcb.so.1"
+      ],
+      "provides": [
+        "so:libpulse-simple.so.0=0.1.1",
+        "so:libpulse.so.0=0.24.3",
+        "so:libpulsecommon-17.0.so=0",
+        "so:libpulsecore-17.0.so=0",
+        "so:libpulsedsp.so=0"
+      ],
+      "sha256": "e057c9da96a516e1c891a6a2081e726c2dddd436c6522af903b381f149649eb8"
+    },
+    {
+      "name": "librist",
+      "version": "0.2.10-r1",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/librist-0.2.10-r1.apk",
+      "license": "BSD-2-Clause",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:libcjson.so.1",
+        "so:libmbedcrypto.so.16"
+      ],
+      "provides": [
+        "so:librist.so.4=4.3.1"
+      ],
+      "sha256": "b608b9fb4ba8df05edd9168908617c23f235acab25ecf4e9047eec44c8f7d0e2"
+    },
+    {
+      "name": "libsharpyuv",
+      "version": "1.6.0-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libsharpyuv-1.6.0-r0.apk",
+      "license": "BSD-3-Clause",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libsharpyuv.so.0=0.1.2"
+      ],
+      "sha256": "5b5009c66c47bd7a49a1b0eb236b526a14b2ed6c0802cb82d41eb6f9ea852a59"
+    },
+    {
+      "name": "libsndfile",
+      "version": "1.2.2-r2",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libsndfile-1.2.2-r2.apk",
+      "license": "LGPL-2.1-or-later",
+      "dependencies": [
+        "so:libFLAC.so.12",
+        "so:libasound.so.2",
+        "so:libc.musl-aarch64.so.1",
+        "so:libmp3lame.so.0",
+        "so:libmpg123.so.0",
+        "so:libogg.so.0",
+        "so:libopus.so.0",
+        "so:libvorbis.so.0",
+        "so:libvorbisenc.so.2"
+      ],
+      "provides": [
+        "cmd:sndfile-cmp=1.2.2-r2",
+        "cmd:sndfile-concat=1.2.2-r2",
+        "cmd:sndfile-convert=1.2.2-r2",
+        "cmd:sndfile-deinterleave=1.2.2-r2",
+        "cmd:sndfile-info=1.2.2-r2",
+        "cmd:sndfile-interleave=1.2.2-r2",
+        "cmd:sndfile-metadata-get=1.2.2-r2",
+        "cmd:sndfile-metadata-set=1.2.2-r2",
+        "cmd:sndfile-play=1.2.2-r2",
+        "cmd:sndfile-salvage=1.2.2-r2",
+        "so:libsndfile.so.1=1.0.37"
+      ],
+      "sha256": "38e8ca3c591500d030d78e3a03d1132a14eff6443132eca35fac858533b6d02e"
+    },
+    {
+      "name": "libsodium",
+      "version": "1.0.20-r1",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libsodium-1.0.20-r1.apk",
+      "license": "ISC",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libsodium.so.26=26.2.0"
+      ],
+      "sha256": "f15d9904844e168862d128459ebd734a484868957a308f861433c059a2c0a1a1"
+    },
+    {
+      "name": "libsrt",
+      "version": "1.5.3-r1",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/libsrt-1.5.3-r1.apk",
+      "license": "MPL-2.0",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:libcrypto.so.3",
+        "so:libgcc_s.so.1",
+        "so:libstdc++.so.6"
+      ],
+      "provides": [
+        "so:libsrt.so.1.5=1.5.3"
+      ],
+      "sha256": "f8e236a95a147c8eb02cfe60da0eb42c1bc651addfdbe7f47301cd6e23c3316a"
+    },
+    {
+      "name": "libssh",
+      "version": "0.11.4-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/libssh-0.11.4-r0.apk",
+      "license": "LGPL-2.1-or-later BSD-2-Clause",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:libcrypto.so.3",
+        "so:libz.so.1"
+      ],
+      "provides": [
+        "so:libssh.so.4=4.10.4"
+      ],
+      "sha256": "54df09b5035ba02d361c78439c7f908a8348d92767a754d4c6af405e64729055"
+    },
+    {
+      "name": "libssl3",
+      "version": "3.5.8-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libssl3-3.5.8-r0.apk",
+      "license": "Apache-2.0",
+      "dependencies": [
+        "libcrypto3=3.5.8-r0",
+        "so:libc.musl-aarch64.so.1",
+        "so:libcrypto.so.3"
+      ],
+      "provides": [
+        "so:libssl.so.3=3"
+      ],
+      "sha256": "77a8ef8f87a3fe6b621fd2c06bb983dea55013a3e67c60741df83f5221983247"
+    },
+    {
+      "name": "libstdc++",
+      "version": "15.2.0-r2",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libstdc++-15.2.0-r2.apk",
+      "license": "GPL-2.0-or-later AND LGPL-2.1-or-later",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:libgcc_s.so.1"
+      ],
+      "provides": [
+        "so:libstdc++.so.6=6.0.34"
+      ],
+      "sha256": "10d72e25f6fcc0f3d9fdd801c9bdaed81d6e836aa2b65b63f25d2d97f860a7d1"
+    },
+    {
+      "name": "libtheora",
+      "version": "1.2.0-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libtheora-1.2.0-r0.apk",
+      "license": "BSD-3-Clause",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:libogg.so.0"
+      ],
+      "provides": [
+        "so:libtheora.so.1=1.4.1",
+        "so:libtheoradec.so.2=2.1.1",
+        "so:libtheoraenc.so.2=2.2.1"
+      ],
+      "sha256": "569aa24369db6ae4e6805ce426753d5d2b25a0b8f16fe4f2e748939dceae3268"
+    },
+    {
+      "name": "libudfread",
+      "version": "1.2.0-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/libudfread-1.2.0-r0.apk",
+      "license": "LGPL-2.1-or-later",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libudfread.so.3=3.0.0"
+      ],
+      "sha256": "4f922424d661c4b31122b93fe17486d0dd774c77a093e8d3bf70e508f8822189"
+    },
+    {
+      "name": "libunibreak",
+      "version": "6.1-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/libunibreak-6.1-r0.apk",
+      "license": "Zlib",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libunibreak.so.6=6.0.1"
+      ],
+      "sha256": "d85109c171a9e0590313deb6c2cc72630e3b43880b25bdaedc6e4381ee9f59ee"
+    },
+    {
+      "name": "libva",
+      "version": "2.22.0-r1",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libva-2.22.0-r1.apk",
+      "license": "MIT",
+      "dependencies": [
+        "so:libX11-xcb.so.1",
+        "so:libX11.so.6",
+        "so:libXext.so.6",
+        "so:libXfixes.so.3",
+        "so:libc.musl-aarch64.so.1",
+        "so:libdrm.so.2",
+        "so:libwayland-client.so.0",
+        "so:libxcb-dri3.so.0",
+        "so:libxcb.so.1"
+      ],
+      "provides": [
+        "so:libva-drm.so.2=2.2200.0",
+        "so:libva-wayland.so.2=2.2200.0",
+        "so:libva-x11.so.2=2.2200.0",
+        "so:libva.so.2=2.2200.0"
+      ],
+      "sha256": "885705d305f0e38ce18878c8c7b6f10ee1f150b695e823124b28bd04b900cfaf"
+    },
+    {
+      "name": "libvdpau",
+      "version": "1.5-r4",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libvdpau-1.5-r4.apk",
+      "license": "MIT",
+      "dependencies": [
+        "so:libX11.so.6",
+        "so:libXext.so.6",
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libvdpau.so.1=1.0.0"
+      ],
+      "sha256": "7fc2fc001d573f9fa6081a77da7275856e816e0d4eb8b307ef01809cd82f4316"
+    },
+    {
+      "name": "libvorbis",
+      "version": "1.3.7-r2",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libvorbis-1.3.7-r2.apk",
+      "license": "BSD-3-Clause",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:libogg.so.0"
+      ],
+      "provides": [
+        "so:libvorbis.so.0=0.4.9",
+        "so:libvorbisenc.so.2=2.0.12",
+        "so:libvorbisfile.so.3=3.3.8"
+      ],
+      "sha256": "4884c5170e290d01e648381781130ca428e1e04238781fbe7d77d71853a12b2b"
+    },
+    {
+      "name": "libvpx",
+      "version": "1.15.2-r1",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/libvpx-1.15.2-r1.apk",
+      "license": "BSD-3-Clause",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libvpx.so.11=11.0.1"
+      ],
+      "sha256": "a11260530ea1cd1f39e263fe4a56ebf4c8743e52e1c6b5060986355e7d2b6320"
+    },
+    {
+      "name": "libwebp",
+      "version": "1.6.0-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libwebp-1.6.0-r0.apk",
+      "license": "BSD-3-Clause",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:libsharpyuv.so.0"
+      ],
+      "provides": [
+        "so:libwebp.so.7=7.2.0"
+      ],
+      "sha256": "808eac0eba50a5a7de86e280f4337281eace15a6b10301ee04de3d39f212cfb9"
+    },
+    {
+      "name": "libwebpmux",
+      "version": "1.6.0-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libwebpmux-1.6.0-r0.apk",
+      "license": "BSD-3-Clause",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:libwebp.so.7"
+      ],
+      "provides": [
+        "so:libwebpmux.so.3=3.1.2"
+      ],
+      "sha256": "e9a504ac218c00fa5c1fc83c7d5b94a3d26e2c2314404b3d101b22710bf752ec"
+    },
+    {
+      "name": "libx11",
+      "version": "1.8.12-r1",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libx11-1.8.12-r1.apk",
+      "license": "X11",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:libxcb.so.1"
+      ],
+      "provides": [
+        "so:libX11-xcb.so.1=1.0.0",
+        "so:libX11.so.6=6.4.0"
+      ],
+      "sha256": "7f53f6f26293abac468b9563f2a90bc9a34306ec8a677af23d01d7455e3db943"
+    },
+    {
+      "name": "libxau",
+      "version": "1.0.12-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libxau-1.0.12-r0.apk",
+      "license": "MIT",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libXau.so.6=6.0.0"
+      ],
+      "sha256": "ddfad479041b53e5f57a2fdfac12454993ae3937f6f893d67cd98cbd63abfcf0"
+    },
+    {
+      "name": "libxcb",
+      "version": "1.17.0-r1",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libxcb-1.17.0-r1.apk",
+      "license": "MIT",
+      "dependencies": [
+        "so:libXau.so.6",
+        "so:libXdmcp.so.6",
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libxcb-composite.so.0=0.0.0",
+        "so:libxcb-damage.so.0=0.0.0",
+        "so:libxcb-dbe.so.0=0.0.0",
+        "so:libxcb-dpms.so.0=0.0.0",
+        "so:libxcb-dri2.so.0=0.0.0",
+        "so:libxcb-dri3.so.0=0.1.0",
+        "so:libxcb-glx.so.0=0.0.0",
+        "so:libxcb-present.so.0=0.0.0",
+        "so:libxcb-randr.so.0=0.1.0",
+        "so:libxcb-record.so.0=0.0.0",
+        "so:libxcb-render.so.0=0.0.0",
+        "so:libxcb-res.so.0=0.0.0",
+        "so:libxcb-screensaver.so.0=0.0.0",
+        "so:libxcb-shape.so.0=0.0.0",
+        "so:libxcb-shm.so.0=0.0.0",
+        "so:libxcb-sync.so.1=1.0.0",
+        "so:libxcb-xf86dri.so.0=0.0.0",
+        "so:libxcb-xfixes.so.0=0.0.0",
+        "so:libxcb-xinerama.so.0=0.0.0",
+        "so:libxcb-xinput.so.0=0.1.0",
+        "so:libxcb-xkb.so.1=1.0.0",
+        "so:libxcb-xtest.so.0=0.0.0",
+        "so:libxcb-xv.so.0=0.0.0",
+        "so:libxcb-xvmc.so.0=0.0.0",
+        "so:libxcb.so.1=1.1.0"
+      ],
+      "sha256": "8609cadcd7af03c1aade3663fdf3bbe27e4180fe0edbe98d3f12f0ae6e95aedc"
+    },
+    {
+      "name": "libxdmcp",
+      "version": "1.1.5-r1",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libxdmcp-1.1.5-r1.apk",
+      "license": "MIT",
+      "dependencies": [
+        "so:libbsd.so.0",
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libXdmcp.so.6=6.0.0"
+      ],
+      "sha256": "f95a668a5b8888aadbee24e8ffb30f60e4d40cdf8ef61b35383e7ecf49182c66"
+    },
+    {
+      "name": "libxext",
+      "version": "1.3.6-r2",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libxext-1.3.6-r2.apk",
+      "license": "MIT",
+      "dependencies": [
+        "so:libX11.so.6",
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libXext.so.6=6.4.0"
+      ],
+      "sha256": "bb7e84c1d38e5dcdfdb56e543394469f9c884cb13e09f5e07986863a9bea62e7"
+    },
+    {
+      "name": "libxfixes",
+      "version": "6.0.2-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libxfixes-6.0.2-r0.apk",
+      "license": "MIT",
+      "dependencies": [
+        "so:libX11.so.6",
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libXfixes.so.3=3.1.0"
+      ],
+      "sha256": "01576ac10057b1c3a6ba1a1794af2a6357f4daceef34a01ac09a8b75f6fe9c07"
+    },
+    {
+      "name": "libxml2",
+      "version": "2.13.9-r1",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libxml2-2.13.9-r1.apk",
+      "license": "MIT",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:liblzma.so.5",
+        "so:libz.so.1"
+      ],
+      "provides": [
+        "so:libxml2.so.2=2.13.9"
+      ],
+      "sha256": "91d3e730edbd5214c501696725e7af9a93e12a9dd6a296e719dca2f3de0697d5"
+    },
+    {
+      "name": "libzmq",
+      "version": "4.3.5-r2",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/libzmq-4.3.5-r2.apk",
+      "license": "MPL-2.0",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:libgcc_s.so.1",
+        "so:libsodium.so.26",
+        "so:libstdc++.so.6"
+      ],
+      "provides": [
+        "so:libzmq.so.5=5.2.5"
+      ],
+      "sha256": "331c1cdfc30ae948bdbce4d4a35c3004e9a8789b06753dbcb8a68a23df626123"
+    },
+    {
+      "name": "lilv-libs",
+      "version": "0.24.26-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/lilv-libs-0.24.26-r0.apk",
+      "license": "ISC",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:libserd-0.so.0",
+        "so:libsord-0.so.0",
+        "so:libsratom-0.so.0",
+        "so:libzix-0.so.0"
+      ],
+      "provides": [
+        "so:liblilv-0.so.0=0.24.26"
+      ],
+      "sha256": "dab00639b4e8f7ac7c2b35de5e443df4a1de3ae9d6dfc4c4fe753b88b4c0408b"
+    },
+    {
+      "name": "mbedtls",
+      "version": "3.6.7-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/mbedtls-3.6.7-r0.apk",
+      "license": "Apache-2.0 OR GPL-2.0-or-later",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libmbedcrypto.so.16=3.6.7",
+        "so:libmbedtls.so.21=3.6.7",
+        "so:libmbedx509.so.7=3.6.7"
+      ],
+      "sha256": "50c8dab46733bf37e960b1ce692d16fe1b23c17ed4f5c22190d6ae58af1101bf"
+    },
+    {
+      "name": "mpg123-libs",
+      "version": "1.33.3-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/mpg123-libs-1.33.3-r0.apk",
+      "license": "LGPL-2.1-only",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libmpg123.so.0=0.49.4",
+        "so:libout123.so.0=0.5.2",
+        "so:libsyn123.so.0=0.2.3"
+      ],
+      "sha256": "5e25a629550cb8239f94a3ccdc57c314908ec62c00d774f90f8730327d3c41bc"
+    },
+    {
+      "name": "musl",
+      "version": "1.2.5-r23",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/musl-1.2.5-r23.apk",
+      "license": "MIT",
+      "dependencies": [],
+      "provides": [
+        "so:libc.musl-aarch64.so.1=1"
+      ],
+      "sha256": "6a3edd924ead1fad88a69e28c5775809af3026b322f58428001cd02fedc5299e"
+    },
+    {
+      "name": "numactl",
+      "version": "2.0.18-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/numactl-2.0.18-r0.apk",
+      "license": "LGPL-2.1-only",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libnuma.so.1=1.0.0"
+      ],
+      "sha256": "3a5f79cb088113112b3a968f315ef5d4d8f62ff6d1a3ac6d6a33ddaa1007d8e0"
+    },
+    {
+      "name": "opus",
+      "version": "1.5.2-r1",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/opus-1.5.2-r1.apk",
+      "license": "BSD-3-Clause",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libopus.so.0=0.10.1"
+      ],
+      "sha256": "755820af1c649f03cbee0a54238e0ce787d7941a436cd9222d110eb7a600cd11"
+    },
+    {
+      "name": "orc",
+      "version": "0.4.41-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/orc-0.4.41-r0.apk",
+      "license": "BSD-2-Clause",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:liborc-0.4.so.0=0.41.0"
+      ],
+      "sha256": "247593bcc01a6847ec2a588e684fbf589690ce16f99141a37cea1f00a1ae687f"
+    },
+    {
+      "name": "pcre2",
+      "version": "10.48-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/pcre2-10.48-r0.apk",
+      "license": "BSD-3-Clause",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libpcre2-8.so.0=0.16.0",
+        "so:libpcre2-posix.so.3=3.0.8"
+      ],
+      "sha256": "b031774759cdfef446026a71623cb59d03865134141c395d2ab55ecacdcfd787"
+    },
+    {
+      "name": "rav1e-libs",
+      "version": "0.8.1-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/rav1e-libs-0.8.1-r0.apk",
+      "license": "BSD-2-Clause custom",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:libgcc_s.so.1"
+      ],
+      "provides": [
+        "so:librav1e.so.0.8=0.8.1"
+      ],
+      "sha256": "8941d1b706ab8340c1a003f93de658539fc4e4dcf7f60ec719d7ca3c0f64a24d"
+    },
+    {
+      "name": "serd-libs",
+      "version": "0.32.4-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/serd-libs-0.32.4-r0.apk",
+      "license": "ISC",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libserd-0.so.0=0.32.4"
+      ],
+      "sha256": "fb09ab09286f28eb242960f46e1cc8bb1bb1b8cc072ad4fd0f5ed8306e1999e0"
+    },
+    {
+      "name": "shaderc",
+      "version": "2025.3-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/shaderc-2025.3-r0.apk",
+      "license": "Apache-2.0",
+      "dependencies": [
+        "so:libSPIRV-Tools-opt.so",
+        "so:libSPIRV-Tools.so",
+        "so:libc.musl-aarch64.so.1",
+        "so:libgcc_s.so.1",
+        "so:libglslang.so.15",
+        "so:libstdc++.so.6"
+      ],
+      "provides": [
+        "cmd:glslc=2025.3-r0",
+        "so:libshaderc_shared.so.1=1"
+      ],
+      "sha256": "3e3707b21c5536496041a1895fd90260918ac2f4a4aad70d2c5118884ed5066c"
+    },
+    {
+      "name": "sord-libs",
+      "version": "0.16.18-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/sord-libs-0.16.18-r0.apk",
+      "license": "ISC",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:libserd-0.so.0",
+        "so:libzix-0.so.0"
+      ],
+      "provides": [
+        "so:libsord-0.so.0=0.16.18"
+      ],
+      "sha256": "6f95c7f43b4a571df84e87ce80f5d64015105f65d505c053a228e01814f6f406"
+    },
+    {
+      "name": "soxr",
+      "version": "0.1.3-r7",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/soxr-0.1.3-r7.apk",
+      "license": "LGPL-2.1-or-later",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:libgomp.so.1"
+      ],
+      "provides": [
+        "so:libsoxr-lsr.so.0=0.1.9",
+        "so:libsoxr.so.0=0.1.2"
+      ],
+      "sha256": "3e64c5cb7c43b9f3ae0e577d5e3542d772d89e18c0e740f616e0e978f5cbd2d0"
+    },
+    {
+      "name": "speexdsp",
+      "version": "1.2.1-r2",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/speexdsp-1.2.1-r2.apk",
+      "license": "BSD-3-Clause",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libspeexdsp.so.1=1.5.2"
+      ],
+      "sha256": "5993ab0e01e125ea0c183096d07012f0e1e6571d1321c41a554aa4750f121c77"
+    },
+    {
+      "name": "spirv-tools",
+      "version": "1.4.321.0-r1",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/spirv-tools-1.4.321.0-r1.apk",
+      "license": "Apache-2.0",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:libstdc++.so.6"
+      ],
+      "provides": [
+        "cmd:spirv-as=1.4.321.0-r1",
+        "cmd:spirv-cfg=1.4.321.0-r1",
+        "cmd:spirv-dis=1.4.321.0-r1",
+        "cmd:spirv-lesspipe.sh=1.4.321.0-r1",
+        "cmd:spirv-link=1.4.321.0-r1",
+        "cmd:spirv-lint=1.4.321.0-r1",
+        "cmd:spirv-objdump=1.4.321.0-r1",
+        "cmd:spirv-opt=1.4.321.0-r1",
+        "cmd:spirv-reduce=1.4.321.0-r1",
+        "cmd:spirv-val=1.4.321.0-r1",
+        "so:libSPIRV-Tools-diff.so=0",
+        "so:libSPIRV-Tools-link.so=0",
+        "so:libSPIRV-Tools-lint.so=0",
+        "so:libSPIRV-Tools-opt.so=0",
+        "so:libSPIRV-Tools-reduce.so=0",
+        "so:libSPIRV-Tools-shared.so=0",
+        "so:libSPIRV-Tools.so=0"
+      ],
+      "sha256": "6bcbe672ebccb7b38d64ad4d7f038b2de7253bfa39e0690aa67c0ac64c9b5451"
+    },
+    {
+      "name": "sratom",
+      "version": "0.6.18-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/sratom-0.6.18-r0.apk",
+      "license": "ISC",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:libserd-0.so.0",
+        "so:libsord-0.so.0"
+      ],
+      "provides": [
+        "so:libsratom-0.so.0=0.6.18"
+      ],
+      "sha256": "c6f41109a9e6ca874995378de0e98134fd15b190cc8ed7031fc036d48449892f"
+    },
+    {
+      "name": "tdb-libs",
+      "version": "1.4.14-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/tdb-libs-1.4.14-r0.apk",
+      "license": "LGPL-3.0-or-later",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libtdb.so.1=1.4.14"
+      ],
+      "sha256": "c57443a97c877af254bdc8edbeefe23b1d55ed41746690656cc6ac448c14cf9b"
+    },
+    {
+      "name": "v4l-utils-libs",
+      "version": "1.32.0-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/v4l-utils-libs-1.32.0-r0.apk",
+      "license": "LGPL-2.0-or-later",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:libgcc_s.so.1",
+        "so:libjpeg.so.8",
+        "so:libjson-c.so.5",
+        "so:libstdc++.so.6"
+      ],
+      "provides": [
+        "so:libv4l1.so.0=0.0.0",
+        "so:libv4l2.so.0=0.0.0",
+        "so:libv4l2rds.so.0=0.0.0",
+        "so:libv4lconvert.so.0=0.0.0"
+      ],
+      "sha256": "cbafbba4128852eea73282352f0411413d4bede3cb0eaf7fd4828c33acdf8d2a"
+    },
+    {
+      "name": "vidstab",
+      "version": "1.1.1-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/vidstab-1.1.1-r0.apk",
+      "license": "GPL-2.0-or-later",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:libgomp.so.1"
+      ],
+      "provides": [
+        "so:libvidstab.so.1.2=1.2"
+      ],
+      "sha256": "749fb27cd26643ef717a625044549e011041eefe812b9397677f086bb307d0dd"
+    },
+    {
+      "name": "vulkan-loader",
+      "version": "1.4.321.0-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/vulkan-loader-1.4.321.0-r0.apk",
+      "license": "Apache-2.0",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libvulkan.so.1=1.4.321"
+      ],
+      "sha256": "2375399ea105049aaf9b7784561fa80d362c506fbb34ba7300e3f432fa661afe"
+    },
+    {
+      "name": "wayland-libs-client",
+      "version": "1.24.0-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/wayland-libs-client-1.24.0-r0.apk",
+      "license": "MIT",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:libffi.so.8"
+      ],
+      "provides": [
+        "so:libwayland-client.so.0=0.24.0"
+      ],
+      "sha256": "47634dcc2befcae378f9f60681d2af1864db85e57f65e11a3557a43f77911073"
+    },
+    {
+      "name": "x264-libs",
+      "version": "0.164.3108-r1",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/x264-libs-0.164.3108-r1.apk",
+      "license": "GPL-2.0-or-later",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libx264.so.164=164"
+      ],
+      "sha256": "f1eef99ea412263cc9d1006bc3d0b870866b46685e9afdeff97894b6a14eecc6"
+    },
+    {
+      "name": "x265-libs",
+      "version": "4.1-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/x265-libs-4.1-r0.apk",
+      "license": "GPL-2.0-or-later",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:libnuma.so.1",
+        "so:libstdc++.so.6"
+      ],
+      "provides": [
+        "so:libx265.so.215=215"
+      ],
+      "sha256": "b7e82e876f3fb861f40af71fdc3f569c9043d96fe90ec22db28156236a9264f2"
+    },
+    {
+      "name": "xvidcore",
+      "version": "1.3.7-r2",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/xvidcore-1.3.7-r2.apk",
+      "license": "GPL-2.0-or-later",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libxvidcore.so.4=4.3"
+      ],
+      "sha256": "ec7fb9f53d922cd3fe035d6234c14a1a70bf2e18582046fd6251fcee43d29934"
+    },
+    {
+      "name": "xz-libs",
+      "version": "5.8.4-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/xz-libs-5.8.4-r0.apk",
+      "license": "GPL-2.0-or-later AND 0BSD AND Public-Domain AND LGPL-2.1-or-later",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:liblzma.so.5=5.8.4"
+      ],
+      "sha256": "55cec0880e1d06049147cd295a7c8a2909a668fc58a00c187741f3a16c25c55d"
+    },
+    {
+      "name": "zimg",
+      "version": "3.0.6-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/zimg-3.0.6-r0.apk",
+      "license": "WTFPL",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1",
+        "so:libgcc_s.so.1",
+        "so:libstdc++.so.6"
+      ],
+      "provides": [
+        "so:libzimg.so.2=2.0.0"
+      ],
+      "sha256": "10a135bf7ff8ebd64c10fe4bfe9e881d4f352a2608c7cdc56f2b37b2694c5f5c"
+    },
+    {
+      "name": "zix-libs",
+      "version": "0.6.2-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/community/aarch64/zix-libs-0.6.2-r0.apk",
+      "license": "ISC",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libzix-0.so.0=0.6.2"
+      ],
+      "sha256": "d040b7604cc6e024c1902324323f8204bf9c3cb9aae69c3c338af105eef76333"
+    },
+    {
+      "name": "zlib",
+      "version": "1.3.2-r0",
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/zlib-1.3.2-r0.apk",
+      "license": "Zlib",
+      "dependencies": [
+        "so:libc.musl-aarch64.so.1"
+      ],
+      "provides": [
+        "so:libz.so.1=1.3.2"
+      ],
+      "sha256": "ecda4cc94fd18f90182f1d3a615889df5e0db9cf78926d11627dd23e06d2e6e8"
+    }
+  ]
+}

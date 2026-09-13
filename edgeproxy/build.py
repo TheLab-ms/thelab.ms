@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Cross-build a self-contained linux/arm64 RouterOS image without Docker.
+"""Build an Alpine linux/arm64 RouterOS archive using Python 3.12+, Go and curl.
 
-Host requirements: Python 3.12+, Go 1.25+, Zig 0.15+, make, Perl, cc, curl.
-Only source/data downloads are executed through these existing host tools.
+Only edgeproxy is compiled. Target runtime packages are downloaded, verified
+against build-packages.json, and unpacked without executing target programs.
 """
 
 import argparse
@@ -13,7 +13,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shlex
 import shutil
 import struct
 import subprocess
@@ -23,25 +22,8 @@ import tempfile
 
 
 HERE = Path(__file__).resolve().parent
-SOURCES = {
-    "ffmpeg-8.0.1.tar.xz": (
-        "https://ffmpeg.org/releases/ffmpeg-8.0.1.tar.xz",
-        "05ee0b03119b45c0bdb4df654b96802e909e0a752f72e4fe3794f487229e5a41",
-    ),
-    "openssl-3.5.5.tar.gz": (
-        "https://www.openssl.org/source/openssl-3.5.5.tar.gz",
-        "b28c91532a8b65a1f983b4c28b7488174e4a01008e29ce8e69bd789f28bc2a89",
-    ),
-    "cacert-2025-12-02.pem": (
-        "https://curl.se/ca/cacert-2025-12-02.pem",
-        "f1407d974c5ed87d544bd931a278232e13925177e239fca370619aba63c757b4",
-    ),
-}
-
-
-def run(args, cwd=HERE, env=None, log=None):
-    subprocess.run(args, cwd=cwd, env=env, check=True,
-                   stdout=log, stderr=subprocess.STDOUT if log else None)
+LOCK = HERE / "build-packages.json"
+ALPINE = "https://dl-cdn.alpinelinux.org/alpine/v3.23"
 
 
 def output(args, env=None):
@@ -54,7 +36,7 @@ def digest(path):
 
 
 def select_go(explicit):
-    # Do not let an older Go launcher silently install another toolchain.
+    # Never let an older Go launcher silently install another toolchain.
     env = {**os.environ, "GOTOOLCHAIN": "local", "GOWORK": "off"}
     env.pop("GOROOT", None)
     launcher = explicit or shutil.which("go")
@@ -74,158 +56,199 @@ def select_go(explicit):
     raise RuntimeError("No installed Go 1.25+ found; use --go /path/to/go")
 
 
-def download(cache, name):
-    url, expected = SOURCES[name]
-    target = cache / name
+def fetch(url, path):
+    subprocess.run(["curl", "--fail", "--location", "--silent", "--show-error",
+                    "--retry", "3", "--connect-timeout", "30", "--max-time", "600",
+                    "--proto", "=https", "--proto-redir", "=https", "--output", str(path), url], check=True)
+
+
+def download(cache, package):
+    target = cache / (package["url"].rsplit("/", 1)[1])
     if not target.exists():
-        print(f"Downloading {name}", flush=True)
+        print(f"Downloading {target.name}", flush=True)
         with tempfile.TemporaryDirectory(dir=cache) as work:
-            part = Path(work) / name
-            run(["curl", "--fail", "--location", "--silent", "--show-error",
-                 "--retry", "3", "--connect-timeout", "30", "--max-time", "600",
-                 "--proto", "=https", "--proto-redir", "=https", "--output", str(part), url])
-            if digest(part) != expected:
-                raise RuntimeError(f"SHA-256 mismatch downloading {name}")
+            part = Path(work) / target.name
+            fetch(package["url"], part)
+            if digest(part) != package["sha256"]:
+                raise RuntimeError(f"SHA-256 mismatch downloading {target.name}")
             part.replace(target)
-    if digest(target) != expected:
+    if digest(target) != package["sha256"]:
         raise RuntimeError(f"SHA-256 mismatch in {target}; remove it and retry")
     return target
 
 
-def extract(archive, destination):
-    with tarfile.open(archive) as source:
-        source.extractall(destination, filter="data")
+def update_lock(cache):
+    """Explicit maintenance operation: resolve one Alpine branch, then pin bytes."""
+    packages, providers = {}, {}
+    with tempfile.TemporaryDirectory(dir=cache) as temp:
+        for repo in ("main", "community"):
+            index = Path(temp) / f"{repo}.tar.gz"
+            fetch(f"{ALPINE}/{repo}/aarch64/APKINDEX.tar.gz", index)
+            with tarfile.open(index, ignore_zeros=True) as tar:
+                text = tar.extractfile("APKINDEX").read().decode()
+            for record in text.strip().split("\n\n"):
+                fields = dict(line.split(":", 1) for line in record.splitlines() if ":" in line)
+                name = fields["P"]
+                package = {"name": name, "version": fields["V"],
+                           "url": f"{ALPINE}/{repo}/aarch64/{name}-{fields['V']}.apk",
+                           "license": fields.get("L", ""),
+                           "dependencies": fields.get("D", "").split(),
+                           "provides": fields.get("p", "").split()}
+                packages[name] = package
+                for provided in package["provides"]:
+                    providers.setdefault(re.split(r"[=<>~]", provided)[0], []).append(name)
+        selected = {}
+
+        def resolve(dependency):
+            if dependency.startswith("!"):
+                return
+            name = re.split(r"[=<>~]", dependency)[0]
+            if name == "/bin/sh":
+                name = "busybox-binsh"
+            if name not in packages:
+                choices = providers.get(name, [])
+                if len(choices) != 1:
+                    raise RuntimeError(f"Cannot uniquely resolve {dependency}: {choices}")
+                name = choices[0]
+            if name in selected:
+                return
+            package = packages[name]
+            selected[name] = package
+            for child in package["dependencies"]:
+                resolve(child)
+
+        # BusyBox provides a useful RouterOS console; the bundle needs no CA trigger.
+        for name in ("ffmpeg", "ca-certificates-bundle", "busybox", "busybox-binsh"):
+            resolve(name)
+        for package in sorted(selected.values(), key=lambda p: p["name"]):
+            target = cache / package["url"].rsplit("/", 1)[1]
+            print(f"Pinning {target.name}", flush=True)
+            # Refresh from HTTPS when updating the lock, rather than trusting cache bytes.
+            part = Path(temp) / target.name
+            fetch(package["url"], part)
+            package["sha256"] = digest(part)
+            part.replace(target)
+        LOCK.write_text(json.dumps({"alpine": "3.23", "architecture": "aarch64",
+                                    "packages": sorted(selected.values(), key=lambda p: p["name"])}, indent=2) + "\n")
+    print(f"Pinned {len(selected)} runtime packages in {LOCK}")
 
 
-def write(path, contents, mode=0o644):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(contents.encode() if isinstance(contents, str) else contents)
-    path.chmod(mode)
+def unpack_apk(archive, root):
+    # APK v2 has concatenated gzip/tar streams (signature, control, payload).
+    # ignore_zeros reads all streams; package scripts and metadata are not executed.
+    with tarfile.open(archive, ignore_zeros=True) as tar:
+        for member in tar:
+            name = member.name.removeprefix("./")
+            if not name or name.startswith("."):
+                continue
+            member.name = name
+            # APK links are rooted in the target filesystem, never in the host.
+            if member.issym() and member.linkname.startswith("/"):
+                member.linkname = os.path.relpath(member.linkname.lstrip("/"), os.path.dirname(name) or ".")
+            if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
+                raise RuntimeError(f"Unexpected special file in {archive}: {name}")
+            tar.extract(member, root, filter="data")
 
 
-def wrappers(directory, zig):
-    for name, command in {"cc": "cc -target aarch64-linux-musl -mcpu=generic",
-                          "ar": "ar", "ranlib": "ranlib"}.items():
-        write(directory / f"zig-{name}",
-              f'#!/bin/sh\nexec {shlex.quote(zig)} {command} "$@"\n', 0o755)
-
-
-def check_static_arm64(path):
-    """Check ELF headers on the host; never execute a target binary to inspect it."""
+def check_arm64(path, static=False):
     data = path.read_bytes()
     if data[:6] != b"\x7fELF\x02\x01" or struct.unpack_from("<H", data, 18)[0] != 183:
         raise RuntimeError(f"{path} is not a little-endian ARM64 ELF executable")
+    if static:
+        phoff = struct.unpack_from("<Q", data, 32)[0]
+        phsize, phnum = struct.unpack_from("<HH", data, 54)
+        for index in range(phnum):
+            if struct.unpack_from("<I", data, phoff + index * phsize)[0] == 3:
+                raise RuntimeError(f"{path} requires a dynamic loader")
+
+
+def elf_dependencies(path):
+    """Read ELF64 dynamic metadata without host readelf/ldd or target execution."""
+    check_arm64(path)
+    data = path.read_bytes()
     phoff = struct.unpack_from("<Q", data, 32)[0]
     phsize, phnum = struct.unpack_from("<HH", data, 54)
-    for index in range(phnum):
-        kind, _, offset, _, _, size = struct.unpack_from("<IIQQQQ", data, phoff + index * phsize)
-        if kind == 3:  # PT_INTERP
-            raise RuntimeError(f"{path} requires a dynamic loader")
-        if kind == 2:  # PT_DYNAMIC: static PIE is fine, DT_NEEDED is not.
-            for entry in range(offset, offset + size, 16):
-                if struct.unpack_from("<q", data, entry)[0] == 1:
-                    raise RuntimeError(f"{path} requires shared libraries")
+    segments = [struct.unpack_from("<IIQQQQQQ", data, phoff + i * phsize) for i in range(phnum)]
+    interpreter, entries = None, []
+    for kind, _, offset, _, _, size, _, _ in segments:
+        if kind == 3:
+            interpreter = data[offset:offset + size].rstrip(b"\0").decode()
+        elif kind == 2:
+            for pos in range(offset, offset + size, 16):
+                tag, value = struct.unpack_from("<qQ", data, pos)
+                if tag == 0:
+                    break
+                entries.append((tag, value))
+    strings = next((value for tag, value in entries if tag == 5), None)
+    if strings is None:
+        return interpreter, [], []
+    base = next(offset + strings - addr for kind, _, offset, addr, _, size, _, _ in segments
+                if kind == 1 and addr <= strings < addr + size)
+
+    def string(index):
+        start = base + index
+        return data[start:data.index(b"\0", start)].decode()
+
+    needed = [string(value) for tag, value in entries if tag == 1]
+    paths = [part for tag, value in entries if tag in (15, 29) for part in string(value).split(":")]
+    return interpreter, needed, paths
 
 
-def build_ffmpeg(cache, archives, zig, jobs):
-    key = hashlib.sha256(Path(__file__).read_bytes() + output([zig, "version"]).encode()).hexdigest()[:16]
-    result = cache / f"ffmpeg-arm64-{key}"
-    if (result / "ffmpeg").exists():
-        check_static_arm64(result / "ffmpeg")
-        print("Using cached ARM64 FFmpeg", flush=True)
-        return result
-    log_path = cache / "ffmpeg-build.log"
-    print(f"Cross-compiling OpenSSL and FFmpeg (log: {log_path})", flush=True)
-    with tempfile.TemporaryDirectory(prefix="native-", dir=cache) as temp, log_path.open("w") as log:
-        work = Path(temp)
-        extract(archives["openssl-3.5.5.tar.gz"], work)
-        extract(archives["ffmpeg-8.0.1.tar.xz"], work)
-        ssl = work / "openssl-3.5.5"
-        ff = work / "ffmpeg-8.0.1"
-        prefix = work / "ssl"
-        env = os.environ.copy()
-        # Prevent Homebrew headers/libraries from leaking into the target build.
-        for name in ("CFLAGS", "CPPFLAGS", "CXXFLAGS", "LDFLAGS", "CPATH",
-                     "LIBRARY_PATH", "SDKROOT", "MACOSX_DEPLOYMENT_TARGET"):
-            env.pop(name, None)
-        env.update(CC="./zig-cc", AR="./zig-ar", RANLIB="./zig-ranlib")
-        wrappers(ssl, zig)
-        run(["perl", "Configure", "linux-aarch64", "no-shared", "no-tests", "no-apps",
-             "no-asm", "no-module", "no-dso", f"--prefix={prefix}", "--libdir=lib",
-             "--openssldir=/etc/ssl"], ssl, env, log)
-        run(["make", f"-j{jobs}", "build_libs"], ssl, env, log)
-        run(["make", "install_dev"], ssl, env, log)
-        wrappers(ff, zig)
-        run(["sh", "configure", "--target-os=linux", "--arch=aarch64", "--enable-cross-compile",
-             "--cc=./zig-cc", "--ar=./zig-ar", "--ranlib=./zig-ranlib", "--host-cc=cc",
-             "--pkg-config=false", "--disable-autodetect", "--disable-shared", "--enable-static",
-             "--disable-asm", "--disable-debug", "--disable-doc", "--disable-ffplay",
-             "--disable-ffprobe", "--disable-everything", "--enable-ffmpeg", "--enable-network",
-             "--enable-openssl", "--enable-protocol=file,pipe,tcp,tls,udp,rtp",
-             "--enable-demuxer=rtsp,rtp,sdp,h264,hevc,mjpeg",
-             "--enable-parser=h264,hevc,mjpeg", "--enable-decoder=h264,hevc,mjpeg",
-             "--enable-encoder=mjpeg", "--enable-muxer=mpjpeg",
-             "--enable-filter=scale,format,fps,null", "--enable-swscale",
-             f"--extra-cflags=-I{shlex.quote(str(prefix / 'include'))}",
-             f"--extra-ldflags=-static -L{shlex.quote(str(prefix / 'lib'))}"], ff, env, log)
-        required = ("OPENSSL", "TLS_PROTOCOL", "RTSP_DEMUXER", "H264_DECODER", "HEVC_DECODER",
-                    "MJPEG_ENCODER", "MPJPEG_MUXER", "SCALE_FILTER", "FPS_FILTER")
-        config = (ff / "config.h").read_text() + (ff / "config_components.h").read_text()
-        for feature in required:
-            if f"#define CONFIG_{feature} 1" not in config:
-                raise RuntimeError(f"FFmpeg feature {feature} was not enabled; see {log_path}")
-        run(["make", f"-j{jobs}", "ffmpeg"], ff, env, log)
-        check_static_arm64(ff / "ffmpeg")
-        staged = work / "result"
-        staged.mkdir()
-        shutil.copy2(ff / "ffmpeg", staged / "ffmpeg")
-        for name in ("COPYING.LGPLv2.1", "COPYING.LGPLv3", "LICENSE.md"):
-            shutil.copy2(ff / name, staged / f"ffmpeg-{name}")
-        shutil.copy2(ssl / "LICENSE.txt", staged / "openssl-LICENSE.txt")
-        shutil.copy2(ff / "config.h", staged / "ffmpeg-config.h")
-        shutil.copy2(ff / "config_components.h", staged / "ffmpeg-config_components.h")
-        staged.replace(result)
-    return result
-
-
-def tar_add(archive, name, data=b"", mode=0o644, directory=False, uid=0):
-    entry = tarfile.TarInfo(name)
-    entry.mode, entry.uid, entry.gid = mode, uid, uid
-    entry.type = tarfile.DIRTYPE if directory else tarfile.REGTYPE
-    entry.size = 0 if directory else len(data)
-    archive.addfile(entry, None if directory else io.BytesIO(data))
+def check_runtime(root):
+    pending = [root / name for name in ("usr/local/bin/conwayedge", "usr/bin/ffmpeg", "bin/busybox")]
+    checked = set()
+    while pending:
+        path = pending.pop().resolve()
+        if not path.is_relative_to(root.resolve()):
+            raise RuntimeError(f"Runtime link escapes image: {path}")
+        if path in checked:
+            continue
+        checked.add(path)
+        interpreter, needed, paths = elf_dependencies(path)
+        if interpreter:
+            pending.append(root / interpreter.lstrip("/"))
+        search = []
+        for directory in paths:
+            directory = directory.replace("${ORIGIN}", str(path.parent)).replace("$ORIGIN", str(path.parent))
+            candidate = Path(directory)
+            search.append(candidate if candidate.is_relative_to(root) else root / directory.lstrip("/"))
+        search += [root / "lib", root / "usr/lib"]
+        for library in needed:
+            candidate = next((directory / library for directory in search if (directory / library).is_file()), None)
+            if candidate is None:
+                raise RuntimeError(f"Missing runtime library {library} needed by {path.relative_to(root)}")
+            pending.append(candidate)
+    print(f"Verified ARM64 loader/library closure ({len(checked)} ELF files)", flush=True)
 
 
 def json_bytes(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 
 
-def package(binary, native, certificates, destination, work, go_version):
+def tar_add(archive, name, data):
+    entry = tarfile.TarInfo(name)
+    entry.mode, entry.size = 0o644, len(data)
+    archive.addfile(entry, io.BytesIO(data))
+
+
+def package(root, destination, work):
     layer = work / "layer.tar"
-    with tarfile.open(layer, "w", format=tarfile.USTAR_FORMAT) as tar:
-        for directory in ("usr", "usr/local", "usr/local/bin", "usr/share", "usr/share/conwayedge",
-                          "usr/share/conwayedge/licenses", "etc", "etc/ssl", "etc/ssl/certs", "dev", "proc"):
-            tar_add(tar, directory, mode=0o755, directory=True)
-        tar_add(tar, "data", mode=0o700, directory=True, uid=65532)
-        tar_add(tar, "tmp", mode=0o1777, directory=True)
-        tar_add(tar, "usr/local/bin/conwayedge", binary.read_bytes(), 0o755)
-        tar_add(tar, "usr/local/bin/ffmpeg", (native / "ffmpeg").read_bytes(), 0o755)
-        tar_add(tar, "etc/ssl/certs/ca-certificates.crt", certificates.read_bytes())
-        tar_add(tar, "etc/passwd", b"conwayedge:x:65532:65532:conwayedge:/data:/sbin/nologin\n")
-        tar_add(tar, "etc/group", b"conwayedge:x:65532:\n")
-        for path in sorted(native.iterdir()):
-            if path.name != "ffmpeg":
-                tar_add(tar, f"usr/share/conwayedge/licenses/{path.name}", path.read_bytes())
-        tar_add(tar, "usr/share/conwayedge/build.json", json_bytes({
-            "go": go_version, "sources": SOURCES,
-            "ffmpeg_configure": "See ffmpeg-config*.h and edgeproxy/build.py",
-        }))
+
+    def normalize(entry):
+        entry.uid = entry.gid = 65532 if entry.name == "data" else 0
+        entry.uname = entry.gname = ""
+        entry.mtime = 0
+        return entry
+
+    with tarfile.open(layer, "w", format=tarfile.PAX_FORMAT) as tar:
+        for path in sorted(root.rglob("*")):
+            tar.add(path, arcname=path.relative_to(root), recursive=False, filter=normalize)
     layer_hash = digest(layer)
     config = json_bytes({
         "architecture": "arm64", "os": "linux",
         "config": {
             "User": "65532:65532", "WorkingDir": "/data",
-            "Env": ["PATH=/usr/local/bin", "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt"],
+            "Env": ["PATH=/usr/local/bin:/usr/bin:/bin", "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt"],
             "Entrypoint": ["/usr/local/bin/conwayedge"],
             "Cmd": ["-lan", ":8080", "-tunnel", ":8081", "-data", "/data"],
             "ExposedPorts": {"8080/tcp": {}, "8081/tcp": {}},
@@ -237,28 +260,20 @@ def package(binary, native, certificates, destination, work, go_version):
     config_name = hashlib.sha256(config).hexdigest() + ".json"
     manifest = [{"Config": config_name, "RepoTags": ["conwayedge:arm64"],
                  "Layers": [f"{layer_hash}/layer.tar"]}]
-    temporary = work / "image.tar.gz"
-    with temporary.open("wb") as raw, gzip.GzipFile(fileobj=raw, mode="wb", filename="", mtime=0) as compressed:
-        with tarfile.open(fileobj=compressed, mode="w|", format=tarfile.USTAR_FORMAT) as tar:
-            tar_add(tar, "manifest.json", json_bytes(manifest))
-            tar_add(tar, config_name, config)
-            entry = tarfile.TarInfo(f"{layer_hash}/layer.tar")
-            entry.size, entry.mode = layer.stat().st_size, 0o644
-            with layer.open("rb") as stream:
-                tar.addfile(entry, stream)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    # Copy to the output filesystem before atomic rename (cache may be on another disk).
-    with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as staged:
-        staged_path = Path(staged.name)
-        try:
-            with temporary.open("rb") as source:
-                shutil.copyfileobj(source, staged)
-            staged.close()
-            staged_path.chmod(0o644)
-            staged_path.replace(destination)
-        finally:
-            staged_path.unlink(missing_ok=True)
-    write(Path(str(destination) + ".sha256"), f"{digest(destination)}  {destination.name}\n")
+    with tempfile.TemporaryDirectory(dir=destination.parent) as temp:
+        image = Path(temp) / "image.tar.gz"
+        with image.open("wb") as raw, gzip.GzipFile(fileobj=raw, mode="wb", filename="", mtime=0) as compressed:
+            with tarfile.open(fileobj=compressed, mode="w|") as tar:
+                tar_add(tar, "manifest.json", json_bytes(manifest))
+                tar_add(tar, config_name, config)
+                entry = tarfile.TarInfo(f"{layer_hash}/layer.tar")
+                entry.size, entry.mode = layer.stat().st_size, 0o644
+                with layer.open("rb") as stream:
+                    tar.addfile(entry, stream)
+        image.chmod(0o644)
+        image.replace(destination)
+    Path(str(destination) + ".sha256").write_text(f"{digest(destination)}  {destination.name}\n")
     print(f"Built {destination} ({destination.stat().st_size / 1048576:.1f} MiB)", flush=True)
 
 
@@ -267,32 +282,47 @@ def main():
     parser.add_argument("--go", help="path to an installed Go 1.25+ binary")
     parser.add_argument("--cache", type=Path, default=HERE / ".build-cache")
     parser.add_argument("--output", type=Path, default=HERE / "dist/conwayedge-linux-arm64.tar.gz")
-    parser.add_argument("--jobs", type=int, default=min(os.cpu_count() or 2, 8))
+    parser.add_argument("--update-lock", action="store_true", help="refresh pinned Alpine runtime packages and exit")
     args = parser.parse_args()
-    if args.jobs < 1:
-        parser.error("--jobs must be positive")
-    for tool in ("zig", "make", "perl", "cc", "curl"):
-        if not shutil.which(tool):
-            parser.error(f"required installed tool not found: {tool}")
-    go, env = select_go(args.go)
+    if not shutil.which("curl"):
+        parser.error("required installed tool not found: curl")
     cache = args.cache.resolve()
     cache.mkdir(parents=True, exist_ok=True)
-    archives = {name: download(cache, name) for name in SOURCES}
-    native = build_ffmpeg(cache, archives, shutil.which("zig"), args.jobs)
+    if args.update_lock:
+        update_lock(cache)
+        return
+    go, env = select_go(args.go)
+    lock = json.loads(LOCK.read_text())
+    if lock["architecture"] != "aarch64":
+        raise RuntimeError("Runtime lock must target aarch64")
     with tempfile.TemporaryDirectory(prefix="image-", dir=cache) as temp:
         work = Path(temp)
-        binary = work / "conwayedge"
+        root = work / "root"
+        root.mkdir()
+        for dependency in lock["packages"]:
+            unpack_apk(download(cache, dependency), root)
+        for name in ("data", "tmp", "dev", "proc", "usr/local/bin", "usr/share/conwayedge"):
+            (root / name).mkdir(parents=True, exist_ok=True)
+        (root / "data").chmod(0o700)
+        (root / "tmp").chmod(0o1777)
+        (root / "etc/passwd").write_text("conwayedge:x:65532:65532:conwayedge:/data:/bin/sh\n")
+        (root / "etc/group").write_text("conwayedge:x:65532:\n")
+        shutil.copy2(LOCK, root / "usr/share/conwayedge/build-packages.json")
+        (root / "etc/alpine-release").write_text(lock["alpine"] + "\n")
+        binary = root / "usr/local/bin/conwayedge"
         env.update(GOOS="linux", GOARCH="arm64", GOARM64="v8.0", CGO_ENABLED="0", GOFLAGS="")
         print("Cross-compiling edgeproxy for linux/arm64", flush=True)
-        run([go, "build", "-mod=readonly", "-trimpath", "-buildvcs=false", "-ldflags=-s -w",
-             "-o", str(binary), "."], env=env)
-        check_static_arm64(binary)
-        package(binary, native, archives["cacert-2025-12-02.pem"], args.output.resolve(), work,
-                output([go, "version"], env))
+        subprocess.run([go, "build", "-mod=readonly", "-trimpath", "-buildvcs=false", "-ldflags=-s -w",
+                        "-o", str(binary), "."], cwd=HERE, env=env, check=True)
+        check_arm64(binary, static=True)
+        check_runtime(root)
+        if not (root / "etc/ssl/certs/ca-certificates.crt").exists():
+            raise RuntimeError("CA certificate bundle missing")
+        package(root, args.output.resolve(), work)
 
 
 if __name__ == "__main__":
     try:
         main()
-    except (RuntimeError, OSError, subprocess.CalledProcessError) as error:
-        sys.exit(f"Build failed: {error}\nFor native compiler errors, see <cache>/ffmpeg-build.log")
+    except (RuntimeError, OSError, subprocess.CalledProcessError, tarfile.TarError) as error:
+        sys.exit(f"Build failed: {error}")

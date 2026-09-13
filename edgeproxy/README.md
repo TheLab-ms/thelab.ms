@@ -13,7 +13,45 @@ go build .
 
 Defaults: `-lan :8080`, `-tunnel 127.0.0.1:8081`, `-data data`. Run one instance per data directory on a local filesystem, as an unprivileged user. New directories use mode 0700 and the database uses 0600. Protect existing directories equivalently: the database contains printer access codes.
 
-Point controllers at the LAN listener. Its configuration page at `/` is unauthenticated and trusts the LAN; saves require the page's CSRF token. Point cloudflared **only** at the loopback tunnel listener. Machine APIs use Cloudflare Access JWT assertions when configured, otherwise mTLS certificate-status headers from local cloudflared. Member printer routes validate Worker-issued JWTs using a public key.
+Point controllers at the LAN listener. Its configuration page at `/` is unauthenticated and trusts the LAN; saves require the page's CSRF token. Point cloudflared **only** at the tunnel listener. It defaults to loopback; use `-tunnel <trusted-subnet-IP>:8081` (or `:8081` in the router container) for a separate cloudflared host, and restrict that port to the cloudflared host through the network firewall. Machine APIs use Cloudflare Access JWT assertions when configured, otherwise mTLS certificate-status headers from trusted cloudflared. Member printer routes validate Worker-issued JWTs using a public key.
+
+## Build for MikroTik ARM64
+
+From the repository root:
+
+```sh
+python3 edgeproxy/build.py
+```
+
+Build-script checks: `python3 -m unittest discover -s edgeproxy -p build_test.py`.
+
+Output: **`edgeproxy/dist/conwayedge-linux-arm64.tar.gz`**, with a companion `.sha256` file. This is a RouterOS-importable container image archive (manifest, configuration, filesystem layer), generated directly without Docker, Podman, a Linux VM, or target emulation. Cross-builds run on macOS or Linux using installed **Python 3.12+, Go 1.25+, and curl**. The script selects a compatible Go on PATH or in Go's existing toolchain cache; `--go /path/to/go` overrides selection. Go toolchain auto-downloads are disabled; Go module downloads follow `go.sum`.
+
+The build downloads **precompiled Alpine 3.23 ARM64 packages** for FFmpeg, its transitive runtime dependencies (including OpenSSL and the musl dynamic loader), BusyBox, and CA certificates. Only edgeproxy is cross-compiled, using `CGO_ENABLED=0`; SQLite and dashboard assets are compiled into it. Packages are unpacked directly with Python; no package install scripts or target binaries run on the build host. The complete runtime supports FFmpeg's RTSPS-to-MJPEG camera pipeline and outbound HTTPS for Access key discovery. The build checks ARM64 ELF architecture and resolves the executable/shared-library dependencies inside the image.
+
+Every package URL, version, and SHA-256 is pinned in `edgeproxy/build-packages.json`, also included in the image at `/usr/share/conwayedge/build-packages.json`. Downloads are cached under `edgeproxy/.build-cache/` and verified on every build. Options: `--cache /path/to/cache`, `--output /path/to/image.tar.gz`. Normal builds use the lockfile without fetching repository indexes. To update dependencies, run `python3 edgeproxy/build.py --update-lock`, review the lockfile changes, then rebuild. This explicit maintenance command resolves dependencies from the Alpine branch's main/community indexes over HTTPS and pins the downloaded package bytes. Alpine mirrors may retire older package revisions; retain the download cache for rebuilding those revisions, or refresh the lockfile.
+
+### RouterOS deployment
+
+Use an ARM64 router with RouterOS v7, its matching `container` package installed, and container device mode enabled. Upload the tarball to `disk1/`. The example uses an existing routed, secure subnet: container `192.168.50.2`, gateway `192.168.50.1`, bridge `secure-bridge`, and a separate cloudflared host `192.168.50.3`. Substitute your actual network and disk names.
+
+```routeros
+/interface/veth/add name=veth-edge address=192.168.50.2/24 gateway=192.168.50.1
+/interface/bridge/port/add bridge=secure-bridge interface=veth-edge
+/container/mounts/add list=edge-data src=disk1/edge-data dst=/data
+/container/envs/add list=edge-env key=CONWAYEDGE_ACCESS_ISSUER value="https://your-team.cloudflareaccess.com"
+/container/envs/add list=edge-env key=CONWAYEDGE_ACCESS_AUDIENCE value="<application AUD tag>"
+/container/add file=disk1/conwayedge-linux-arm64.tar.gz name=edgeproxy interface=veth-edge root-dir=disk1/edge-root mountlists=edge-data envlist=edge-env dns=192.168.50.1 logging=yes start-on-boot=yes
+/container/print
+```
+
+Wait for extraction to finish (`status=stopped`), then `/container/start edgeproxy`. The image runs directly as UID/GID **65532:65532**, with `-lan :8080 -tunnel :8081 -data /data`; set RouterOS `cmd` to override those arguments. `/data` is mode 0700 and owned by that UID in the image. Let RouterOS populate a new mount from the image; a pre-existing data directory must also be writable by 65532:65532. Keep the data mount separate from `root-dir` so replacing the container preserves SQLite. A BusyBox `/bin/sh` is included for `/container/shell edgeproxy`; use `/bin/busybox <command>` for its utilities. Runtime updates are deployed by rebuilding/reimporting the image.
+
+Allow controllers/admin clients to reach TCP 8080, and **only cloudflared** to reach TCP 8081. Apply that policy on the actual packet path: routed traffic uses RouterOS IP firewall forwarding rules; hosts on the same bridge require bridge filtering or equivalent subnet isolation. Cloudflared routes the protected hostname to `http://192.168.50.2:8081` with a catch-all `http_status:404`. Configure the Access application below and, for the machines dashboard, add the three `CONWAYEDGE_MEMBER_*` / `CONWAYEDGE_PUBLIC_URL` settings documented under member access to `edge-env`. Signing seeds, when used, are runtime-mounted files referenced by `CONWAYEDGE_SIGNING_SEED`.
+
+The container needs DNS and outbound HTTPS for Access verification and routes to printer TCP ports 8883 and 322. Cloudflared is deployed separately and keeps its tunnel credentials there.
+
+After importing, check `/log/print` for both listeners, open `http://192.168.50.2:8080/`, configure a printer, and use admin **Full resync** to verify the cloud API. Restart the container to verify configuration/goal persistence. Open the member machines dashboard and verify fresh camera snapshots; this exercises the target FFmpeg RTSPS pipeline on the router. Host-side build checks inspect Linux binaries without executing them, so this on-router smoke test is still required.
 
 ### Switching from file-backed edge
 
@@ -134,7 +172,7 @@ Tunnel without a separate relay.
 4. Remove the old hostname-wide mTLS WAF requirement for `/api/*`, so Access can
    authenticate the service token. Keep `/machines` and `/machines/*` outside the
    Access application; those browser routes use the separate member JWT flow.
-   Route the hostname through cloudflared to `http://127.0.0.1:8081`, followed by
+   Route the hostname through cloudflared to `http://127.0.0.1:8081` (or the edge container's trusted-subnet IP on port 8081), followed by
    a catch-all `http_status:404`. Do not expose the LAN listener through the tunnel.
 5. Use **Full resync** in the membership admin UI to bootstrap the goal and verify
    both API directions. Rotate/renew the service token in Access and update Worker
@@ -155,7 +193,7 @@ Tunnel without a separate relay.
 
    Replace the placeholder with the certificate's fingerprint in Cloudflare's field format. During rotation, allow both fingerprints, migrate callers, then remove/revoke the old certificate. This rule provides client authorization; edge accepts any verified, non-revoked certificate forwarded by Cloudflare.
 3. Enable the **Add TLS client auth headers** managed transform under **Rules → Settings → Managed Transforms**. Cloudflare must overwrite client-supplied values on every request. Machine APIs require exactly `Cf-Cert-Presented: true`, `Cf-Cert-Verified: true`, and `Cf-Cert-Revoked: false`. Missing, malformed, duplicate, unverified, or revoked status is rejected with 401. Member JWTs do not grant machine API access, and mTLS does not grant printer access.
-4. Route only the protected hostname to `http://127.0.0.1:8081`, followed by a catch-all `http_status:404` ingress rule. The flow is **client certificate → Cloudflare API Shield → tunnel → local HTTP origin**. Edge trusts the local host/cloudflared; these headers are trusted-proxy assertions.
+4. Route only the protected hostname to `http://127.0.0.1:8081` (or the edge container's trusted-subnet IP on port 8081), followed by a catch-all `http_status:404` ingress rule. The flow is **client certificate → Cloudflare API Shield → tunnel → trusted HTTP origin**. Edge trusts cloudflared and the origin network; these headers are trusted-proxy assertions.
 
 **Worker transport limitation for machine APIs:** Cloudflare documents that [Worker mTLS certificate bindings cannot call Cloudflare-proxied services](https://developers.cloudflare.com/workers/runtime-apis/bindings/mtls/) (they return 520). A tunnel hostname is Cloudflare-proxied. A Worker coordinator therefore needs a transport capable of presenting the certificate to API Shield, such as a separately hosted mTLS-capable relay. That transport is outside this module. The machines dashboard uses direct browser requests with JWT cookies and does not need this relay.
 

@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"flag"
-	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -24,7 +23,7 @@ func main() {
 
 func run() error {
 	lan := flag.String("lan", ":8080", "LAN controller/config listen address")
-	tunnel := flag.String("tunnel", "127.0.0.1:8081", "cloudflared origin listen address (loopback only)")
+	tunnel := flag.String("tunnel", "127.0.0.1:8081", "cloudflared origin listen address (loopback or trusted subnet)")
 	data := flag.String("data", "data", "persistent data directory (one process only)")
 	flag.Parse()
 	e, err := openEdge(*data)
@@ -57,11 +56,8 @@ func run() error {
 		return err
 	}
 	defer cloud.Close()
-	// Certificate headers are trusted assertions from local cloudflared, not
-	// credentials that may be accepted directly from network clients.
-	if !cloud.Addr().(*net.TCPAddr).IP.IsLoopback() {
-		return fmt.Errorf("-tunnel must bind a loopback address for trusted Cloudflare mTLS headers")
-	}
+	// The tunnel listener may bind a trusted subnet for a separate cloudflared
+	// host. Firewall it to that host: fallback mTLS headers are proxy assertions.
 	errors := make(chan error, 2)
 	for _, endpoint := range []struct {
 		listener net.Listener
