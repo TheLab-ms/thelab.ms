@@ -1,5 +1,5 @@
-import { boundedText, cookie, cookieHeader, discord, discordID, discounts, errorPage, hash, HttpError, json, now, opaque, origin, provider, redirect, stripe, verifyStripe } from './http.js';
-import { loginDestination, memberToken, signedInMember, startLogin, TOKEN_AGE } from './auth.js';
+import { boundedText, cookie, cookieHeader, discord, discordID, discounts, errorPage, HttpError, json, origin, provider, redirect, stripe, verifyStripe } from './http.js';
+import { loginDestination, memberToken, signedInMember, startLogin, TOKEN_AGE, verifyOAuthState } from './auth.js';
 import { coordinated } from './membership.js';
 import { adminConfigured, adminRequest, finishAdminLogin } from './admin.js';
 import { logError, requestContext } from './logging.js';
@@ -41,9 +41,8 @@ async function callback(request, env) {
   configured(env, true);
   const url = new URL(request.url);
   const state = url.searchParams.get('state'), browser = cookie(request, 'thelab_oauth');
-  if (!opaque.test(state || '') || !opaque.test(browser || '') || url.searchParams.getAll('state').length !== 1) throw new HttpError(400, 'Invalid or expired Discord sign-in. Please start again.');
-  const pending = await env.DB.prepare('DELETE FROM oauth_states WHERE state_hash = ? AND browser_hash = ? AND expires > ? RETURNING bill_annually, discount_type, purpose, return_to')
-    .bind(await hash(state), await hash(browser), now()).first();
+  if (url.searchParams.getAll('state').length !== 1) throw new HttpError(400, 'Invalid or expired Discord sign-in. Please start again.');
+  const pending = await verifyOAuthState(env, state, browser);
   if (!pending) throw new HttpError(400, 'Invalid or expired Discord sign-in. Please start again.');
   const code = url.searchParams.get('code');
   if (url.searchParams.has('error') || !code || code.length > 2048 || /[^\x21-\x7e]/.test(code) || url.searchParams.getAll('code').length !== 1) throw new HttpError(400, 'Discord sign-in was not authorized. Please start again.');

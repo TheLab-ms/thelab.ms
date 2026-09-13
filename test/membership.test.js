@@ -113,24 +113,30 @@ afterEach(() => {
 });
 
 describe('JWT authentication', () => {
-  it('rejects tampering, wrong keys/audiences/issuers, malformed tokens, and expiry', async () => {
-    const token = await issueToken(env, id, 'admin');
-    expect(await verifyToken(env, token, 'admin')).toMatchObject({ sub: id, aud: 'admin', iss: env.SITE_URL });
+  it.each(['admin', 'member', 'oauth'])('validates %s JWT signatures, audiences, issuers, and expiry', async audience => {
+    const subject = audience === 'oauth' ? await hash('browser') : id;
+    const token = await issueToken(env, subject, audience);
+    expect(await verifyToken(env, token, audience)).toMatchObject({ sub: subject, aud: audience, iss: env.SITE_URL });
     const [header, payload, signature] = token.split('.');
     const changed = btoa(JSON.stringify({ ...JSON.parse(atob(payload.replaceAll('-', '+').replaceAll('_', '/'))), sub: '555555555555555555' })).replace(/=+$/, '');
     for (const invalid of ['', 'a'.repeat(64), `${header}.${changed}.${signature}`, `${header}.${payload}.`, `e30.${payload}.${signature}`]) {
-      expect(await verifyToken(env, invalid, 'admin')).toBeNull();
+      expect(await verifyToken(env, invalid, audience)).toBeNull();
     }
-    expect(await verifyToken(env, token, 'member')).toBeNull();
-    expect(await verifyToken({ ...env, AUTH_SECRET: 'different-secret-that-is-at-least-32-bytes' }, token, 'admin')).toBeNull();
-    expect(await verifyToken({ ...env, SITE_URL: 'https://other.example' }, token, 'admin')).toBeNull();
-    vi.spyOn(Date, 'now').mockReturnValue((now() + 8 * 3600) * 1000);
-    expect(await verifyToken(env, token, 'admin')).toBeNull();
+    for (const other of ['admin', 'member', 'oauth'].filter(value => value !== audience)) {
+      expect(await verifyToken(env, token, other)).toBeNull();
+    }
+    expect(await verifyToken({ ...env, AUTH_SECRET: 'different-secret-that-is-at-least-32-bytes' }, token, audience)).toBeNull();
+    expect(await verifyToken({ ...env, SITE_URL: 'https://other.example' }, token, audience)).toBeNull();
+    const claims = await verifyToken(env, token, audience);
+    const clock = vi.spyOn(Date, 'now').mockReturnValue((claims.iat - 1) * 1000);
+    expect(await verifyToken(env, token, audience)).toBeNull();
+    clock.mockReturnValue(claims.exp * 1000);
+    expect(await verifyToken(env, token, audience)).toBeNull();
   });
 
   it('requires a signing secret before starting OAuth', async () => {
     expect((await api('/signup', undefined, { ...env, AUTH_SECRET: '' })).status).toBe(503);
-    expect((await env.DB.prepare('SELECT COUNT(*) AS total FROM oauth_states').first()).total).toBe(0);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
   it('prevents member/admin token substitution and invalidates prior member identities', async () => {
@@ -164,23 +170,25 @@ describe('JWT authentication', () => {
     expect(await verifyToken(env, token, admin ? 'admin' : 'member')).toMatchObject({ sub: id });
     expect(await readMember()).toMatchObject({ bill_annually: 1, discount_type: 'student', discount_status: 'approved' });
     expect((await readMember()).discord_email).toBe(admin ? '' : user.email);
-    expect((await env.DB.prepare('SELECT COUNT(*) AS total FROM oauth_states').first()).total).toBe(0);
   });
 
   it('does not accept arbitrary return URLs or replay an expired POST', async () => {
     const response = await api(`/admin/members/${id}?return_to=https://other.example`, { method: 'POST' });
-    const pending = await env.DB.prepare('SELECT return_to FROM oauth_states').first();
+    const pending = await verifyToken(env, new URL(response.headers.get('Location')).searchParams.get('state'), 'oauth');
     expect(pending.return_to).toBe('/admin');
     expect(response.status).toBe(303);
   });
 });
 
 describe('Discord signup', () => {
-  it('uses identify/email and binds the pricing choice to a one-use browser state', async () => {
+  it('uses identify/email and binds signed pricing choices to the browser cookie', async () => {
     const { target, state, cookie } = await start('?billing=yearly&discount=student');
     expect(target.origin).toBe('https://discord.com');
     expect(target.searchParams.get('scope')).toBe('identify email');
     expect(target.searchParams.get('redirect_uri')).toBe(`${env.SITE_URL}/login/discord/callback`);
+    const claims = await verifyToken(env, state, 'oauth');
+    expect(claims).toMatchObject({ sub: await hash(cookie.split('=')[1]), purpose: 'signup', bill_annually: 1, discount_type: 'student', return_to: '/payment/resume' });
+    expect(claims.exp - claims.iat).toBe(600);
     expect((await api(`/login/discord/callback?code=hello&state=${state}`)).status).toBe(400);
     oauthMock();
     const response = await api(`/login/discord/callback?code=hello&state=${state}&discount=`, { headers: { Cookie: cookie } });
@@ -188,17 +196,64 @@ describe('Discord signup', () => {
     expect(response.headers.get('Location')).toBe(`${env.SITE_URL}/membership-pending`);
     expect(response.headers.get('Set-Cookie')).toContain('HttpOnly; SameSite=Lax');
     expect(await readMember()).toMatchObject({ bill_annually: 1, discount_type: 'student', discount_status: 'requested', stripe_customer_id: null });
-    expect((await api(`/login/discord/callback?code=hello&state=${state}`, { headers: { Cookie: cookie } })).status).toBe(400);
+    expect(response.headers.get('Set-Cookie')).toContain('thelab_oauth=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
+    expect((await api(`/login/discord/callback?code=hello&state=${state}`, { headers: { Cookie: 'thelab_oauth=' } })).status).toBe(400);
+    // A copied cookie/state pair remains valid, but Discord rejects a reused code.
+    mockDiscord('/oauth2/token', { error: 'invalid_grant' }, 'POST', 400);
+    expect((await api(`/login/discord/callback?code=hello&state=${state}`, { headers: { Cookie: cookie } })).status).toBe(502);
+  });
+
+  it('starts OAuth without database access and uses fresh browser nonces', async () => {
+    const first = await api('/signup', undefined, { ...env, DB: undefined });
+    const second = await api('/signup', undefined, { ...env, DB: undefined });
+    expect(first.status).toBe(303);
+    expect(second.status).toBe(303);
+    expect(first.headers.get('Set-Cookie')).not.toBe(second.headers.get('Set-Cookie'));
+    expect(first.headers.get('Set-Cookie')).toContain('HttpOnly; SameSite=Lax; Max-Age=600; Secure');
+    expect((await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'oauth_states'").all()).results).toEqual([]);
+  });
+
+  it('rejects tampered state, mismatched cookies, and session tokens before contacting Discord', async () => {
+    const first = await start(), second = await start();
+    const [header, payload, signature] = first.state.split('.');
+    const changed = btoa(JSON.stringify({ ...JSON.parse(atob(payload.replaceAll('-', '+').replaceAll('_', '/'))), purpose: 'admin' })).replace(/=+$/, '');
+    const invalid = [
+      { state: `${header}.${changed}.${signature}`, cookie: first.cookie },
+      { state: first.state, cookie: second.cookie },
+      { state: first.state, cookie: `thelab_oauth=${'x'.repeat(64)}` },
+      { state: 'a'.repeat(64), cookie: first.cookie },
+      ...await Promise.all(['member', 'admin'].map(async audience => ({ state: await issueToken(env, id, audience), cookie: first.cookie }))),
+    ];
+    for (const { state, cookie } of invalid) {
+      const response = await api(`/login/discord/callback?state=${state}&code=code`, { headers: { Cookie: cookie } });
+      expect(response.status).toBe(400);
+      expect(response.headers.get('Set-Cookie')).toContain('Max-Age=0');
+    }
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { purpose: 'unknown' }, { purpose: null }, { bill_annually: '1' }, { bill_annually: 2 },
+    { discount_type: 'free' }, { discount_type: null }, { return_to: 'https://other.example' },
+    { return_to: null }, { purpose: 'admin', return_to: '/payment/resume' },
+  ])('rejects invalid signed OAuth claims: %j', async invalid => {
+    const { state, cookie } = await start();
+    const claims = await verifyToken(env, state, 'oauth');
+    const token = await issueToken(env, claims.sub, 'oauth', { ...claims, ...invalid });
+    expect((await api(`/login/discord/callback?state=${token}&code=code`, { headers: { Cookie: cookie } })).status).toBe(400);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
   it('rejects expired, duplicate, or declined OAuth state before contacting Discord', async () => {
     const { state, cookie } = await start();
     expect((await api(`/login/discord/callback?state=${state}&state=${state}&code=code`, { headers: { Cookie: cookie } })).status).toBe(400);
-    await env.DB.prepare('UPDATE oauth_states SET expires = 0').run();
+    expect((await api(`/login/discord/callback?state=${state}&code=one&code=two`, { headers: { Cookie: cookie } })).status).toBe(400);
+    vi.spyOn(Date, 'now').mockReturnValue((now() + 600) * 1000);
     expect((await api(`/login/discord/callback?state=${state}&code=code`, { headers: { Cookie: cookie } })).status).toBe(400);
     const next = await start();
     expect((await api(`/login/discord/callback?state=${next.state}&error=access_denied`, { headers: { Cookie: next.cookie } })).status).toBe(400);
     expect(await readMember()).toBeNull();
+    expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
   it.each([{ verified: false, guildStatus: 200 }, { verified: true, guildStatus: 404 }])('requires verified email and existing guild membership: %j', async (settings) => {
@@ -260,21 +315,22 @@ describe('member administration', () => {
       headers: { Cookie: cookie, Origin: env.SITE_URL, 'Content-Type': 'application/x-www-form-urlencoded', ...options } });
   }
 
-  it('isolates admin OAuth from signup, requires a role, and consumes browser-bound state', async () => {
-    const response = await api('/admin/login', undefined, { ...env, STRIPE_SECRET_KEY: '' });
+  it('isolates admin OAuth from signup, requires a role, and clears the browser cookie', async () => {
+    const response = await api('/admin/login', undefined, { ...env, STRIPE_SECRET_KEY: '', DB: undefined });
     expect(response.status).toBe(303);
     const state = new URL(response.headers.get('Location')).searchParams.get('state');
     const browser = response.headers.get('Set-Cookie').split(';')[0];
     expect((await api(`/login/discord/callback?state=${state}&code=test`)).status).toBe(400);
     oauthMock({ roles: [env.DISCORD_ADMIN_ROLE_ID] });
-    const signedIn = await api(`/login/discord/callback?state=${state}&code=test`, { headers: { Cookie: browser } }, { ...env, STRIPE_SECRET_KEY: '' });
+    const signedIn = await api(`/login/discord/callback?state=${state}&code=test`, { headers: { Cookie: browser } }, { ...env, STRIPE_SECRET_KEY: '', DB: undefined });
     expect(signedIn.status).toBe(303);
     expect(signedIn.headers.get('Location')).toBe(`${env.SITE_URL}/admin`);
     expect(signedIn.headers.get('Set-Cookie')).toContain('thelab_admin=');
     expect(signedIn.headers.get('Set-Cookie')).toContain('HttpOnly; SameSite=Lax');
     expect(await readMember()).toBeNull();
     expect(signedIn.headers.get('Set-Cookie')).not.toContain('thelab_member=');
-    expect((await api(`/login/discord/callback?state=${state}&code=test`, { headers: { Cookie: browser } })).status).toBe(400);
+    expect(signedIn.headers.get('Set-Cookie')).toContain('thelab_oauth=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
+    expect((await api(`/login/discord/callback?state=${state}&code=test`, { headers: { Cookie: 'thelab_oauth=' } })).status).toBe(400);
     const denied = await api('/admin/login');
     const deniedState = new URL(denied.headers.get('Location')).searchParams.get('state');
     oauthMock();

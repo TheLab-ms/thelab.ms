@@ -1,6 +1,6 @@
-import { cookie, cookieHeader, discordID, hash, HttpError, now, origin, randomToken, redirect } from './http.js';
+import { cookie, cookieHeader, discordID, discounts, hash, HttpError, now, opaque, origin, randomToken, redirect } from './http.js';
 
-export const TOKEN_AGE = { member: 86400, admin: 8 * 3600 };
+export const TOKEN_AGE = { member: 86400, admin: 8 * 3600, oauth: 600 };
 const encoder = new TextEncoder();
 const encode = bytes => btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
 const decode = value => Uint8Array.from(atob(value.replaceAll('-', '+').replaceAll('_', '/')), c => c.charCodeAt(0));
@@ -23,14 +23,14 @@ export async function issueToken(env, subject, audience, claims = {}) {
 
 export async function verifyToken(env, token, audience) {
   const signingKey = await key(env), issuer = origin(env);
-  if (typeof token !== 'string' || token.length > 2048 || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/.test(token)) return null;
+  if (!Object.hasOwn(TOKEN_AGE, audience) || typeof token !== 'string' || token.length > 2048 || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/.test(token)) return null;
   try {
     const [header, payload, signature] = token.split('.');
     const metadata = JSON.parse(new TextDecoder().decode(decode(header)));
     if (metadata.alg !== 'HS256' || metadata.typ !== 'JWT' || metadata.crit) return null;
     if (!await crypto.subtle.verify('HMAC', signingKey, decode(signature), encoder.encode(`${header}.${payload}`))) return null;
     const claims = JSON.parse(new TextDecoder().decode(decode(payload)));
-    if (claims.iss !== issuer || claims.aud !== audience || typeof claims.sub !== 'string' || !discordID.test(claims.sub)
+    if (claims.iss !== issuer || claims.aud !== audience || typeof claims.sub !== 'string' || !(audience === 'oauth' ? opaque : discordID).test(claims.sub)
       || !Number.isInteger(claims.iat) || !Number.isInteger(claims.exp) || claims.iat > now() || claims.exp <= now()
       || claims.exp <= claims.iat || claims.exp - claims.iat > TOKEN_AGE[audience]) return null;
     return claims;
@@ -54,19 +54,27 @@ export function loginDestination(value, purpose) {
   return /^\/payment\/success\?session_id=cs_[A-Za-z0-9_]+$/.test(value) ? value : '/payment/resume';
 }
 
+export async function verifyOAuthState(env, state, browser) {
+  if (typeof browser !== 'string' || !opaque.test(browser)) return null;
+  const claims = await verifyToken(env, state, 'oauth');
+  // The subject binds this handshake to a nonce held only in the browser cookie.
+  if (!claims || claims.sub !== await hash(browser) || !['signup', 'admin', 'member'].includes(claims.purpose)
+    || ![0, 1].includes(claims.bill_annually) || !discounts.includes(claims.discount_type)
+    || typeof claims.return_to !== 'string' || claims.return_to !== loginDestination(claims.return_to, claims.purpose)) return null;
+  return claims;
+}
+
 export async function startLogin(request, env, purpose = 'signup', selection = {}) {
   configured(env);
   if (!env.DISCORD_CLIENT_ID || !env.DISCORD_CLIENT_SECRET) throw new HttpError(503, 'Discord sign-in is not configured yet. Please contact leadership.');
-  const url = new URL(request.url), state = randomToken(), browser = randomToken();
+  const url = new URL(request.url), browser = randomToken();
   const destination = loginDestination(url.pathname + url.search, purpose);
-  await env.DB.batch([
-    env.DB.prepare('DELETE FROM oauth_states WHERE expires <= ?').bind(now()),
-    env.DB.prepare('INSERT INTO oauth_states (state_hash, browser_hash, bill_annually, discount_type, expires, purpose, return_to) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .bind(await hash(state), await hash(browser), selection.annual ? 1 : 0, selection.discount || '', now() + 600, purpose, destination),
-  ]);
+  const state = await issueToken(env, await hash(browser), 'oauth', {
+    bill_annually: selection.annual ? 1 : 0, discount_type: selection.discount || '', purpose, return_to: destination,
+  });
   const target = new URL('https://discord.com/oauth2/authorize');
   target.search = new URLSearchParams({ client_id: env.DISCORD_CLIENT_ID, response_type: 'code', scope: 'identify email', redirect_uri: `${origin(env)}/login/discord/callback`, state }).toString();
   const response = redirect(target.href);
-  response.headers.set('Set-Cookie', cookieHeader(env, 'thelab_oauth', browser, 600));
+  response.headers.set('Set-Cookie', cookieHeader(env, 'thelab_oauth', browser, TOKEN_AGE.oauth));
   return response;
 }

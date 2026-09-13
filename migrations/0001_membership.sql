@@ -21,17 +21,6 @@ CREATE TABLE members (
 ) STRICT;
 CREATE INDEX members_created ON members(created DESC, discord_user_id DESC);
 
-CREATE TABLE oauth_states (
-  state_hash TEXT PRIMARY KEY,
-  browser_hash TEXT NOT NULL,
-  bill_annually INTEGER NOT NULL,
-  discount_type TEXT NOT NULL,
-  purpose TEXT NOT NULL DEFAULT 'signup' CHECK (purpose IN ('signup', 'admin', 'member')),
-  return_to TEXT NOT NULL,
-  expires INTEGER NOT NULL
-) STRICT;
-CREATE INDEX oauth_expiry ON oauth_states(expires);
-
 CREATE TABLE stripe_events (
   id TEXT PRIMARY KEY,
   customer_id TEXT NOT NULL,

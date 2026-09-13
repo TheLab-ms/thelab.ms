@@ -7,14 +7,20 @@ Queue for Discord role reconciliation. There are **no scheduled triggers**.
 ## Flow
 
 1. Choose monthly/yearly and a rate on the landing page. `/signup` redirects to
-   Discord with `identify email` and browser-bound, expiring, single-use state.
+   Discord with `identify email` and browser-bound, expiring JWT state.
 2. `/login/discord/callback` requires a verified email and existing membership in
     TheLab's Discord guild. Accounts are linked by Discord ID, never
    matched to a Stripe customer by email. OAuth tokens are not retained.
    The app issues signed JWTs in HttpOnly, SameSite=Lax cookies (Secure on HTTPS),
    valid for 24 hours for members. Discord returns an opaque access token, not an
    identity JWT; the browser stores only the app's JWT. No login sessions are stored
-   in D1. OAuth state remains browser-bound, single-use, and expires after 10 minutes.
+   in D1. OAuth state is signed with `AUTH_SECRET`, uses a separate `oauth` audience,
+   and expires after 10 minutes. It carries the login purpose, billing selection,
+   allowed return destination, and a hash of a random nonce in the HttpOnly
+   `thelab_oauth` cookie. The callback verifies the JWT and cookie before contacting
+   Discord and clears the cookie on success or failure. State is stateless: a copied
+   JWT and its original cookie remain valid until expiry; Discord authorization
+   codes are single-use.
 3. Standard or approved-discount members go straight to Stripe Checkout. A
    discount request goes to `/membership-pending` until leadership approves it.
    Existing subscriptions, including past-due ones, go to Stripe Billing Portal.
@@ -188,8 +194,9 @@ Concurrent profile/billing edits are rejected with a reload message so stale
 forms cannot silently overwrite newer changes. Subscription status and sync
 timestamps are read-only; role eligibility is always reconciled against Stripe.
 
-The initial migration includes the admin schema; no upgrade migration is needed
-for this undeployed app. For a local database created with the old schema,
+The initial migration includes the admin schema and omits the former `oauth_states`
+table; no upgrade migration is needed for this undeployed app.
+For a local database created with the old schema,
 recreate the disposable local D1 database and run `npm run db:local` before use.
 
 ## Queue delivery and recovery
