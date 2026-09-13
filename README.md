@@ -9,8 +9,12 @@ Queue for Discord role reconciliation. There are **no scheduled triggers**.
 1. Choose monthly/yearly and a rate on the landing page. `/signup` redirects to
    Discord with `identify email` and browser-bound, expiring, single-use state.
 2. `/login/discord/callback` requires a verified email and existing membership in
-   TheLab's Discord guild. Accounts are identified by immutable Discord ID, never
+    TheLab's Discord guild. Accounts are linked by Discord ID, never
    matched to a Stripe customer by email. OAuth tokens are not retained.
+   The app issues signed JWTs in HttpOnly, SameSite=Lax cookies (Secure on HTTPS),
+   valid for 24 hours for members. Discord returns an opaque access token, not an
+   identity JWT; the browser stores only the app's JWT. No login sessions are stored
+   in D1. OAuth state remains browser-bound, single-use, and expires after 10 minutes.
 3. Standard or approved-discount members go straight to Stripe Checkout. A
    discount request goes to `/membership-pending` until leadership approves it.
    Existing subscriptions, including past-due ones, go to Stripe Billing Portal.
@@ -27,7 +31,8 @@ The implementation follows `../conway`'s `monthly`/`yearly` Stripe lookup keys,
 coupon `metadata.discountTypes`, OAuth scopes/callback path, billing portal
 behavior and role eligibility. It is a **standalone** membership store: it does
 not update Conway records, waivers or door-access systems. New Stripe customers
-and subscriptions carry `metadata.thelab_discord_id`; existing Conway customers
+and subscriptions carry `metadata.thelab_discord_id` and a stable
+`metadata.thelab_member_id`; existing Conway customers
 are not automatically imported or matched by email.
 
 ## Local development
@@ -40,7 +45,10 @@ npm run db:local
 npm run dev
 ```
 
-Create an ignored `.dev.vars` using `.dev.vars.example`. Use Discord development
+Create an ignored `.dev.vars` using `.dev.vars.example`. Set `AUTH_SECRET` to a
+random secret of at least 32 bytes (generate
+one with `openssl rand -hex 32`). Use the same secret across Worker instances;
+rotating it invalidates all outstanding JWTs. Use Discord development
 credentials and a Stripe test-mode key. Register the exact Discord redirect
 `http://localhost:8787/login/discord/callback`. Open `http://localhost:8787`, matching
 `SITE_URL` exactly. Local Wrangler provides D1, Durable Objects and Queue emulation.
@@ -83,7 +91,8 @@ role above the configured membership role. Set `DISCORD_GUILD_ID` and
   **`2024-06-20`** and these events:
   - `customer.subscription.created`, `.updated`, `.deleted`
   - `checkout.session.completed`, `.async_payment_succeeded`, `.async_payment_failed`
-  - `invoice.paid`, `invoice.payment_failed`
+   - `invoice.paid`, `invoice.payment_failed`
+   - `customer.updated` (refreshes billing name/email)
 - Use credentials and prices/coupons from the same Stripe account and mode.
 
 ## Deployment
@@ -107,6 +116,7 @@ role IDs. Configure a Workers custom domain for that origin. Add secrets:
 npx wrangler secret put DISCORD_CLIENT_ID
 npx wrangler secret put DISCORD_CLIENT_SECRET
 npx wrangler secret put DISCORD_BOT_TOKEN
+npx wrangler secret put AUTH_SECRET
 npx wrangler secret put STRIPE_SECRET_KEY
 npx wrangler secret put STRIPE_WEBHOOK_SECRET
 npx wrangler d1 migrations apply thelab-membership --remote
@@ -121,19 +131,41 @@ directly; signup, callback, payment and webhook paths run through the Worker fir
 
 Set `DISCORD_ADMIN_ROLE_ID` in `wrangler.jsonc` (or `.dev.vars` locally) to the
 numeric Discord role ID that grants leadership/admin access. Open **`/admin`**
-and sign in with Discord. Admin access is disabled until that role is configured.
+to enter Discord sign-in directly. Admin access is disabled until that role is configured.
 The bot checks the user's current guild roles on every member list, detail, and
 save request. Removing the role immediately removes access. Admin sign-in uses
-the existing Discord callback URL, but has its own eight-hour session and does
-not register a member or start checkout. Use **Sign out** to end that session.
+the existing Discord callback URL, with an eight-hour admin JWT, and does
+not register a member or start checkout. Member JWTs cannot authorize admin requests.
+Expired or missing credentials enter Discord OAuth directly and return to the
+requested admin page or payment operation. Role-denied requests return an error.
+Use **Sign out** to clear the admin cookie and return home. A separately copied
+JWT remains valid until expiry; logout does not maintain a server-side revocation list.
 
 The list includes all members registered in this app, including pending and
 inactive members, in pages of 25 ordered newest first. Open a member to view IDs,
 registration and sync timestamps, and last-synced subscription status, and edit:
 
-- Stored Discord username/email (refreshed from Discord at the next member sign-in).
-- Separate contact name/email, internal notes, and custom JSON text key/value pairs.
+- Name override and internal notes. Member names always use **name override →
+  Stripe billing name → Discord username** (the first nonblank value).
+- Discord ID and Stripe customer/subscription IDs. The subscription must belong
+  to the customer; accounts/customers already linked to another member are rejected.
 - Saved monthly/yearly billing cycle, discount category, and approval status.
+
+Discord username/email and Stripe billing name/email are read-only. Discord sign-in
+refreshes the Discord fields; Stripe reconciliation refreshes billing details from
+the Customer, including on `customer.updated`. Checkout saves the entered billing
+name to the Stripe Customer. Existing billing fields populate on the next Stripe
+event or a manual queue resync.
+
+Changing Discord ID fetches the new guild account's username, clears the previous
+Discord email until the new account signs in, increments the member's auth version
+to invalidate old member JWTs (even if the Discord ID is later restored),
+and removes the old account's membership role. Memberships retain their stable
+internal ID and Durable Object. Identity edits tag the linked Stripe customer and
+membership subscriptions with the current identity and enqueue role reconciliation.
+Automatic subscription selection remains enabled: a manually entered subscription
+ID may be replaced by the next sync, which prefers active/trialing subscriptions,
+then ongoing subscriptions, then the most recently created canceled subscription.
 
 For a discount request, verify the member's numeric Discord ID and eligibility,
 then select **Approved** or **Denied** for the requested category and save. Use
@@ -141,19 +173,20 @@ then select **Approved** or **Denied** for the requested category and save. Use
 Requests do not send automated notifications, so check the list regularly.
 
 Tell the member to click **Check approval & continue** on the pending page or use
-`/payment/resume` while signed in. Alternatively, send a signup URL preserving
+`/payment/resume`. If needed it signs them in directly, then resumes their saved
+selection without another OAuth round-trip. Alternatively, send a signup URL preserving
 the saved selection, such as `/signup?billing=yearly&discount=student`. Choosing
 a different category creates a new request; choosing standard rate clears it.
 Denied requests remain denied when retried with the same category.
 
-Billing edits are **metadata only**: existing Stripe subscriptions and invoices
-are unaffected. Manage those in Stripe. Saving changed billing/discount metadata
+Pricing edits apply to future Checkout; manage existing prices and invoices in
+Stripe. Saving changed billing/discount metadata or identity mappings
 expires any outstanding Checkout link through the member's serialized Durable
 Object. If Stripe cannot resolve or expire that link, the save fails and keeps
 the entered fields for retry. Completed Checkout subscriptions are left intact.
 Concurrent profile/billing edits are rejected with a reload message so stale
-forms cannot silently overwrite newer changes. Stripe/Discord sync fields are
-read-only and are not used to grant membership from this editor.
+forms cannot silently overwrite newer changes. Subscription status and sync
+timestamps are read-only; role eligibility is always reconciled against Stripe.
 
 The initial migration includes the admin schema; no upgrade migration is needed
 for this undeployed app. For a local database created with the old schema,
@@ -163,10 +196,11 @@ recreate the disposable local D1 database and run `npm run db:local` before use.
 
 The webhook only acknowledges Stripe after `MEMBERSHIP_QUEUE.send()` succeeds.
 No database receipt is written before enqueueing, so a failed send remains
-retryable by Stripe. Queue jobs serialize with checkout per Discord ID, retrieve
+retryable by Stripe. Queue jobs serialize with checkout per stable membership ID, retrieve
 current Stripe state, and use idempotent Discord PUT/DELETE operations. Event IDs
 are marked processed **after** Discord succeeds, allowing crash-safe redelivery.
-Unrelated Stripe customers and subscriptions without this app's metadata are ignored.
+Unrelated Stripe customers and subscriptions without this app's metadata are ignored,
+unless explicitly linked by an admin.
 
 Failures use exponential backoff, honor Discord/Stripe retry delays, and move to
 `thelab-membership-failed` after 20 retries. Monitor failed messages in the
@@ -183,6 +217,9 @@ explicit current-state resync, push `{ "customer_id": "cus_..." }` to the main
 queue (without `event_id`). This also repairs roles after a member leaves/rejoins
 Discord or a role is changed manually. With no cron or Discord gateway listener,
 those Discord-only changes need a manual resync or the next Stripe event.
+
+Admin identity edits enqueue `{ "member_id": "<stable internal ID>" }`, which
+resolves the current customer and Discord account inside the membership lock.
 
 Stripe writes have durable idempotency records in the member Durable Object.
 Ambiguous writes older than 23 hours stop for review instead of risking a duplicate

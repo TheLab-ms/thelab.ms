@@ -1,8 +1,9 @@
-import { boundedText, cookie, cookieHeader, discord, discordID, discounts, escapeHTML as e, hash, HttpError, now, opaque, origin, randomToken, redirect } from './http.js';
+import { boundedText, cookie, cookieHeader, discord, discordID, discounts, escapeHTML as e, hash, HttpError, origin, redirect } from './http.js';
+import { issueToken, loginDestination, startLogin, TOKEN_AGE, verifyToken } from './auth.js';
 import { coordinated } from './membership.js';
 import { logError, requestContext } from './logging.js';
+import { memberName } from './member-metadata.js';
 
-const SESSION_AGE = 8 * 3600;
 const PAGE_SIZE = 25;
 
 export function adminConfigured(env) {
@@ -14,15 +15,11 @@ function requireRole(env, member) {
 	if (!Array.isArray(member.roles) || !member.roles.includes(env.DISCORD_ADMIN_ROLE_ID)) throw new HttpError(403, 'You need TheLab’s configured admin Discord role to access this page.');
 }
 
-export async function finishAdminLogin(request, env, user, guildMember) {
+export async function finishAdminLogin(env, user, guildMember, destination) {
 	requireRole(env, guildMember);
-	const token = randomToken();
-	await env.DB.batch([
-		env.DB.prepare('DELETE FROM admin_sessions WHERE expires <= ? OR token_hash = ?').bind(now(), await hash(cookie(request, 'thelab_admin') || '')),
-		env.DB.prepare('INSERT INTO admin_sessions (token_hash, discord_user_id, expires) VALUES (?, ?, ?)').bind(await hash(token), user.id, now() + SESSION_AGE),
-	]);
-	const response = redirect(`${origin(env)}/admin`);
-	response.headers.append('Set-Cookie', cookieHeader(env, 'thelab_admin', token, SESSION_AGE));
+	const token = await issueToken(env, user.id, 'admin');
+	const response = redirect(`${origin(env)}${loginDestination(destination, 'admin')}`);
+	response.headers.append('Set-Cookie', cookieHeader(env, 'thelab_admin', token, TOKEN_AGE.admin));
 	response.headers.append('Set-Cookie', cookieHeader(env, 'thelab_oauth', '', 0));
 	return response;
 }
@@ -41,6 +38,18 @@ function page(title, content, csrf, status = 200) {
 const date = value => value ? new Date(value * 1000).toISOString().replace('T', ' ').replace('.000Z', ' UTC') : '—';
 const labelDiscount = value => ({ '': 'Standard rate', firstResponder: 'First responder' })[value] ?? value.charAt(0).toUpperCase() + value.slice(1);
 
+function subscriptionStatus(member) {
+	const state = member.stripe_subscription_state;
+	if (!state) return member.stripe_subscription_id ? 'Unknown — not yet synced' : 'No subscription';
+	return `${['active', 'trialing'].includes(state) ? 'Active' : 'Inactive'} — ${state}`;
+}
+
+function subscriptionLink(member, env) {
+	if (!/^sub_[A-Za-z0-9]+$/.test(member.stripe_subscription_id || '')) return '';
+	const mode = /^(sk|rk)_test_/.test(env.STRIPE_SECRET_KEY || '') ? 'test/' : '';
+	return `<a href="https://dashboard.stripe.com/${mode}subscriptions/${e(member.stripe_subscription_id)}" target="_blank" rel="noopener noreferrer">View subscription in Stripe ↗</a>`;
+}
+
 async function list(request, env, csrf) {
 	const params = new URL(request.url).searchParams;
 	const raw = params.get('page') || '1';
@@ -49,36 +58,40 @@ async function list(request, env, csrf) {
 	const [count, members] = await env.DB.batch([
 		env.DB.prepare('SELECT COUNT(*) AS total FROM members'),
 		env.DB.prepare(`SELECT discord_user_id, discord_username, discord_email, created, bill_annually, discount_type, discount_status,
-      stripe_subscription_state FROM members ORDER BY created DESC, discord_user_id DESC LIMIT ? OFFSET ?`).bind(PAGE_SIZE, (current - 1) * PAGE_SIZE),
+      name_override, billing_name, stripe_subscription_id, stripe_subscription_state, stripe_synced_at FROM members ORDER BY created DESC, discord_user_id DESC LIMIT ? OFFSET ?`).bind(PAGE_SIZE, (current - 1) * PAGE_SIZE),
 	]);
 	const total = count.results[0].total, pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 	if (current > pages) return redirect(`/admin?page=${pages}`);
-	const rows = members.results.map(m => `<tr><td><a href="/admin/members/${e(m.discord_user_id)}">${e(m.discord_username)}</a><small>${e(m.discord_user_id)}</small></td><td>${e(m.discord_email)}</td><td>${e(date(m.created))}</td><td>${m.bill_annually ? 'Yearly' : 'Monthly'}</td><td>${e(labelDiscount(m.discount_type))}<small>${e(m.discount_status)}</small></td><td>${e(m.stripe_subscription_state || 'No subscription')}</td></tr>`).join('');
+	const rows = members.results.map(m => `<tr><td><a href="/admin/members/${e(m.discord_user_id)}">${e(memberName(m))}</a><small>${e(m.discord_user_id)}</small></td><td>${e(m.discord_email)}</td><td>${e(date(m.created))}</td><td>${m.bill_annually ? 'Yearly' : 'Monthly'}</td><td>${e(labelDiscount(m.discount_type))}<small>${e(m.discount_status)}</small></td><td><strong>${e(subscriptionStatus(m))}</strong><small>Last synced: ${e(date(m.stripe_synced_at))}</small>${subscriptionLink(m, env)}</td></tr>`).join('');
 	return page('Registered members', `<p>${total} registered member${total === 1 ? '' : 's'}. Includes pending and inactive memberships.</p><div class="admin-table"><table><thead><tr><th scope="col">Member</th><th scope="col">Discord email</th><th scope="col">Registered</th><th scope="col">Saved billing</th><th scope="col">Discount</th><th scope="col">Last-synced subscription</th></tr></thead><tbody>${rows || '<tr><td colspan="6">No members have registered yet.</td></tr>'}</tbody></table></div><nav class="admin-pagination" aria-label="Member pages">${current > 1 ? `<a class="btn btn-outline" href="/admin?page=${current - 1}">Previous</a>` : ''}<span>Page ${current} of ${pages}</span>${current < pages ? `<a class="btn btn-outline" href="/admin?page=${current + 1}">Next</a>` : ''}</nav>`, csrf);
 }
 
-function input(name, label, value, max, type = 'text', required = false) {
-	return `<label for="${name}">${e(label)}</label><input id="${name}" name="${name}" type="${type}" value="${e(value)}" maxlength="${max}"${required ? ' required' : ''}>`;
+function input(name, label, value, max, type = 'text', required = false, readonly = false) {
+	return `<label for="${name}">${e(label)}</label><input id="${name}" name="${name}" type="${type}" value="${e(value ?? '')}" maxlength="${max}"${required ? ' required' : ''}${readonly ? ' readonly' : ''}>`;
 }
 
 function select(name, label, value, choices) {
 	return `<label for="${name}">${e(label)}</label><select id="${name}" name="${name}">${choices.map(([key, text]) => `<option value="${e(key)}"${key === value ? ' selected' : ''}>${e(text)}</option>`).join('')}</select>`;
 }
 
-function editor(member, fields, csrf, message = '', status = 200) {
-	const f = fields || { ...member, billing: member.bill_annually ? 'yearly' : 'monthly', custom_metadata: JSON.stringify(JSON.parse(member.custom_metadata), null, 2) };
+function editor(member, fields, csrf, env, message = '', status = 200) {
+	const f = fields || { ...member, billing: member.bill_annually ? 'yearly' : 'monthly' };
 	const details = [
-		['Discord ID', member.discord_user_id], ['Registered', date(member.created)], ['Stripe customer ID', member.stripe_customer_id],
-		['Stripe subscription ID', member.stripe_subscription_id], ['Subscription status', member.stripe_subscription_state],
+		['Registered', date(member.created)], ['Subscription status (database)', subscriptionStatus(member)],
 		['Stripe last synced', date(member.stripe_synced_at)], ['Discord last synced', date(member.discord_last_synced)],
 	];
-	return page(`Edit ${member.discord_username}`, `<p><a href="/admin">← All members</a></p>${message ? `<p class="admin-notice" role="${status >= 400 ? 'alert' : 'status'}">${e(message)}</p>` : ''}
-    <section class="card admin-section"><h2>Account details</h2><dl>${details.map(([key, value]) => `<dt>${e(key)}</dt><dd>${e(value || '—')}</dd>`).join('')}</dl></section>
+	return page(`Edit ${memberName(member)}`, `<p><a href="/admin">← All members</a></p>${message ? `<p class="admin-notice" role="${status >= 400 ? 'alert' : 'status'}">${e(message)}</p>` : ''}
+    <section class="card admin-section"><h2>Account details</h2><p>Subscription status reflects the stored database state. Active and trialing subscriptions qualify for membership; Stripe changes appear after synchronization.</p><dl>${details.map(([key, value]) => `<dt>${e(key)}</dt><dd>${e(value || '—')}</dd>`).join('')}${subscriptionLink(member, env) ? `<dt>Stripe Dashboard</dt><dd>${subscriptionLink(member, env)}</dd>` : ''}</dl></section>
     <form method="post" action="/admin/members/${e(member.discord_user_id)}" class="admin-form">
     <input type="hidden" name="csrf" value="${e(csrf)}"><input type="hidden" name="metadata_version" value="${e(f.metadata_version)}">
-    <fieldset class="card admin-section"><legend>Profile</legend><p>Discord sign-in refreshes the stored Discord username and email. Separate contact fields retain admin edits.</p>
-    ${input('discord_username', 'Discord username', f.discord_username, 80, 'text', true)}${input('discord_email', 'Discord email', f.discord_email, 254, 'email', true)}
-    ${input('contact_name', 'Contact name', f.contact_name, 160)}${input('contact_email', 'Contact email', f.contact_email, 254, 'email')}
+    <fieldset class="card admin-section"><legend>Profile</legend><p>Members are named by their name override, then Stripe billing name, then Discord username. Discord sign-in refreshes username and email; billing details are refreshed from Stripe.</p>
+    ${input('name_override', 'Name override', f.name_override, 160)}
+    ${input('discord_user_id', 'Discord ID', f.discord_user_id, 20, 'text', true)}
+    <p>Changing Discord ID transfers the membership to that account. Its email is available after it signs in.</p>
+    ${input('discord_username', 'Discord username', member.discord_username, 80, 'text', false, true)}${input('discord_email', 'Discord email', member.discord_email, 254, 'email', false, true)}
+    ${input('billing_name', 'Billing name (Stripe)', member.billing_name, 255, 'text', false, true)}${input('billing_email', 'Billing email (Stripe)', member.billing_email, 254, 'email', false, true)}
+    ${input('stripe_customer_id', 'Stripe customer ID', f.stripe_customer_id, 255)}${input('stripe_subscription_id', 'Stripe subscription ID', f.stripe_subscription_id, 255)}
+    <p>The subscription must belong to the customer. Stripe synchronization automatically selects the current membership subscription and may replace this ID.</p>
     </fieldset><fieldset class="card admin-section"><legend>Billing metadata</legend><p>These settings apply to future checkout. Existing Stripe subscriptions and invoices are unchanged. Changing pricing settings expires any open checkout link. Use Stripe to manage an existing subscription.</p>
     ${select('billing', 'Saved billing cycle', f.billing, [['monthly', 'Monthly'], ['yearly', 'Yearly']])}
     ${select('discount_type', 'Discount category', f.discount_type, discounts.map(key => [key, labelDiscount(key)]))}
@@ -86,8 +99,6 @@ function editor(member, fields, csrf, message = '', status = 200) {
     <p class="signup-help">Choose “None” for standard rate, or a request status for a discount category. The member can resume their saved selection at <a href="/payment/resume">/payment/resume</a>; choosing a different selection at signup replaces it.</p>
     </fieldset><fieldset class="card admin-section"><legend>Internal metadata</legend>
     <label for="notes">Notes</label><textarea id="notes" name="notes" maxlength="5000" rows="6">${e(f.notes)}</textarea>
-    <label for="custom_metadata">Custom metadata (JSON key/value pairs)</label><p id="metadata-help">Use a JSON object with text values, for example {"orientation": "completed"}. Up to 50 pairs; keys up to 80 characters and values up to 1,000.</p>
-    <textarea id="custom_metadata" name="custom_metadata" maxlength="16000" rows="8" required aria-describedby="metadata-help" spellcheck="false">${e(f.custom_metadata)}</textarea>
     </fieldset><div class="admin-actions"><button class="btn btn-primary" type="submit">Save changes</button><a href="/admin/members/${e(member.discord_user_id)}">Reload member</a><a href="/admin">Back to members</a></div></form>`, csrf, status);
 }
 
@@ -107,11 +118,8 @@ export async function adminRequest(request, env, context = requestContext(reques
 	try {
 		adminConfigured(env);
 		const token = cookie(request, 'thelab_admin');
-		const session = opaque.test(token || '') && await env.DB.prepare('SELECT discord_user_id FROM admin_sessions WHERE token_hash = ? AND expires > ?').bind(await hash(token), now()).first();
-    if (!session) {
-      logError('admin.rejected', new HttpError(401, 'Admin sign-in required.'), context, env);
-      return page('Admin sign-in', '<p>Sign in with a Discord account holding TheLab’s admin role.</p><a class="btn btn-primary" href="/admin/login">Sign in with Discord</a>', null, 401);
-    }
+		const claims = await verifyToken(env, token, 'admin');
+		if (!claims) return startLogin(request, env, 'admin');
 		csrf = await hash(`admin-csrf:${token}`);
 		let fields;
 		if (request.method === 'POST') {
@@ -122,13 +130,12 @@ export async function adminRequest(request, env, context = requestContext(reques
 			fields = Object.fromEntries(form);
 		}
 		if (path === '/admin/logout') {
-			await env.DB.prepare('DELETE FROM admin_sessions WHERE token_hash = ?').bind(await hash(token)).run();
-			const response = redirect('/admin');
+			const response = redirect('/');
 			response.headers.set('Set-Cookie', cookieHeader(env, 'thelab_admin', '', 0));
 			return response;
 		}
 		let guildMember;
-		try { guildMember = await discord(env, `/guilds/${env.DISCORD_GUILD_ID}/members/${session.discord_user_id}`); }
+		try { guildMember = await discord(env, `/guilds/${env.DISCORD_GUILD_ID}/members/${claims.sub}`); }
 		catch (error) {
       if (error.providerStatus === 404) throw new HttpError(403, 'You must be in TheLab’s Discord server with the admin role.');
 			throw error;
@@ -141,11 +148,11 @@ export async function adminRequest(request, env, context = requestContext(reques
 			try { await coordinated(env, member.discord_user_id, '/admin/update', { discord_user_id: member.discord_user_id, fields }); }
       catch (error) {
         logError('admin.save_failed', error, context, env);
-        return editor(member, fields, csrf, error instanceof HttpError ? error.message : 'Saving failed. Please try again.', error instanceof HttpError ? error.status : 500);
+        return editor(member, fields, csrf, env, error instanceof HttpError ? error.message : 'Saving failed. Please try again.', error instanceof HttpError ? error.status : 500);
 			}
-			return redirect(`${path}?saved=1`);
+			return redirect(`/admin/members/${fields.discord_user_id.trim()}?saved=1`);
 		}
-		return editor(member, null, csrf, new URL(request.url).searchParams.get('saved') === '1' ? 'Member metadata saved.' : '');
+		return editor(member, null, csrf, env, new URL(request.url).searchParams.get('saved') === '1' ? 'Member metadata saved.' : '');
   } catch (error) {
     logError('admin.failed', error, context, env);
 		return page('Admin access', `<p role="alert">${e(error instanceof HttpError ? error.message : 'Admin is temporarily unavailable. Please try again.')}</p><p><a href="/admin">Return to members</a> · <a href="/admin/login">Sign in again</a></p>`, csrf, error instanceof HttpError ? error.status : 500);

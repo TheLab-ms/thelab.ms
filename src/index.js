@@ -1,12 +1,12 @@
-import { boundedText, cookie, cookieHeader, discord, discordID, discounts, errorPage, hash, HttpError, json, now, opaque, origin, provider, randomToken, redirect, stripe, verifyStripe } from './http.js';
+import { boundedText, cookie, cookieHeader, discord, discordID, discounts, errorPage, hash, HttpError, json, now, opaque, origin, provider, redirect, stripe, verifyStripe } from './http.js';
+import { loginDestination, memberToken, signedInMember, startLogin, TOKEN_AGE } from './auth.js';
 import { coordinated } from './membership.js';
 import { adminConfigured, adminRequest, finishAdminLogin } from './admin.js';
 import { logError, requestContext } from './logging.js';
 export { Membership } from './membership.js';
 
-const OAUTH_AGE = 600;
-const SESSION_AGE = 86400;
 const events = new Set([
+  'customer.updated',
   'customer.subscription.created', 'customer.subscription.updated', 'customer.subscription.deleted',
   'checkout.session.completed', 'checkout.session.async_payment_succeeded', 'checkout.session.async_payment_failed',
   'invoice.paid', 'invoice.payment_failed',
@@ -24,28 +24,17 @@ async function signup(request, env, admin = false) {
   const frequency = url.searchParams.get('billing') || 'monthly';
   const discount = url.searchParams.get('discount') || '';
   if (!['monthly', 'yearly'].includes(frequency) || !discounts.includes(discount) || url.searchParams.getAll('billing').length > 1 || url.searchParams.getAll('discount').length > 1) throw new HttpError(400, 'Invalid membership selection.');
-  const state = randomToken(), browser = randomToken();
-  await env.DB.batch([
-    env.DB.prepare('DELETE FROM oauth_states WHERE expires <= ?').bind(now()),
-    env.DB.prepare('DELETE FROM sessions WHERE expires <= ?').bind(now()),
-    env.DB.prepare('INSERT INTO oauth_states (state_hash, browser_hash, bill_annually, discount_type, expires, purpose) VALUES (?, ?, ?, ?, ?, ?)')
-      .bind(await hash(state), await hash(browser), frequency === 'yearly' ? 1 : 0, discount, now() + OAUTH_AGE, admin ? 'admin' : 'signup'),
-  ]);
-  const target = new URL('https://discord.com/oauth2/authorize');
-  target.search = new URLSearchParams({ client_id: env.DISCORD_CLIENT_ID, response_type: 'code', scope: 'identify email', redirect_uri: `${origin(env)}/login/discord/callback`, state }).toString();
-  const response = redirect(target.href);
-  response.headers.set('Set-Cookie', cookieHeader(env, 'thelab_oauth', browser, OAUTH_AGE));
-  return response;
+  return startLogin(request, env, admin ? 'admin' : 'signup', { annual: frequency === 'yearly', discount });
 }
 
 async function resume(request, env) {
-  const token = cookie(request, 'thelab_session');
-  const member = opaque.test(token || '') && await env.DB.prepare(`SELECT m.bill_annually, m.discount_type FROM sessions s
-    JOIN members m ON m.discord_user_id = s.discord_user_id WHERE s.token_hash = ? AND s.expires > ?`)
-    .bind(await hash(token), now()).first();
-  if (!member) throw new HttpError(401, 'Please return to signup and select the same billing frequency and discount category to check your approval.');
-  const params = new URLSearchParams({ billing: member.bill_annually ? 'yearly' : 'monthly', discount: member.discount_type });
-  return redirect(`${origin(env)}/signup?${params}`);
+  const member = await signedInMember(request, env);
+  if (!member) return startLogin(request, env, 'member');
+  const result = await coordinated(env, member.discord_user_id, '/checkout', {
+    user: { id: member.discord_user_id, username: member.discord_username, email: member.discord_email },
+    annual: Boolean(member.bill_annually), discount: member.discount_type,
+  });
+  return redirect(result.url);
 }
 
 async function callback(request, env) {
@@ -53,7 +42,7 @@ async function callback(request, env) {
   const url = new URL(request.url);
   const state = url.searchParams.get('state'), browser = cookie(request, 'thelab_oauth');
   if (!opaque.test(state || '') || !opaque.test(browser || '') || url.searchParams.getAll('state').length !== 1) throw new HttpError(400, 'Invalid or expired Discord sign-in. Please start again.');
-  const pending = await env.DB.prepare('DELETE FROM oauth_states WHERE state_hash = ? AND browser_hash = ? AND expires > ? RETURNING bill_annually, discount_type, purpose')
+  const pending = await env.DB.prepare('DELETE FROM oauth_states WHERE state_hash = ? AND browser_hash = ? AND expires > ? RETURNING bill_annually, discount_type, purpose, return_to')
     .bind(await hash(state), await hash(browser), now()).first();
   if (!pending) throw new HttpError(400, 'Invalid or expired Discord sign-in. Please start again.');
   const code = url.searchParams.get('code');
@@ -73,29 +62,32 @@ async function callback(request, env) {
     if (error.providerStatus === 404) throw new HttpError(403, 'Please join TheLab’s Discord server using the link below, then return to signup.');
     throw error;
   }
-  if (pending.purpose === 'admin') return finishAdminLogin(request, env, user, guildMember);
+  if (pending.purpose === 'admin') return finishAdminLogin(env, user, guildMember, pending.return_to);
+  if (pending.purpose === 'member') {
+    const member = await env.DB.prepare(`UPDATE members SET discord_username = ?, discord_email = ?,
+      metadata_version = metadata_version + 1 WHERE discord_user_id = ? RETURNING *`)
+      .bind(user.username, user.email.toLowerCase(), user.id).first();
+    if (!member) throw new HttpError(404, 'No membership found for this Discord account. Please choose a membership to sign up.');
+    const response = redirect(`${origin(env)}${loginDestination(pending.return_to, 'member')}`);
+    response.headers.append('Set-Cookie', cookieHeader(env, 'thelab_member', await memberToken(env, member), TOKEN_AGE.member));
+    response.headers.append('Set-Cookie', cookieHeader(env, 'thelab_oauth', '', 0));
+    return response;
+  }
   configured(env);
   const result = await coordinated(env, user.id, '/checkout', { user: { id: user.id, username: user.username, email: user.email }, annual: Boolean(pending.bill_annually), discount: pending.discount_type });
-  const session = randomToken();
-  const old = cookie(request, 'thelab_session');
-  await env.DB.batch([
-    env.DB.prepare('INSERT INTO sessions (token_hash, discord_user_id, expires) VALUES (?, ?, ?)').bind(await hash(session), user.id, now() + SESSION_AGE),
-    env.DB.prepare('DELETE FROM sessions WHERE token_hash = ?').bind(await hash(old || '')),
-  ]);
+  const member = await env.DB.prepare('SELECT * FROM members WHERE discord_user_id = ?').bind(user.id).first();
   const response = redirect(result.url);
-  response.headers.append('Set-Cookie', cookieHeader(env, 'thelab_session', session, SESSION_AGE));
+  response.headers.append('Set-Cookie', cookieHeader(env, 'thelab_member', await memberToken(env, member), TOKEN_AGE.member));
   response.headers.append('Set-Cookie', cookieHeader(env, 'thelab_oauth', '', 0));
   return response;
 }
 
 async function success(request, env) {
-  const url = new URL(request.url), token = cookie(request, 'thelab_session');
+  const url = new URL(request.url);
   const sessionID = url.searchParams.get('session_id');
   if (!/^cs_[A-Za-z0-9_]+$/.test(sessionID || '') || url.searchParams.getAll('session_id').length !== 1) throw new HttpError(400, 'Invalid checkout session.');
-  if (!opaque.test(token || '')) throw new HttpError(401, 'Your sign-in has expired. Sign in again to manage your membership.');
-  const member = await env.DB.prepare(`SELECT m.* FROM sessions s JOIN members m ON m.discord_user_id = s.discord_user_id WHERE s.token_hash = ? AND s.expires > ?`)
-    .bind(await hash(token), now()).first();
-  if (!member) throw new HttpError(401, 'Your sign-in has expired. Sign in again to manage your membership.');
+  const member = await signedInMember(request, env);
+  if (!member) return startLogin(request, env, 'member');
   const session = await stripe(env, `/checkout/sessions/${encodeURIComponent(sessionID)}`);
   if (session.mode !== 'subscription' || session.customer !== member.stripe_customer_id || session.client_reference_id !== member.discord_user_id || session.metadata?.thelab_discord_id !== member.discord_user_id) throw new HttpError(403, 'This checkout does not belong to your membership.');
   if (session.status !== 'complete' || !['paid', 'no_payment_required'].includes(session.payment_status)) throw new HttpError(409, 'Your payment is not complete yet. Please finish Stripe Checkout or contact leadership.');
@@ -116,7 +108,7 @@ async function webhook(request, env) {
   if (!event || !/^evt_[A-Za-z0-9_]+$/.test(event.id || '') || typeof event.type !== 'string' || !event.data?.object) throw new HttpError(400, 'Invalid Stripe event.');
   if (!events.has(event.type)) return new Response(null, { status: 204 });
   const object = event.data.object;
-  const customer = typeof object.customer === 'string' ? object.customer : object.customer?.id;
+  const customer = event.type === 'customer.updated' ? object.id : typeof object.customer === 'string' ? object.customer : object.customer?.id;
   if (!/^cus_[A-Za-z0-9]+$/.test(customer || '')) throw new HttpError(400, 'Stripe event has no customer.');
   // No pre-enqueue deduplication: a failed send must be retried by Stripe.
   await env.MEMBERSHIP_QUEUE.send({ event_id: event.id, customer_id: customer });
@@ -124,6 +116,10 @@ async function webhook(request, env) {
 }
 
 export async function processMessage(body, env) {
+  if (body?.member_id && /^[a-f0-9]{32}$/.test(body.member_id) && !body.customer_id && !body.event_id) {
+    await coordinated(env, null, '/sync', { member_id: body.member_id });
+    return;
+  }
   if (!body || !/^cus_[A-Za-z0-9]+$/.test(body.customer_id || '') || (body.event_id !== undefined && !/^evt_[A-Za-z0-9_]+$/.test(body.event_id))) throw new HttpError(400, 'Invalid queue message.');
   const member = await env.DB.prepare('SELECT discord_user_id FROM members WHERE stripe_customer_id = ?').bind(body.customer_id).first();
   // Other Stripe customers (e.g. donations or Conway) are outside this app.

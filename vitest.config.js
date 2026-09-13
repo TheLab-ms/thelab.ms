@@ -9,6 +9,7 @@ export default defineConfig(async () => ({
       compatibilityFlags: ['nodejs_compat'],
       bindings: {
         SITE_URL: 'https://thelab.example',
+        AUTH_SECRET: 'test-only-auth-secret-at-least-32-bytes',
         DISCORD_CLIENT_ID: 'test-client',
         DISCORD_CLIENT_SECRET: 'test-secret',
         DISCORD_BOT_TOKEN: 'test-bot',
