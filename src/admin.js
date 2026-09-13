@@ -5,6 +5,9 @@ import { coordinated } from './membership.js';
 import { logError, requestContext } from './logging.js';
 import { editor, memberList, page } from './admin-views.js';
 import { memberListParams, memberListURL } from './admin-search.js';
+import { eventListParams, eventListURL, queryEvents } from './member-events.js';
+import { eventList } from './event-views.js';
+import { memberName } from './member-metadata.js';
 
 const PAGE_SIZE = 25;
 
@@ -45,10 +48,18 @@ async function readForm(request, env, csrf) {
   return Object.fromEntries(form);
 }
 
+async function history(request, env, csrf, member) {
+  const url = new URL(request.url);
+  const params = eventListParams(url.searchParams);
+  const result = await queryEvents(env, { ...params, memberID: member?.member_id });
+  if (result.current > result.pages) return redirect(eventListURL(url.pathname, result.pages, params.type));
+  return page(member ? `History for ${memberName(member)}` : 'Member history', eventList(result, url.pathname, member), csrf);
+}
+
 export async function adminRequest(request, env, context = requestContext(request)) {
   const url = new URL(request.url), path = url.pathname;
-  const match = path.match(/^\/admin\/members\/([1-9][0-9]{16,19})$/);
-  const methods = path === '/admin' || path === '/admin/' ? ['GET'] : path === '/admin/logout' ? ['POST'] : match ? ['GET', 'POST'] : [];
+  const match = path.match(/^\/admin\/members\/([1-9][0-9]{16,19})(\/events)?$/);
+  const methods = path === '/admin' || path === '/admin/' || path === '/admin/events' || match?.[2] ? ['GET'] : path === '/admin/logout' ? ['POST'] : match ? ['GET', 'POST'] : [];
   if (!methods.length) {
     logError('admin.rejected', new HttpError(404, 'Admin page not found.'), context, env);
     return page('Not found', '<p>This admin page does not exist. <a href="/admin">Return to members</a>.</p>', null, 404);
@@ -77,18 +88,22 @@ export async function adminRequest(request, env, context = requestContext(reques
       throw error;
     }
     requireRole(env, guildMember);
+    if (path === '/admin/events') return await history(request, env, csrf);
     if (!match) return await list(request, env, csrf);
     const member = await env.DB.prepare('SELECT * FROM members WHERE discord_user_id = ?').bind(match[1]).first();
     if (!member) throw new HttpError(404, 'Member not found.');
+    if (match[2]) return await history(request, env, csrf, member);
     if (fields) {
       try { await coordinated(env, member.member_id, 'updateMetadata', { fields }); }
       catch (error) {
         logError('admin.save_failed', error, context, env);
-        return editor(member, fields, csrf, env, error instanceof HttpError ? error.message : 'Saving failed. Please try again.', error instanceof HttpError ? error.status : 500);
+        const { events } = await queryEvents(env, { memberID: member.member_id, limit: 10 });
+        return editor(member, fields, csrf, env, error instanceof HttpError ? error.message : 'Saving failed. Please try again.', error instanceof HttpError ? error.status : 500, events);
       }
       return redirect(`/admin/members/${fields.discord_user_id.trim()}?saved=1`);
     }
-    return editor(member, null, csrf, env, url.searchParams.get('saved') === '1' ? 'Member metadata saved.' : '');
+    const { events } = await queryEvents(env, { memberID: member.member_id, limit: 10 });
+    return editor(member, null, csrf, env, url.searchParams.get('saved') === '1' ? 'Member metadata saved.' : '', 200, events);
   } catch (error) {
     logError('admin.failed', error, context, env);
     return page('Admin access', `<p role="alert">${e(error instanceof HttpError ? error.message : 'Admin is temporarily unavailable. Please try again.')}</p><p><a href="/admin">Return to members</a> · <a href="/admin/login">Sign in again</a></p>`, csrf, error instanceof HttpError ? error.status : 500);

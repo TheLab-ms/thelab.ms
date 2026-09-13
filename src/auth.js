@@ -1,6 +1,7 @@
 import { cookie, cookieHeader, discordID, hash, HttpError, now, opaque, origin, randomToken, redirect } from './http.js';
 import { encodeBase64URL as encode, decodeBase64URL as decode, encodeJSON as json } from './encoding.js';
 import { memberListParams } from './admin-search.js';
+import { eventListParams } from './member-events.js';
 
 export const TOKEN_AGE = { member: 86400, admin: 8 * 3600, oauth: 600 };
 const encoder = new TextEncoder();
@@ -58,6 +59,12 @@ export function finishLogin(env, destination, audience, token) {
 export function loginDestination(value, purpose) {
   if (purpose === 'admin') {
     if (/^\/admin\/members\/[1-9][0-9]{16,19}$/.test(value)) return value;
+    if (/^\/admin(?:\/members\/[1-9][0-9]{16,19})?\/events(?:\?[^#]*)?$/.test(value)) {
+      try {
+        eventListParams(new URLSearchParams(value.split('?')[1]));
+        return value;
+      } catch { /* Invalid history parameters fall back to members. */ }
+    }
     if (/^\/admin\/?(?:\?[^#]*)?$/.test(value)) {
       const params = new URLSearchParams(value.split('?')[1]);
       try {

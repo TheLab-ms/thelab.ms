@@ -2,10 +2,11 @@ import { escapeHTML as e } from './http.js';
 import { discounts, grantsMembership } from './membership-policy.js';
 import { memberName } from './member-metadata.js';
 import { MAX_SEARCH_LENGTH, memberListURL } from './admin-search.js';
+import { recentHistory } from './event-views.js';
 
 export function page(title, content, csrf, status = 200) {
 	return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>${e(title)} | TheLab admin</title><link rel="icon" href="/assets/favicon.svg"><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/membership.css"><link rel="stylesheet" href="/admin.css"></head>
-    <body class="membership-page"><main class="container membership-main admin-main"><header class="admin-header"><a class="membership-brand" href="/">TheLab</a><a href="/admin">Member admin</a>${csrf ? `<form method="post" action="/admin/logout"><input type="hidden" name="csrf" value="${e(csrf)}"><button class="btn btn-outline" type="submit">Sign out</button></form>` : ''}</header><h1>${e(title)}</h1>${content}</main></body></html>`, {
+    <body class="membership-page"><main class="container membership-main admin-main"><header class="admin-header"><a class="membership-brand" href="/">TheLab</a><a href="/admin">Member admin</a><a href="/admin/events">Member history</a>${csrf ? `<form method="post" action="/admin/logout"><input type="hidden" name="csrf" value="${e(csrf)}"><button class="btn btn-outline" type="submit">Sign out</button></form>` : ''}</header><h1>${e(title)}</h1>${content}</main></body></html>`, {
 		status,
 		headers: {
 			'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
@@ -46,7 +47,7 @@ function select(name, label, value, choices) {
 	return `<label for="${name}">${e(label)}</label><select id="${name}" name="${name}">${choices.map(([key, text]) => `<option value="${e(key)}"${key === value ? ' selected' : ''}>${e(text)}</option>`).join('')}</select>`;
 }
 
-export function editor(member, fields, csrf, env, message = '', status = 200) {
+export function editor(member, fields, csrf, env, message = '', status = 200, events = []) {
 	const f = fields || { ...member, billing: member.bill_annually ? 'yearly' : 'monthly' };
 	const details = [
 		['Registered', date(member.created)], ['Subscription status (database)', subscriptionStatus(member)],
@@ -70,5 +71,5 @@ export function editor(member, fields, csrf, env, message = '', status = 200) {
     <p class="signup-help">Choose “Standard rate” or assign a discount category. Stripe Checkout automatically applies the assigned discount; members cannot change it. The member can continue at <a href="/payment/resume">/payment/resume</a>.</p>
     </fieldset><fieldset class="card admin-section"><legend>Internal metadata</legend>
     <label for="notes">Notes</label><textarea id="notes" name="notes" maxlength="5000" rows="6">${e(f.notes)}</textarea>
-    </fieldset><div class="admin-actions"><button class="btn btn-primary" type="submit">Save changes</button><a href="/admin/members/${e(member.discord_user_id)}">Reload member</a><a href="/admin">Back to members</a></div></form>`, csrf, status);
+    </fieldset><div class="admin-actions"><button class="btn btn-primary" type="submit">Save changes</button><a href="/admin/members/${e(member.discord_user_id)}">Reload member</a><a href="/admin">Back to members</a></div></form>${recentHistory(member, events)}`, csrf, status);
 }

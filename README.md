@@ -227,11 +227,41 @@ Concurrent profile/billing edits are rejected with a reload message so stale
 forms cannot silently overwrite newer changes. Subscription status and sync
 timestamps are read-only; role eligibility is always reconciled against Stripe.
 
-The initial migration includes the admin schema and stores the latest Stripe state
-in `members`, with no OAuth state or Stripe event tables. No upgrade migration is
+The initial migration includes the admin and member-history schema and stores the latest Stripe state
+in `members`, with no OAuth state or Stripe webhook receipt tables. No upgrade migration is
 needed for this undeployed app.
 For a local database created with the old schema,
 recreate the disposable local D1 database and run `npm run db:local` before use.
+
+## Member history
+
+Open **`/admin/events`** for a paginated history of member changes, filterable by
+event type. Each member's edit page shows their ten most recent events and links
+to **`/admin/members/<discord-id>/events`** for their full, filterable history.
+History pages require the same live Discord admin-role check as member edits.
+Timestamps are displayed in UTC, newest first; event IDs break ties within a second.
+
+SQLite triggers in the initial migration record registration and actual changes to:
+
+- Discord account ID, username, and email.
+- Stripe billing name/email and the name override.
+- Internal notes (an update marker only, without copying note contents).
+- Saved billing cycle and discount category.
+- Stripe customer/subscription links and the stored subscription status.
+
+Changed values are stored as structured before/after details. History is written
+atomically with each database change, including admin edits, Discord sign-in
+refreshes, and Stripe reconciliation. Repeated saves of the same values, sync
+timestamps, and version counters produce no events. This records committed member
+state changes; it does not identify the editor or imply that a Discord role update
+succeeded. Operational errors continue to appear in Worker logs.
+
+Events are **retained indefinitely** and linked to the stable internal member ID,
+so transferring the Discord account preserves history. Deleting a member retains
+their events with a “Deleted member” label. There is no scheduled cleanup or
+backfill of existing records. Since this app is undeployed, the history tables and
+triggers are part of `0001_membership.sql`; recreate any old disposable local D1
+database and apply `npm run db:local` to use the updated schema.
 
 ## Queue delivery and recovery
 
@@ -285,6 +315,8 @@ mappings while subscriptions are in use.
   cookies, and shared JWT encoding.
 - `src/admin.js`, `src/admin-views.js`, and `src/member-metadata.js`: admin request
   handling, HTML rendering, and editable-field validation.
+- `src/member-events.js` and `src/event-views.js`: member-history queries, filters,
+  and rendering. The initial D1 migration owns automatic change capture.
 - `src/printers.js`: member authorization and the edge JWT handoff.
 - `src/http.js` and `src/logging.js`: HTTP utilities and redacted diagnostics.
 

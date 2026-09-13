@@ -6,6 +6,7 @@ import { coordinated, registerMember } from '../src/membership.js';
 import { hash, now } from '../src/http.js';
 import { provider } from '../src/providers.js';
 import { issueToken, loginDestination, memberToken, verifyToken } from '../src/auth.js';
+import { queryEvents } from '../src/member-events.js';
 
 // Global fetch spies also apply inside the bound Durable Object in this runtime.
 // Every unexpected provider request fails; no tests can reach live services.
@@ -358,6 +359,21 @@ describe('member administration', () => {
     return api(`/admin/members/${id}`, { method: 'POST', body: new URLSearchParams({ csrf: await hash(`admin-csrf:${token}`), ...values }),
       headers: { Cookie: cookie, Origin: env.SITE_URL, 'Content-Type': 'application/x-www-form-urlencoded', ...options } });
   }
+
+  it('records committed admin edits once and leaves history intact on stale or invalid saves', async () => {
+    await seed(); await authenticate();
+    role().times(3);
+    expect((await save()).status).toBe(303);
+    const history = await queryEvents(env);
+    expect(history.events.map(event => event.event_type).sort()).toEqual([
+      'BillingCycleChanged', 'DiscountTypeModified', 'MemberRegistered', 'NameOverrideChanged', 'NotesUpdated',
+    ]);
+    expect(history.events.find(event => event.event_type === 'NotesUpdated').details).toBe('{}');
+    expect(JSON.stringify(history)).not.toContain('Orientation complete');
+    expect((await save()).status).toBe(409);
+    expect((await save(fields({ metadata_version: '1', discount_type: 'bogus' }))).status).toBe(400);
+    expect((await queryEvents(env)).events).toEqual(history.events);
+  });
 
   it('isolates admin OAuth from signup, requires a role, and clears the browser cookie', async () => {
     const response = await api('/admin/login', undefined, { ...env, STRIPE_SECRET_KEY: '', DB: undefined });
@@ -827,6 +843,135 @@ describe('member administration', () => {
     expect(result.headers.get('Location')).toBe('/');
     expect((await api('/admin')).headers.get('Location')).toContain('https://discord.com/oauth2/authorize?');
     expect((await api('/admin/logout')).status).toBe(405);
+  });
+});
+
+describe('member history', () => {
+  const historyFor = member => queryEvents(env, { memberID: member.member_id });
+
+  it('records registration once and tracks sign-in changes without timestamp/version noise', async () => {
+    const member = await registerMember(env, user);
+    await registerMember(env, user);
+    await coordinated(env, member.member_id, 'refreshIdentity', { user });
+    expect((await historyFor(member)).events.map(event => event.event_type)).toEqual(['MemberRegistered']);
+    await coordinated(env, member.member_id, 'refreshIdentity', { user: { ...user, username: 'new-maker', email: 'NEW@example.com' } });
+    const result = await historyFor(member);
+    expect(result.total).toBe(3);
+    expect(JSON.parse(result.events.find(event => event.event_type === 'DiscordEmailChanged').details))
+      .toEqual({ from: user.email, to: 'new@example.com' });
+    await env.DB.prepare('UPDATE members SET discord_last_synced = ?, stripe_synced_at = ?, auth_version = auth_version + 1 WHERE member_id = ?')
+      .bind(now(), now(), member.member_id).run();
+    expect((await historyFor(member)).events).toEqual(result.events);
+  });
+
+  it('records current Stripe state once across duplicate deliveries and captures null transitions', async () => {
+    await seed();
+    const member = await readMember();
+    mockBilling().times(2); mockSubs([subscription()]).times(2);
+    mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, {}, 'PUT', 204).times(2);
+    await processMessage({ customer_id: customer }, env);
+    const first = await historyFor(member);
+    expect(first.events.map(event => event.event_type).sort()).toEqual([
+      'BillingEmailChanged', 'BillingNameChanged', 'MemberRegistered', 'StripeSubscriptionChanged', 'SubscriptionStatusChanged',
+    ]);
+    expect(JSON.parse(first.events.find(event => event.event_type === 'SubscriptionStatusChanged').details)).toEqual({ from: null, to: 'active' });
+    await processMessage({ customer_id: customer }, env);
+    expect((await historyFor(member)).events).toEqual(first.events);
+    mockBilling(); mockSubs();
+    mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, {}, 'DELETE', 204);
+    await processMessage({ customer_id: customer }, env);
+    const last = await historyFor(member);
+    expect(last.total).toBe(first.total + 2);
+    expect(JSON.parse(last.events.find(event => event.event_type === 'SubscriptionStatusChanged').details)).toEqual({ from: 'active', to: null });
+  });
+
+  it('rolls back history together with failed database writes', async () => {
+    await seed();
+    const before = await queryEvents(env);
+    await expect(env.DB.batch([
+      env.DB.prepare("UPDATE members SET discount_type = 'student' WHERE discord_user_id = ?").bind(id),
+      env.DB.prepare("UPDATE members SET bill_annually = 2 WHERE discord_user_id = ?").bind(id),
+    ])).rejects.toThrow();
+    expect((await readMember()).discount_type).toBe('');
+    expect((await queryEvents(env)).events).toEqual(before.events);
+  });
+
+  it('follows stable identity transfers, records customer clearing, and retains history after deletion', async () => {
+    await seed();
+    const member = await readMember(), replacement = '555555555555555555';
+    mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${replacement}`, { user: { id: replacement, username: 'replacement' } });
+    mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, {}, 'DELETE', 204);
+    // Exercise the same metadata operation as the admin form, including identity validation.
+    await coordinated(env, member.member_id, 'updateMetadata', { fields: {
+      discord_user_id: replacement, stripe_customer_id: '', stripe_subscription_id: '', name_override: '', notes: '',
+      billing: 'monthly', discount_type: '', metadata_version: '0',
+    } });
+    const events = (await historyFor(member)).events;
+    expect(events.every(event => event.member_id === member.member_id && event.discord_user_id === replacement)).toBe(true);
+    expect(JSON.parse(events.find(event => event.event_type === 'DiscordAccountChanged').details)).toEqual({ from: id, to: replacement });
+    expect(JSON.parse(events.find(event => event.event_type === 'StripeCustomerChanged').details)).toEqual({ from: customer, to: null });
+    await env.DB.prepare('DELETE FROM members WHERE member_id = ?').bind(member.member_id).run();
+    expect((await queryEvents(env)).events).toHaveLength(events.length);
+    expect((await queryEvents(env)).events.every(event => event.member_id === null)).toBe(true);
+  });
+
+  it.each(['/admin/events', `/admin/members/${id}/events`])('requires current admin authorization for %s and preserves OAuth destinations', async path => {
+    const destination = `${path}?page=2&event_type=DiscountTypeModified`;
+    const redirect = await api(destination);
+    expect(redirect.status).toBe(303);
+    const claims = await verifyToken(env, new URL(redirect.headers.get('Location')).searchParams.get('state'), 'oauth');
+    expect(claims.return_to).toBe(destination);
+    const token = await issueToken(env, id, 'admin');
+    mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}`, { roles: [] });
+    expect((await api(path, { headers: { Cookie: `thelab_admin=${token}` } })).status).toBe(403);
+    const memberToken = await issueToken(env, id, 'member');
+    expect((await api(path, { headers: { Cookie: `thelab_admin=${memberToken}` } })).status).toBe(303);
+    expect((await api(path, { method: 'POST' })).status).toBe(405);
+    for (const query of ['page=0', 'page=1&page=2', 'event_type=bogus', 'event_type=NotesUpdated&event_type=NotesUpdated', 'next=https://evil.example']) {
+      expect(loginDestination(`${path}?${query}`, 'admin')).toBe('/admin');
+    }
+  });
+
+  it('filters and paginates history, escapes values, and shows the latest ten events on member detail', async () => {
+    await seed();
+    const other = await registerMember(env, { id: '555555555555555555', username: 'Other member', email: 'other@example.com' });
+    await env.DB.prepare("UPDATE members SET name_override = 'Unrelated history' WHERE member_id = ?").bind(other.member_id).run();
+    for (let index = 0; index < 30; index++) {
+      await env.DB.prepare('UPDATE members SET name_override = ? WHERE discord_user_id = ?').bind(`<script>edit-${index}</script>`, id).run();
+    }
+    const token = await issueToken(env, id, 'admin');
+    const get = async path => {
+      mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}`, { roles: [env.DISCORD_ADMIN_ROLE_ID] });
+      return api(path, { headers: { Cookie: `thelab_admin=${token}` } });
+    };
+    const response = await get(`/admin/members/${id}/events?event_type=NameOverrideChanged`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+    const html = await response.text();
+    expect(html).toContain('30 events.');
+    expect(html).toContain('Page 1 of 2');
+    expect(html).toContain('page=2&amp;event_type=NameOverrideChanged');
+    expect(html).toContain('&lt;script&gt;edit-29&lt;/script&gt;');
+    expect(html).not.toContain('<script>');
+    expect(html).not.toContain('Unrelated history');
+    const second = await (await get(`/admin/members/${id}/events?page=2&event_type=NameOverrideChanged`)).text();
+    expect(second).toContain('Page 2 of 2');
+    expect(second).toContain('&lt;script&gt;edit-0&lt;/script&gt;');
+    expect(second.split('<tbody>')[1].split('</tbody>')[0]).not.toContain('edit-29');
+    const redirect = await get(`/admin/members/${id}/events?page=999&event_type=NameOverrideChanged`);
+    expect(redirect.headers.get('Location')).toBe(`/admin/members/${id}/events?page=2&event_type=NameOverrideChanged`);
+    const global = await (await get('/admin/events?event_type=MemberRegistered')).text();
+    expect(global).toContain('2 events.');
+    expect(global).toContain(`/admin/members/${id}`);
+    expect(global).toContain(`/admin/members/${other.discord_user_id}`);
+    const detail = await (await get(`/admin/members/${id}`)).text();
+    expect(detail).toContain('Recent member history');
+    expect(detail).toContain(`/admin/members/${id}/events`);
+    expect(detail).toContain('edit-20');
+    expect(detail).not.toContain('edit-18');
+    expect((await get('/admin/events?event_type=invalid')).status).toBe(400);
+    expect((await get('/admin/members/666666666666666666/events')).status).toBe(404);
+    expect(await (await get('/admin/events?event_type=NotesUpdated')).text()).toContain('No member history found.');
   });
 });
 

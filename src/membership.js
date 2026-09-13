@@ -272,12 +272,14 @@ export class Membership extends DurableObject {
       billing_name = ?, billing_email = ?, name_override = ?, notes = ?, bill_annually = ?, discount_type = ?,
       stripe_customer_id = ?, stripe_subscription_id = ?,
       stripe_subscription_state = ?, stripe_synced_at = ?, discord_last_synced = ?,
-      auth_version = auth_version + ?, metadata_version = metadata_version + 1 WHERE member_id = ? AND metadata_version = ?`)
+      auth_version = auth_version + ?, metadata_version = metadata_version + 1 WHERE member_id = ? AND metadata_version = ? RETURNING member_id`)
       .bind(value.discord_user_id, username, email, billingName, billingEmail, value.name_override, value.notes,
         value.bill_annually, value.discount_type, value.stripe_customer_id, value.stripe_subscription_id,
         identityChanged ? selected?.status || null : member.stripe_subscription_state,
-        identityChanged ? null : member.stripe_synced_at, identityChanged ? null : member.discord_last_synced, discordChanged ? 1 : 0, member.member_id, value.metadata_version).run();
-    if (result.meta.changes !== 1) throw new HttpError(409, 'This member was changed. Reload the member and reapply your edits.');
+        identityChanged ? null : member.stripe_synced_at, identityChanged ? null : member.discord_last_synced, discordChanged ? 1 : 0, member.member_id, value.metadata_version).first();
+    // D1's meta.changes also counts history trigger inserts; RETURNING only
+    // reports the member matched by the optimistic-concurrency predicate.
+    if (!result) throw new HttpError(409, 'This member was changed. Reload the member and reapply your edits.');
   }
 
   stripeURL(value, host) {
