@@ -27,17 +27,17 @@ async function memberCookie(status) {
 }
 
 it('starts the nonce handoff and preserves its destination through member OAuth', async () => {
-  expect((await request('/printers')).headers.get('Location')).toBe('https://edge.example/printers/login');
-  const response = await request(`/printers?state=${state}`);
+  expect((await request('/machines')).headers.get('Location')).toBe('https://edge.example/machines/login');
+  const response = await request(`/machines?state=${state}`);
   const oauth = new URL(response.headers.get('Location')).searchParams.get('state');
-  expect(await verifyToken(env, oauth, 'oauth')).toMatchObject({ purpose: 'member', return_to: `/printers?state=${state}` });
-  expect(loginDestination('/printers?state=https://evil.example', 'member')).toBe('/payment/resume');
-  expect(loginDestination(`/printers?state=${state}`, 'admin')).toBe('/admin');
+  expect(await verifyToken(env, oauth, 'oauth')).toMatchObject({ purpose: 'member', return_to: `/machines?state=${state}` });
+  expect(loginDestination('/machines?state=https://evil.example', 'member')).toBe('/payment/resume');
+  expect(loginDestination(`/machines?state=${state}`, 'admin')).toBe('/admin');
 });
 
 it('completes Discord sign-in and returns to the nonce-bound printer authorization route', async () => {
   await memberCookie('active');
-  const start = await request(`/printers?state=${state}`);
+  const start = await request(`/machines?state=${state}`);
   const oauth = new URL(start.headers.get('Location')).searchParams.get('state');
   const oauthCookie = start.headers.get('Set-Cookie').split(';')[0];
   const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
@@ -49,21 +49,21 @@ it('completes Discord sign-in and returns to the nonce-bound printer authorizati
   });
   const callback = await request(`/login/discord/callback?code=test-code&state=${oauth}`, oauthCookie);
   expect(callback.status).toBe(303);
-  expect(callback.headers.get('Location')).toBe(`${env.SITE_URL}/printers?state=${state}`);
+  expect(callback.headers.get('Location')).toBe(`${env.SITE_URL}/machines?state=${state}`);
   expect(fetchMock).toHaveBeenCalledTimes(3);
   const cookie = callback.headers.getSetCookie().find(value => value.startsWith('thelab_member=')).split(';')[0];
-  const access = await request(`/printers?state=${state}`, cookie);
+  const access = await request(`/machines?state=${state}`, cookie);
   expect(access.status).toBe(303);
-  expect(access.headers.get('Location')).toContain('https://edge.example/printers/callback#token=');
+  expect(access.headers.get('Location')).toContain('https://edge.example/machines/callback#token=');
 });
 
 it.each(['active', 'trialing'])('issues a verifiable, scoped five-minute JWT for %s members', async status => {
-  const response = await request(`/printers?state=${state}`, await memberCookie(status));
+  const response = await request(`/machines?state=${state}`, await memberCookie(status));
   expect(response.status).toBe(303);
   expect(response.headers.get('Cache-Control')).toBe('no-store');
   expect(response.headers.get('Referrer-Policy')).toBe('no-referrer');
   const target = new URL(response.headers.get('Location'));
-  expect(target.origin + target.pathname).toBe('https://edge.example/printers/callback');
+  expect(target.origin + target.pathname).toBe('https://edge.example/machines/callback');
   expect(target.search).toBe('');
   const [header, payload, signature] = new URLSearchParams(target.hash.slice(1)).get('token').split('.');
   expect(JSON.parse(new TextDecoder().decode(decode(header)))).toEqual({ alg: 'EdDSA', typ: 'JWT' });
@@ -74,29 +74,29 @@ it.each(['active', 'trialing'])('issues a verifiable, scoped five-minute JWT for
 });
 
 it.each([null, 'past_due', 'canceled', 'unpaid', 'incomplete', 'paused'])('denies %s membership', async status => {
-  const response = await request(`/printers?state=${state}`, await memberCookie(status));
+  const response = await request(`/machines?state=${state}`, await memberCookie(status));
   expect(response.status).toBe(403);
   expect(response.headers.get('Location')).toBeNull();
 });
 
 it('rechecks database membership and session revocation on renewal', async () => {
   const cookie = await memberCookie('active');
-  expect((await request(`/printers?state=${state}`, cookie)).status).toBe(303);
+  expect((await request(`/machines?state=${state}`, cookie)).status).toBe(303);
   await env.DB.prepare("UPDATE members SET stripe_subscription_state = 'canceled'").run();
-  expect((await request(`/printers?state=${state}`, cookie)).status).toBe(403);
+  expect((await request(`/machines?state=${state}`, cookie)).status).toBe(403);
   await env.DB.prepare('UPDATE members SET auth_version = auth_version + 1').run();
-  expect((await request(`/printers?state=${state}`, cookie)).headers.get('Location')).toContain('https://discord.com/oauth2/authorize');
+  expect((await request(`/machines?state=${state}`, cookie)).headers.get('Location')).toContain('https://discord.com/oauth2/authorize');
 });
 
 it('rejects malformed state and unsafe or incomplete configuration', async () => {
   for (const query of ['?state=bad', `?state=${state}&state=${state}`, `?state=${state}&return_to=https://evil.example`]) {
-    expect((await request(`/printers${query}`)).status).toBe(400);
+    expect((await request(`/machines${query}`)).status).toBe(400);
   }
   const cookie = await memberCookie('active');
   bindings.PRINTER_JWT_PRIVATE_KEY = 'invalid';
-  expect((await request(`/printers?state=${state}`, cookie)).status).toBe(503);
+  expect((await request(`/machines?state=${state}`, cookie)).status).toBe(503);
   for (const origin of ['', 'http://edge.example', 'https://edge.example/path', 'https://user:password@edge.example']) {
     bindings.PRINTER_EDGE_URL = origin;
-    expect((await request('/printers')).status).toBe(503);
+    expect((await request('/machines')).status).toBe(503);
   }
 });

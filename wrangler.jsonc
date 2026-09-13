@@ -15,7 +15,7 @@
 			"/signup",
 			"/login/*",
 			"/payment/*",
-			"/printers",
+			"/machines",
 			"/webhooks/*"
 		]
 	},

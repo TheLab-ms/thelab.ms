@@ -27,9 +27,9 @@ Controller firmware keeps its existing protocol and optional signing identity. B
 | --- | --- | --- |
 | Tunnel | `PUT /api/goal` | `{"version":123,"fobs":[7,42]}`; 204 after persistence, 409 for older/conflicting versions. |
 | Tunnel | `GET /api/swipes` | JSON array of all events retained from the last seven days; does not consume them. No pagination parameters. |
-| Tunnel | `GET /printers` | Active-member dashboard; status and images refresh every five seconds. |
-| Tunnel | `GET /printers/content` | Protected HTML printer cards used by the dashboard refresh. |
-| Tunnel | `GET /printers/images/{serial}.jpg` | Protected current JPEG; 404 unknown printer, 502 camera unavailable. |
+| Tunnel | `GET /machines` | Active-member machines dashboard; status and images refresh every five seconds. |
+| Tunnel | `GET /machines/content` | Protected HTML printer cards used by the dashboard refresh. |
+| Tunnel | `GET /machines/images/{serial}.jpg` | Protected current JPEG; 404 unknown printer, 502 camera unavailable. |
 | LAN | `POST /api/fobs` | Controller swipe array in; authorized ID array or 304 out. |
 | LAN | `GET /`, `POST /` | Printer configuration form. |
 
@@ -100,11 +100,11 @@ There is no in-memory goal/queue mirror, atomic-file replacement code, or separa
 ## Cloudflare API Shield mTLS setup
 
 1. Create a client certificate under **SSL/TLS → Client Certificates**, retain its private key for the calling client, and enable mTLS for the tunnel's public hostname (for example, `edge.example.com`).
-2. Deploy an API Shield/WAF custom rule with action **Block** for the hostname **except `/printers` and `/printers/*`**, which use member JWTs. Restrict machine access to the intended client certificate(s), for example:
+2. Deploy an API Shield/WAF custom rule with action **Block** for the hostname **except `/machines` and `/machines/*`**, which use member JWTs. Restrict controller API access to the intended client certificate(s), for example:
 
    ```txt
     (http.host eq "edge.example.com" and
-      not (http.request.uri.path eq "/printers" or starts_with(http.request.uri.path, "/printers/")) and
+      not (http.request.uri.path eq "/machines" or starts_with(http.request.uri.path, "/machines/")) and
      (not cf.tls_client_auth.cert_verified or
       cf.tls_client_auth.cert_revoked or
       not (cf.tls_client_auth.cert_fingerprint_sha256 in {"<CLIENT_CERT_SHA256>"})))
@@ -114,11 +114,13 @@ There is no in-memory goal/queue mirror, atomic-file replacement code, or separa
 3. Enable the **Add TLS client auth headers** managed transform under **Rules → Settings → Managed Transforms**. Cloudflare must overwrite client-supplied values on every request. Machine APIs require exactly `Cf-Cert-Presented: true`, `Cf-Cert-Verified: true`, and `Cf-Cert-Revoked: false`. Missing, malformed, duplicate, unverified, or revoked status is rejected with 401. Member JWTs do not grant machine API access, and mTLS does not grant printer access.
 4. Route only the protected hostname to `http://127.0.0.1:8081`, followed by a catch-all `http_status:404` ingress rule. The flow is **client certificate → Cloudflare API Shield → tunnel → local HTTP origin**. Edge trusts the local host/cloudflared; these headers are trusted-proxy assertions.
 
-**Worker transport limitation for machine APIs:** Cloudflare documents that [Worker mTLS certificate bindings cannot call Cloudflare-proxied services](https://developers.cloudflare.com/workers/runtime-apis/bindings/mtls/) (they return 520). A tunnel hostname is Cloudflare-proxied. A Worker coordinator therefore needs a transport capable of presenting the certificate to API Shield, such as a separately hosted mTLS-capable relay. That transport is outside this module. The printer dashboard uses direct browser requests with JWT cookies and does not need this relay.
+**Worker transport limitation for machine APIs:** Cloudflare documents that [Worker mTLS certificate bindings cannot call Cloudflare-proxied services](https://developers.cloudflare.com/workers/runtime-apis/bindings/mtls/) (they return 520). A tunnel hostname is Cloudflare-proxied. A Worker coordinator therefore needs a transport capable of presenting the certificate to API Shield, such as a separately hosted mTLS-capable relay. That transport is outside this module. The machines dashboard uses direct browser requests with JWT cookies and does not need this relay.
 
 References: [API Shield mTLS configuration](https://developers.cloudflare.com/api-shield/security/mtls/configure/), [TLS client auth managed headers](https://developers.cloudflare.com/rules/transform/managed-transforms/reference/#add-tls-client-auth-headers).
 
-## Printers
+## Machines dashboard
+
+The member-facing Machines page currently displays configured 3D printers.
 
 ### Member access setup
 
@@ -142,9 +144,9 @@ export CONWAYEDGE_MEMBER_PUBLIC_KEY='<base64 SPKI public key>'
 
 Origins must match the Worker `SITE_URL` and `PRINTER_EDGE_URL` exactly, with no trailing slash. Use HTTPS; the browser session requires Secure cookies. Leaving all three edge settings unset disables member routes with 503; partial/invalid settings prevent startup. Updating the public key invalidates previously issued printer sessions.
 
-Members can open `https://edge.example.com/printers` directly or follow `/printers` on the main site. Edge creates a ten-minute random HttpOnly nonce cookie and redirects to the Worker's `/printers?state=…`. The Worker uses existing Discord sign-in and reads the authenticated member's current D1 record. Only `active` or `trialing` subscription states grant access. It signs a five-minute EdDSA JWT with `active_member: true`, `scope: "printers:read"`, Discord subject, issuer, edge-origin audience, timestamps, and nonce.
+Members can open `https://edge.example.com/machines` directly or follow `/machines` on the main site. Edge creates a ten-minute random HttpOnly nonce cookie and redirects to the Worker's `/machines?state=…`. The Worker uses existing Discord sign-in and reads the authenticated member's current D1 record. Only `active` or `trialing` subscription states grant access. It signs a five-minute EdDSA JWT with `active_member: true`, `scope: "printers:read"`, Discord subject, issuer, edge-origin audience, timestamps, and nonce.
 
-The Worker redirects to the fixed `/printers/callback` with the JWT in a URL fragment. The callback clears the fragment immediately and POSTs it to `/printers/session`; edge validates the signature, claims, same-origin request, and browser nonce before setting a Secure, HttpOnly, SameSite=Lax, host-only `__Host-thelab_printers` cookie and clearing the nonce. Tokens are never put in query strings. The callback, login, session, and JavaScript routes are public handoff resources; dashboard HTML, refresh content, and images require a valid member JWT on every request. The LAN listener does not expose these routes.
+The Worker redirects to the fixed `/machines/callback` with the JWT in a URL fragment. The callback clears the fragment immediately and POSTs it to `/machines/session`; edge validates the signature, claims, same-origin request, and browser nonce before setting a Secure, HttpOnly, SameSite=Lax, host-only `__Host-thelab_printers` cookie and clearing the nonce. Tokens are never put in query strings. The callback, login, session, and JavaScript routes are public handoff resources; dashboard HTML, refresh content, and images require a valid member JWT on every request. The LAN listener does not expose these routes.
 
 Thirty seconds before expiry, the dashboard makes a top-level round-trip through the Worker to recheck membership and renew the session. This works with third-party cookies blocked. An expired main-site session requires Discord sign-in again. Revocation takes effect within five minutes **after D1 reflects the change**; the existing Stripe webhook/queue sync supplies that status. The edge does not query Stripe or D1. A copied JWT remains valid until expiry.
 

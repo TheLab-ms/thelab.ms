@@ -86,17 +86,17 @@ func TestPrinterBrowserHandoff(t *testing.T) {
 	e := testEdge(t)
 	private := memberTestAuth(t, e)
 	lan, cloud := e.routes()
-	if w := request(lan, "GET", "/printers", ""); w.Code != 404 {
+	if w := request(lan, "GET", "/machines", ""); w.Code != 404 {
 		t.Fatal("member page exposed on LAN")
 	}
-	w := request(cloud, "GET", "/printers", "")
-	if w.Code != 303 || w.Header().Get("Location") != "/printers/login" {
+	w := request(cloud, "GET", "/machines", "")
+	if w.Code != 303 || w.Header().Get("Location") != "/machines/login" {
 		t.Fatal("missing session did not start login")
 	}
-	w = request(cloud, "GET", "/printers/login", "")
+	w = request(cloud, "GET", "/machines/login", "")
 	location, _ := url.Parse(w.Header().Get("Location"))
 	nonce := w.Result().Cookies()[0]
-	if location.Scheme+"://"+location.Host+location.Path != "https://thelab.example/printers" || location.Query().Get("state") != nonce.Value || !noncePattern.MatchString(nonce.Value) || !nonce.HttpOnly || !nonce.Secure || nonce.Domain != "" {
+	if location.Scheme+"://"+location.Host+location.Path != "https://thelab.example/machines" || location.Query().Get("state") != nonce.Value || !noncePattern.MatchString(nonce.Value) || !nonce.HttpOnly || !nonce.Secure || nonce.Domain != "" {
 		t.Fatal("invalid nonce handoff")
 	}
 	claims := testMemberClaims()
@@ -111,7 +111,7 @@ func TestPrinterBrowserHandoff(t *testing.T) {
 		{"https://edge.example", "", 401}, {"https://edge.example", printerNonceCookie + "=wrong", 401},
 		{"https://edge.example", nonce.String(), 204},
 	} {
-		w = request(cloud, "POST", "/printers/session", string(body), "Origin", test.origin, "Cookie", test.cookie)
+		w = request(cloud, "POST", "/machines/session", string(body), "Origin", test.origin, "Cookie", test.cookie)
 		if w.Code != test.want {
 			t.Fatalf("session: got %d want %d: %s", w.Code, test.want, w.Body.String())
 		}
@@ -120,11 +120,11 @@ func TestPrinterBrowserHandoff(t *testing.T) {
 	if len(cookies) != 2 || cookies[0].Name != printerCookie || !cookies[0].Secure || !cookies[0].HttpOnly || cookies[0].Path != "/" || cookies[0].Domain != "" || cookies[0].MaxAge > 300 || cookies[1].MaxAge != -1 {
 		t.Fatal("unsafe session cookies")
 	}
-	w = request(cloud, "GET", "/printers", "", "Cookie", printerCookie+"="+token)
-	if w.Code != 200 || !strings.Contains(w.Body.String(), "3D printers") || w.Header().Get("Cache-Control") != "no-store" || w.Header().Get("X-Printer-Session-Expires") == "" {
+	w = request(cloud, "GET", "/machines", "", "Cookie", printerCookie+"="+token)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "<h1>Machines</h1>") || w.Header().Get("Cache-Control") != "no-store" || w.Header().Get("X-Printer-Session-Expires") == "" {
 		t.Fatal("member dashboard unavailable")
 	}
-	for _, path := range []string{"/printers/content", "/printers/images/camera.jpg"} {
+	for _, path := range []string{"/machines/content", "/machines/images/camera.jpg"} {
 		if w := mtlsRequest(cloud, "GET", path, ""); w.Code != 401 {
 			t.Fatalf("mTLS bypasses member JWT: %s %d", path, w.Code)
 		}
@@ -151,8 +151,8 @@ func TestPrinterPageAndProtectedSnapshot(t *testing.T) {
 	}}
 	_, cloud := e.routes()
 	token := memberTestToken(private, testMemberClaims())
-	w := request(cloud, "GET", "/printers/content", "", "Cookie", printerCookie+"="+token)
-	for _, want := range []string{"Printing", "2h 5m", "&lt;script&gt;Maker&lt;/script&gt;", "/printers/images/camera.jpg"} {
+	w := request(cloud, "GET", "/machines/content", "", "Cookie", printerCookie+"="+token)
+	for _, want := range []string{"Printing", "2h 5m", "&lt;script&gt;Maker&lt;/script&gt;", "/machines/images/camera.jpg"} {
 		if !strings.Contains(w.Body.String(), want) {
 			t.Fatalf("missing %s: %s", want, w.Body.String())
 		}
@@ -162,7 +162,7 @@ func TestPrinterPageAndProtectedSnapshot(t *testing.T) {
 			t.Fatal("unsafe dashboard output")
 		}
 	}
-	r := httptest.NewRequest("GET", "/printers/images/camera.jpg", nil)
+	r := httptest.NewRequest("GET", "/machines/images/camera.jpg", nil)
 	r.AddCookie(&http.Cookie{Name: printerCookie, Value: token})
 	image := &printerDeadlineWriter{ResponseRecorder: httptest.NewRecorder(), t: t}
 	cloud.ServeHTTP(image, r)
@@ -172,7 +172,7 @@ func TestPrinterPageAndProtectedSnapshot(t *testing.T) {
 	claims := testMemberClaims()
 	claims["iat"] = time.Now().Unix() - 301
 	claims["exp"] = time.Now().Unix() - 1
-	if w := request(cloud, "GET", "/printers/images/camera.jpg", "", "Cookie", printerCookie+"="+memberTestToken(private, claims)); w.Code != 401 {
+	if w := request(cloud, "GET", "/machines/images/camera.jpg", "", "Cookie", printerCookie+"="+memberTestToken(private, claims)); w.Code != 401 {
 		t.Fatal("expired session accessed camera")
 	}
 	p := e.printers.printers["camera"]
@@ -199,7 +199,7 @@ func TestPrinterAuthConfiguration(t *testing.T) {
 	}
 	e := testEdge(t)
 	_, cloud := e.routes()
-	if w := request(cloud, "GET", "/printers", ""); w.Code != 503 {
+	if w := request(cloud, "GET", "/machines", ""); w.Code != 503 {
 		t.Fatal("unconfigured page did not fail closed")
 	}
 }

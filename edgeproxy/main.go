@@ -103,12 +103,16 @@ func (e *edge) routes() (http.Handler, http.Handler) {
 	member := e.printerRoutes()
 	return lan, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		if r.URL.Path == "/printers" || strings.HasPrefix(r.URL.Path, "/printers/") {
+		if r.URL.Path == "/machines" || strings.HasPrefix(r.URL.Path, "/machines/") {
 			w.Header().Set("Referrer-Policy", "no-referrer")
 			w.Header().Set("X-Content-Type-Options", "nosniff")
 			w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+			if _, pattern := member.Handler(r); pattern == "" {
+				http.NotFound(w, r)
+				return
+			}
 			if e.memberAuth == nil {
-				http.Error(w, "printer member access is not configured", 503)
+				http.Error(w, "machine status access is not configured", 503)
 				return
 			}
 			member.ServeHTTP(w, r)

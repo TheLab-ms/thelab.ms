@@ -136,7 +136,7 @@ export default {
       ['/login/discord/callback', ['GET', callback]],
       ['/payment/success', ['GET', success]],
       ['/payment/resume', ['GET', resume]],
-      ['/printers', ['GET', printerAccess]],
+      ['/machines', ['GET', printerAccess]],
       ['/webhooks/stripe', ['POST', webhook]],
       ['/admin/login', ['GET', (request, env) => signup(request, env, true)]],
     ]);

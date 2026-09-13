@@ -38,7 +38,7 @@ func TestPrinterSetLifecycleAndStatus(t *testing.T) {
 	var s printerSet
 	t.Cleanup(s.close)
 	w := httptest.NewRecorder()
-	s.dashboard(w, httptest.NewRequest("GET", "/printers", nil))
+	s.dashboard(w, httptest.NewRequest("GET", "/machines", nil))
 	if !strings.Contains(w.Body.String(), "No printers are configured") {
 		t.Fatalf("zero-value status: %q", w.Body.String())
 	}
@@ -51,7 +51,7 @@ func TestPrinterSetLifecycleAndStatus(t *testing.T) {
 	}
 	first.report([]byte(`{"print":{"gcode_state":"IDLE"}}`))
 	w = httptest.NewRecorder()
-	s.dashboard(w, httptest.NewRequest("GET", "/printers", nil))
+	s.dashboard(w, httptest.NewRequest("GET", "/machines", nil))
 	for _, secret := range []string{config.AccessCode, config.Host, "access_code", "host"} {
 		if strings.Contains(w.Body.String(), secret) {
 			t.Fatalf("status exposes %q: %s", secret, w.Body.String())

@@ -147,11 +147,11 @@ npm run deploy
 The existing `make dev` and `make deploy` commands still work. Assets are served
 directly; signup, callback, payment and webhook paths run through the Worker first.
 
-## Member printer dashboard
+## Member machines dashboard
 
 The standalone [`edgeproxy`](edgeproxy/README.md) serves a member-facing dashboard at
-`https://<edge-host>/printers` with printer status, remaining print time, and still
-images refreshing every five seconds. Main-site `/printers` is a shortcut into its
+`https://<edge-host>/machines` with 3D printer status, remaining print time, and still
+images refreshing every five seconds. Main-site `/machines` is a shortcut into its
 sign-in flow. The browser talks directly to edgeproxy for page and image requests.
 
 Set `PRINTER_EDGE_URL` to the HTTPS edge origin in `wrangler.jsonc`, and store the

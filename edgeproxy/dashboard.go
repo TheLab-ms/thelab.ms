@@ -43,7 +43,7 @@ func (s *printerSet) cards() []printerCard {
 	frameVersion := fmt.Sprint(time.Now().UnixNano())
 	for _, p := range rows {
 		// A distinct URL also bypasses the browser's per-document image reuse.
-		card := printerCard{Name: p.Name, Remaining: "—", Image: "/printers/images/" + url.PathEscape(p.SerialNumber) + ".jpg?v=" + frameVersion, Updated: "Waiting for first report"}
+		card := printerCard{Name: p.Name, Remaining: "—", Image: "/machines/images/" + url.PathEscape(p.SerialNumber) + ".jpg?v=" + frameVersion, Updated: "Waiting for first report"}
 		if p.UpdatedAt != 0 {
 			card.Updated = "Last report: " + time.Unix(p.UpdatedAt, 0).UTC().Format("15:04:05 UTC")
 		}
@@ -78,7 +78,7 @@ func (s *printerSet) cards() []printerCard {
 func (s *printerSet) dashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	name := "dashboard"
-	if r.URL.Path == "/printers/content" {
+	if r.URL.Path == "/machines/content" {
 		name = "cards"
 	}
 	_ = dashboardTemplate.ExecuteTemplate(w, name, struct {
@@ -87,12 +87,12 @@ func (s *printerSet) dashboard(w http.ResponseWriter, r *http.Request) {
 	}{s.cards(), w.Header().Get("X-Printer-Session-Expires")})
 }
 
-func (e *edge) printerRoutes() http.Handler {
+func (e *edge) printerRoutes() *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /printers", e.requirePrinterMember(e.printers.dashboard))
-	mux.HandleFunc("GET /printers/content", e.requirePrinterMember(e.printers.dashboard))
+	mux.HandleFunc("GET /machines", e.requirePrinterMember(e.printers.dashboard))
+	mux.HandleFunc("GET /machines/content", e.requirePrinterMember(e.printers.dashboard))
 	// Go wildcards occupy an entire segment, so strip the suffix before lookup.
-	mux.HandleFunc("GET /printers/images/{image}", e.requirePrinterMember(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /machines/images/{image}", e.requirePrinterMember(func(w http.ResponseWriter, r *http.Request) {
 		image := r.PathValue("image")
 		if !strings.HasSuffix(image, ".jpg") {
 			http.NotFound(w, r)
@@ -101,13 +101,13 @@ func (e *edge) printerRoutes() http.Handler {
 		r.SetPathValue("serial", strings.TrimSuffix(image, ".jpg"))
 		e.printers.snapshot(w, r)
 	}))
-	mux.HandleFunc("GET /printers/login", e.printerLogin)
-	mux.HandleFunc("POST /printers/session", e.printerSession)
-	mux.HandleFunc("GET /printers/callback", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /machines/login", e.printerLogin)
+	mux.HandleFunc("POST /machines/session", e.printerSession)
+	mux.HandleFunc("GET /machines/callback", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Printer sign-in | TheLab</title><script src="/printers/app.js" defer></script></head><body><main><h1>Printer sign-in</h1><p id="login-status" role="status">Completing sign-in…</p><noscript>JavaScript is required to complete sign-in and refresh printer images.</noscript><a href="/printers/login">Restart sign-in</a></main></body></html>`))
+		_, _ = w.Write([]byte(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Machines sign-in | TheLab</title><script src="/machines/app.js" defer></script></head><body><main><h1>Machines sign-in</h1><p id="login-status" role="status">Completing sign-in…</p><noscript>JavaScript is required to complete sign-in and refresh machine images.</noscript><a href="/machines/login">Restart sign-in</a></main></body></html>`))
 	})
-	mux.HandleFunc("GET /printers/app.js", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /machines/app.js", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 		_, _ = w.Write([]byte(dashboardJS))
 	})

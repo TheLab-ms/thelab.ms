@@ -1,14 +1,14 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex"><title>3D printers | TheLab</title>
-<script src="/printers/app.js" defer></script>
+<meta name="robots" content="noindex"><title>Machines | TheLab</title>
+<script src="/machines/app.js" defer></script>
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#11151b;color:#edf2f7;font:16px system-ui,sans-serif}main{max-width:1200px;margin:auto;padding:2rem 1rem}.brand{color:#65e5b4;font-weight:700;letter-spacing:.12em}h1{font-size:clamp(2rem,5vw,3rem);margin:.5rem 0}header p,.muted{color:#adb9c9}a{color:#65e5b4}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr));gap:1.25rem;margin:2rem 0}.card{background:#1b222d;border:1px solid #364254;border-radius:12px;overflow:hidden}.details{padding:1.25rem}h2{margin:0 0 1rem;font-size:1.3rem}.status{color:#65e5b4;font-weight:600}.unavailable{color:#ffd28a}dl{display:grid;grid-template-columns:1fr 1fr;gap:.8rem}dt{color:#adb9c9}dd{margin:0;text-align:right}.camera{aspect-ratio:4/3;background:#090d12;display:grid;place-items:center;position:relative}.camera img{position:absolute;width:100%;height:100%;object-fit:contain}.camera p{padding:1rem;color:#adb9c9}.camera img[hidden]{display:none}small{color:#adb9c9}#refresh-status{min-height:1.5em}
 </style></head><body><main id="dashboard" data-expires="{{.Expires}}">
-<header><span class="brand">THELAB / MEMBERS</span><h1>3D printers</h1><p>Check printer availability and follow a print from wherever you are.</p><p id="refresh-status" role="status">Status and still images refresh every 5 seconds.</p></header>
+<header><span class="brand">THELAB / MEMBERS</span><h1>Machines</h1><p>Check machine status and follow your 3D prints from wherever you are.</p><p id="refresh-status" role="status">Status and still images refresh every 5 seconds.</p></header>
 <noscript>Enable JavaScript for automatic updates. Reload this page to see the latest status.</noscript>
 <section id="printers" class="grid" aria-label="Printers">{{template "cards" .}}</section>
-<footer class="muted">Remaining times are printer estimates. <a href="/printers/login">Renew member access</a></footer>
+<footer class="muted">Remaining times are printer estimates. <a href="/machines/login">Renew member access</a></footer>
 </main></body></html>
 {{define "cards"}}{{range .Cards}}
 <article class="card"><div class="details"><h2>{{.Name}}</h2><p class="status {{if .Unavailable}}unavailable{{end}}">{{.Status}}</p><dl><dt>Remaining print time</dt><dd>{{.Remaining}}</dd></dl><small>{{.Updated}}</small></div>

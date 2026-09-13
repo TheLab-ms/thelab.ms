@@ -115,7 +115,7 @@ func (e *edge) printerLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	state := hex.EncodeToString(nonce[:])
 	printerSessionCookie(w, printerNonceCookie, state, 600)
-	http.Redirect(w, r, e.memberAuth.issuer+"/printers?state="+state, http.StatusSeeOther)
+	http.Redirect(w, r, e.memberAuth.issuer+"/machines?state="+state, http.StatusSeeOther)
 }
 
 func (e *edge) printerSession(w http.ResponseWriter, r *http.Request) {
@@ -132,7 +132,7 @@ func (e *edge) printerSession(w http.ResponseWriter, r *http.Request) {
 	claims := e.memberAuth.verify(input.Token)
 	nonce, err := r.Cookie(printerNonceCookie)
 	if claims == nil || err != nil || !secretEqual(claims.State, nonce.Value) {
-		http.Error(w, "invalid or expired printer sign-in", 401)
+		http.Error(w, "invalid or expired machine status sign-in", 401)
 		return
 	}
 	printerSessionCookie(w, printerCookie, input.Token, int(claims.Expires-time.Now().Unix()))
@@ -148,10 +148,10 @@ func (e *edge) requirePrinterMember(next http.HandlerFunc) http.HandlerFunc {
 			claims = e.memberAuth.verify(cookie.Value)
 		}
 		if claims == nil {
-			if r.URL.Path == "/printers" {
-				http.Redirect(w, r, "/printers/login", http.StatusSeeOther)
+			if r.URL.Path == "/machines" {
+				http.Redirect(w, r, "/machines/login", http.StatusSeeOther)
 			} else {
-				http.Error(w, "printer session expired", http.StatusUnauthorized)
+				http.Error(w, "machine status session expired", http.StatusUnauthorized)
 			}
 			return
 		}
