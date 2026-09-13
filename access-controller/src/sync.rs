@@ -1,0 +1,525 @@
+//! Conway API sync using its simple HTTP protocol.
+//!
+//! Active fob IDs are cached in-memory alongside an etag.
+//! The etag is sent to the server every 10 seconds.
+//! It will respond with a 304 if the cache is still valid.
+//!
+//! Each request can include fob swipe events to be stored.
+//! A bounded set of events are held in-memory.
+//!
+//! The in-memory cache is also persisted to the `cache` flash partition
+//! ([`crate::cache_store`]) whenever the synced list changes, so a reboot
+//! during a WiFi outage boots with the last-good Conway-authorized list
+//! instead of an empty one. Saving happens after the response has been
+//! signature-verified, and only on an actual change (not per 10 s tick)
+//! to limit flash wear. A failed save (e.g. unprovisioned device) is
+//! logged and the sync still completes — RAM stays authoritative.
+
+use core::fmt::Write as FmtWrite;
+use embassy_net::tcp::TcpSocket;
+use embassy_net::Stack;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::mutex::Mutex;
+use embassy_time::Duration;
+use embedded_io_async::Write;
+use heapless::String as HString;
+use smoltcp::wire::IpAddress;
+
+use crate::{EVENT_BUFFER, MAX_FOBS, RuntimeConfig, SYNC_COMPLETE};
+
+const IO_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Sync with Conway server using raw TCP HTTP.
+/// Events are only removed from the buffer after successful server acknowledgment.
+pub async fn sync_with_conway(
+    stack: &'static Stack<'static>,
+    fobs: &'static Mutex<CriticalSectionRawMutex, heapless::Vec<u32, MAX_FOBS>>,
+    etag: &'static Mutex<CriticalSectionRawMutex, HString<64>>,
+    rt: &'static RuntimeConfig,
+) {
+    // Snapshot host + port from the live config so a `/config` POST that
+    // updates them takes effect on the next sync without restart. If the
+    // host has been cleared (standalone mode), there is nothing to sync.
+    // Also snapshot the optional trusted public key here so we don't
+    // have to re-lock `settings` after the response arrives.
+    let (host_octets, host_port, trusted_pubkey) = {
+        let s = rt.settings.lock().await;
+        match s.conway_host {
+            Some(h) => (h, s.conway_port, s.trusted_pubkey),
+            None => {
+                // Shouldn't happen normally - sync_task isn't spawned
+                // when host is None - but a hot config change could land
+                // us here. Drop pending events on the floor to avoid
+                // unbounded growth.
+                log::debug!("sync: standalone mode, skipping");
+                SYNC_COMPLETE.signal(());
+                return;
+            }
+        }
+    };
+    let host_str = {
+        use core::fmt::Write;
+        let mut s: HString<24> = HString::new();
+        let _ = write!(
+            s,
+            "{}.{}.{}.{}",
+            host_octets[0], host_octets[1], host_octets[2], host_octets[3]
+        );
+        s
+    };
+
+    // Peek at pending events without removing them from the buffer.
+    // They will only be removed after the server acknowledges receipt.
+    let mut events: [AccessEvent; MAX_EVENTS] = [AccessEvent::default(); MAX_EVENTS];
+    let (event_count, event_tail) = EVENT_BUFFER.peek(&mut events).await;
+
+    // Build request body with events
+    let mut body: HString<512> = HString::new();
+    let _ = body.push_str("[");
+    for i in 0..event_count {
+        if i > 0 {
+            let _ = body.push_str(",");
+        }
+        let _ = write!(
+            body,
+            r#"{{"fob":{},"allowed":{}}}"#,
+            events[i].fob, events[i].allowed
+        );
+    }
+    let _ = body.push_str("]");
+
+    // Get current ETag for If-None-Match header
+    let current_etag = {
+        let guard = etag.lock().await;
+        guard.clone()
+    };
+
+    // Build IP endpoint directly from settings octets.
+    let remote_addr = IpAddress::Ipv4(smoltcp::wire::Ipv4Address::new(
+        host_octets[0],
+        host_octets[1],
+        host_octets[2],
+        host_octets[3],
+    ));
+
+    // Create TCP socket. Size buffers from MAX_FOBS: each fob serializes
+    // to up to 10 decimal digits + ',' = 11 bytes, plus '[' / ']' and
+    // ~1 KiB of HTTP response headers. With MAX_FOBS=512 this is ~7 KiB;
+    // a fixed 2 KiB buffer truncates silently and the cache goes stale.
+    // Heap-allocated so we don't blow the task stack.
+    const RESPONSE_CAP: usize = MAX_FOBS * 12 + 1024;
+    let mut rx_buf = alloc::vec![0u8; RESPONSE_CAP];
+    let mut tx_buf = alloc::vec![0u8; 1024];
+    let mut socket = TcpSocket::new(*stack, rx_buf.as_mut_slice(), tx_buf.as_mut_slice());
+    socket.set_timeout(Some(IO_TIMEOUT));
+
+    // Connect to server
+    let remote = smoltcp::wire::IpEndpoint::new(remote_addr, host_port);
+    log::debug!("sync: connecting to {:?}", remote);
+
+    if let Err(e) = socket.connect(remote).await {
+        log::error!("sync: connect failed: {:?}", e);
+        socket.abort();
+        SYNC_COMPLETE.signal(());
+        return;
+    }
+
+    // Build and send HTTP request
+    let mut request: HString<512> = HString::new();
+    let _ = write!(
+        request,
+        "POST /api/fobs HTTP/1.1\r\n\
+         Host: {}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n",
+        host_str.as_str(),
+        body.len()
+    );
+    if !current_etag.is_empty() {
+        let _ = write!(request, "If-None-Match: {}\r\n", current_etag);
+    }
+    let _ = request.push_str("\r\n");
+
+    // Send request headers
+    if let Err(e) = socket.write_all(request.as_bytes()).await {
+        log::error!("sync: write headers failed: {:?}", e);
+        socket.abort();
+        SYNC_COMPLETE.signal(());
+        return;
+    }
+
+    // Send request body
+    if let Err(e) = socket.write_all(body.as_bytes()).await {
+        log::error!("sync: write body failed: {:?}", e);
+        socket.abort();
+        SYNC_COMPLETE.signal(());
+        return;
+    }
+
+    // Read response. Buffer is sized for the worst-case fob list above.
+    // If the server somehow sends more, treat it as a hard error: do NOT
+    // replace the cache and do NOT commit events.
+    let mut response_buf = alloc::vec![0u8; RESPONSE_CAP];
+    let mut total_read = 0;
+    let mut truncated = false;
+
+    loop {
+        match socket.read(&mut response_buf[total_read..]).await {
+            Ok(0) => break, // Connection closed
+            Ok(n) => {
+                total_read += n;
+                if total_read >= response_buf.len() {
+                    truncated = true;
+                    break;
+                }
+            }
+            Err(e) => {
+                log::error!("sync: read failed: {:?}", e);
+                socket.abort();
+                SYNC_COMPLETE.signal(());
+                return;
+            }
+        }
+    }
+
+    socket.abort();
+
+    if truncated {
+        log::error!(
+            "sync: response exceeded {} bytes, refusing to update cache",
+            RESPONSE_CAP
+        );
+        SYNC_COMPLETE.signal(());
+        return;
+    }
+
+    // Parse HTTP response
+    let response = match core::str::from_utf8(&response_buf[..total_read]) {
+        Ok(s) => s,
+        Err(_) => {
+            log::error!("sync: invalid response encoding");
+            SYNC_COMPLETE.signal(());
+            return;
+        }
+    };
+
+    // Parse status code
+    let status = parse_status_code(response);
+    log::debug!("sync: status {}", status);
+
+    match status {
+        304 => {
+            log::debug!("sync: not modified");
+            // Server acknowledged the request - safe to remove events from buffer
+            EVENT_BUFFER.commit(event_count, event_tail).await;
+        }
+        200 => {
+            // Extract ETag from headers
+            let new_etag = extract_header(response, "etag");
+            // X-Fob-Signature must be present and verify against the
+            // body bytes whenever the device has been provisioned with
+            // a trusted_pubkey. Until a key is configured, the header
+            // is ignored — see RFC in `signing.rs` module docs.
+            let sig_header = extract_header(response, "x-fob-signature");
+
+            // Find body (after \r\n\r\n)
+            let body_start = response.find("\r\n\r\n").map(|i| i + 4);
+            let response_body = body_start.map(|i| &response[i..]).unwrap_or("");
+
+            // Signature gate: must come BEFORE we replace the cache or
+            // commit events. A failed verify is treated identically to
+            // an unparseable body — events are kept buffered for retry
+            // against (presumably) the legitimate server later.
+            if let Some(pk) = trusted_pubkey.as_ref() {
+                let sig = match sig_header {
+                    Some(s) => s,
+                    None => {
+                        log::error!(
+                            "sync: trusted_pubkey configured but server omitted X-Fob-Signature; refusing update"
+                        );
+                        SYNC_COMPLETE.signal(());
+                        return;
+                    }
+                };
+                if !access_controller::signing::verify(pk, response_body.as_bytes(), sig) {
+                    log::error!(
+                        "sync: X-Fob-Signature failed to verify against trusted_pubkey; refusing update"
+                    );
+                    SYNC_COMPLETE.signal(());
+                    return;
+                }
+                log::debug!("sync: signature verified");
+            }
+
+            // Parse fob list
+            let new_fobs = match parse_fob_list(response_body) {
+                Ok(f) => f,
+                Err(e) => {
+                    log::error!("sync: {}", e);
+                    // Don't commit events - they will be retried on next sync
+                    SYNC_COMPLETE.signal(());
+                    return;
+                }
+            };
+
+            log::info!("sync: received {} fobs", new_fobs.len());
+
+            // Update shared fob list. Persist to flash only when the list
+            // actually changed (RAM is derived from the same source at
+            // boot, so RAM vs. flash disagree only if a prior save failed).
+            // Hold the lock just for the RAM swap; the flash write happens
+            // after release so `access_task` is never stalled mid-auth.
+            // Saving is fine on failure — see the module docs.
+            let changed = {
+                let mut guard = fobs.lock().await;
+                let changed = guard.as_slice() != new_fobs.as_slice();
+                guard.clear();
+                for &f in new_fobs.iter() {
+                    let _ = guard.push(f);
+                }
+                changed
+            };
+            if changed {
+                if let Err(e) = crate::cache_store::save(new_fobs.as_slice()) {
+                    log::error!("sync: failed to persist synced fob cache: {}", e);
+                }
+            }
+
+            // Update etag
+            if let Some(etag_value) = new_etag {
+                let mut guard = etag.lock().await;
+                guard.clear();
+                let _ = guard.push_str(etag_value);
+            }
+
+            // Server acknowledged the request - safe to remove events from buffer
+            EVENT_BUFFER.commit(event_count, event_tail).await;
+        }
+        _ => {
+            log::error!("sync: unexpected status: {}", status);
+            // Don't commit events - they will be retried on next sync
+        }
+    }
+
+    // Signal that sync is complete (success or failure)
+    SYNC_COMPLETE.signal(());
+}
+
+/// Parse HTTP status code from response.
+fn parse_status_code(response: &str) -> u16 {
+    // Format: "HTTP/1.1 200 OK\r\n..."
+    response
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0)
+}
+
+/// Extract header value (case-insensitive).
+fn extract_header<'a>(response: &'a str, name: &str) -> Option<&'a str> {
+    for line in response.lines() {
+        if line.is_empty() || line == "\r" {
+            break; // End of headers
+        }
+        if let Some((key, value)) = line.split_once(':') {
+            if key.trim().eq_ignore_ascii_case(name) {
+                return Some(value.trim());
+            }
+        }
+    }
+    None
+}
+
+/// Parse IPv4 address string. Currently unused inside this module but
+/// kept for tests / potential future callers.
+#[allow(dead_code)]
+fn parse_ipv4(s: &str) -> Option<smoltcp::wire::Ipv4Address> {
+    let mut octets = [0u8; 4];
+    let mut octet_idx = 0;
+
+    for part in s.split('.') {
+        if octet_idx >= 4 {
+            return None;
+        }
+        octets[octet_idx] = part.parse().ok()?;
+        octet_idx += 1;
+    }
+
+    if octet_idx == 4 {
+        Some(smoltcp::wire::Ipv4Address::new(
+            octets[0], octets[1], octets[2], octets[3],
+        ))
+    } else {
+        None
+    }
+}
+
+fn parse_fob_list(json: &str) -> Result<heapless::Vec<u32, MAX_FOBS>, &'static str> {
+    let trimmed = json.trim();
+    if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
+        return Err("not a JSON array");
+    }
+
+    let inner = &trimmed[1..trimmed.len() - 1];
+    let mut fobs = heapless::Vec::new();
+
+    for part in inner.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            // Tolerate `[]` and a single trailing comma so the cache
+            // doesn't get nuked by a stylistic server change. Embedded
+            // empties (e.g. `1,,2`) still parse as empty and are skipped.
+            continue;
+        }
+        // Strict: any non-empty element that does NOT parse as a bare
+        // u32 is a hard error. Previously this silently dropped the
+        // element, so a pretty-printed body or any schema evolution
+        // (e.g. `[{"id":1}, ...]`) yielded an empty list that was then
+        // committed as the live cache -> mass lockout with no signal.
+        let fob: u32 = part
+            .parse()
+            .map_err(|_| "fob list element is not a u32")?;
+        if fobs.push(fob).is_err() {
+            return Err("fob list exceeds MAX_FOBS");
+        }
+    }
+
+    Ok(fobs)
+}
+
+pub const MAX_EVENTS: usize = 20;
+
+/// Re-export so existing `use crate::sync::AccessEvent` call sites keep
+/// compiling. The struct itself lives in the pure `events` module so the
+/// host-side simulation tests can use it without pulling in HAL deps.
+pub use access_controller::events::AccessEvent;
+
+/// Event buffer state.
+struct EventBufferInner {
+    events: [AccessEvent; MAX_EVENTS],
+    head: usize, // next write position
+    tail: usize, // next read position
+}
+
+impl EventBufferInner {
+    const fn new() -> Self {
+        Self {
+            events: [AccessEvent { fob: 0, allowed: false }; MAX_EVENTS],
+            head: 0,
+            tail: 0,
+        }
+    }
+
+    fn len(&self) -> usize {
+        if self.head >= self.tail {
+            self.head - self.tail
+        } else {
+            MAX_EVENTS - self.tail + self.head
+        }
+    }
+
+    fn is_full(&self) -> bool {
+        (self.head + 1) % MAX_EVENTS == self.tail
+    }
+}
+
+/// Thread-safe event buffer with peek/commit semantics.
+pub struct EventBuffer {
+    inner: Mutex<CriticalSectionRawMutex, EventBufferInner>,
+}
+
+impl EventBuffer {
+    pub const fn new() -> Self {
+        Self {
+            inner: Mutex::new(EventBufferInner::new()),
+        }
+    }
+
+    /// Push an event to the buffer.
+    /// If the buffer is full, the oldest event is discarded.
+    pub async fn push(&self, event: AccessEvent) {
+        let mut guard = self.inner.lock().await;
+
+        // If buffer is full, advance tail to discard oldest event
+        if guard.is_full() {
+            log::warn!("events: buffer full, dropping oldest event");
+            guard.tail = (guard.tail + 1) % MAX_EVENTS;
+        }
+
+        let head = guard.head;
+        guard.events[head] = event;
+        guard.head = (head + 1) % MAX_EVENTS;
+    }
+
+    /// Peek at pending events without removing them.
+    /// Returns (events, count, tail_snapshot).
+    /// The tail_snapshot should be passed to commit() after successful sync.
+    pub async fn peek(&self, out: &mut [AccessEvent; MAX_EVENTS]) -> (usize, usize) {
+        let guard = self.inner.lock().await;
+        let tail = guard.tail;
+        let head = guard.head;
+
+        let mut count = 0;
+        let mut idx = tail;
+        while idx != head && count < MAX_EVENTS {
+            out[count] = guard.events[idx];
+            count += 1;
+            idx = (idx + 1) % MAX_EVENTS;
+        }
+
+        (count, tail)
+    }
+
+    /// Commit (remove) events from the buffer after successful transmission.
+    /// Takes the tail_snapshot from peek(). If tail has changed (buffer overflow
+    /// occurred during sync), this adjusts accordingly.
+    pub async fn commit(&self, count: usize, expected_tail: usize) {
+        let mut guard = self.inner.lock().await;
+
+        // Calculate where tail should be after committing
+        let new_tail = (expected_tail + count) % MAX_EVENTS;
+
+        // Only update if tail hasn't been modified by overflow handling
+        if guard.tail == expected_tail {
+            guard.tail = new_tail;
+            log::debug!("events: committed {} events", count);
+        } else {
+            // Tail was moved by overflow - only advance if we would move it forward
+            // Calculate the distance from current tail to new_tail in circular space
+            let distance_forward = if new_tail >= guard.tail {
+                new_tail - guard.tail
+            } else {
+                MAX_EVENTS - guard.tail + new_tail
+            };
+
+            // If new_tail is ahead of current tail in circular space, advance to it
+            // Otherwise, overflow already moved tail past where we would commit to
+            if distance_forward < MAX_EVENTS / 2 {
+                // new_tail is ahead - advance tail
+                guard.tail = new_tail;
+                log::debug!(
+                    "events: committed {} events (adjusted after overflow moved tail from {} to {})",
+                    count,
+                    expected_tail,
+                    new_tail
+                );
+            } else {
+                // new_tail is behind or equal - overflow already discarded our events
+                log::debug!(
+                    "events: peeked events already removed by overflow (tail moved from {} to {}, would commit to {})",
+                    expected_tail,
+                    guard.tail,
+                    new_tail
+                );
+            }
+        }
+    }
+
+    /// Get current event count (for status display).
+    pub async fn len(&self) -> usize {
+        let guard = self.inner.lock().await;
+        guard.len()
+    }
+}

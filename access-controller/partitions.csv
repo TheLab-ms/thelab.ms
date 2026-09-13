@@ -1,0 +1,30 @@
+# ESP-IDF partition table for OTA dual-slot updates.
+#
+# Layout for 4 MB flash (ESP32-DevKitC-V4):
+#   bootloader : 0x001000 .. 0x008000   (28 KB, written by espflash)
+#   table      : 0x008000 .. 0x009000   ( 4 KB, this file)
+#   nvs        : 0x009000 .. 0x00F000   (24 KB, WiFi+phy_init backing if used later)
+#   otadata    : 0x00F000 .. 0x011000   ( 8 KB, two 4 KB slot selectors)
+#   fobs       : 0x011000 .. 0x020000   (60 KB, locally-managed fob list -
+#                                        custom format, see src/fob_store.rs)
+#   ota_0      : 0x020000 .. 0x200000   (1920 KB, slot 0)
+#   ota_1      : 0x200000 .. 0x3E0000   (1920 KB, slot 1)
+#   cache      : 0x3E0000 .. 0x3E2000   ( 8 KB, persisted last-good Conway
+#                                        fob cache - custom ping-pong format,
+#                                        see src/cache_store.rs)
+#   (free)     : 0x3E2000 .. 0x400000   (120 KB, reserved for future use)
+#
+# Note: app slots must be 64 KB aligned. Each slot must be large enough for
+# the firmware image (current release build is well under 1 MB).
+#
+# The `fobs` partition uses subtype `nvs` so the bootloader treats it as a
+# generic data region; the firmware writes a custom ping-pong + CRC layout
+# (see src/fob_store.rs), not the ESP-IDF NVS key/value format.
+#
+# Name,   Type, SubType,  Offset,   Size,    Flags
+nvs,      data, nvs,      0x9000,   0x6000,
+otadata,  data, ota,      0xF000,   0x2000,
+fobs,     data, nvs,      0x11000,  0xF000,
+cache,    data, nvs,      0x3E0000, 0x2000,
+ota_0,    app,  ota_0,    0x20000,  0x1E0000,
+ota_1,    app,  ota_1,    0x200000, 0x1E0000,

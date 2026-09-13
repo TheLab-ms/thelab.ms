@@ -1,0 +1,111 @@
+[package]
+name = "access-controller"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "access_controller"
+path = "src/lib.rs"
+
+[[bin]]
+name = "access-controller"
+path = "src/main.rs"
+# Binary requires the firmware (esp32) feature; under `--features sim` (host
+# tests) only the library is built, so the binary is skipped.
+required-features = ["esp32"]
+
+[dependencies]
+# Always-available pure deps (no_std friendly, no hardware required)
+heapless = "0.8"
+log = "0.4"
+
+# Crypto for at-rest encryption of fobs + network config. All pure-Rust,
+# constant-time, no_std-compatible. Available to both firmware and host
+# `sim` tests so `crypto` round-trip tests can run on the host.
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+hkdf             = { version = "0.12", default-features = false }
+sha2             = { version = "0.10", default-features = false }
+zeroize          = { version = "1.7",  default-features = false }
+
+# Ed25519 verification of fob-list responses signed by the Conway server.
+# `default-features = false` keeps it `no_std` and removes the `getrandom`
+# dependency, which we don't need for verify-only usage.
+ed25519-compact  = { version = "2",    default-features = false }
+
+# Firmware-only deps (only present when the `esp32` feature is enabled)
+esp-hal = { version = "1.0", features = ["unstable", "rt"], optional = true }
+esp-radio = { version = "0.17", default-features = false, features = ["wifi", "smoltcp", "log-04", "unstable"], optional = true }
+esp-rtos = { version = "0.2", features = ["esp-radio", "embassy", "log-04"], optional = true }
+esp-alloc = { version = "0.9", optional = true }
+esp-println = { version = "0.13", default-features = false, features = ["log", "uart"], optional = true }
+esp-bootloader-esp-idf = { version = "0.1", optional = true }
+esp-storage = { version = "0.6", features = ["esp32", "bytewise-read"], optional = true }
+embedded-storage = { version = "0.3", optional = true }
+
+# Wear-levelled, power-loss-safe FIFO queue in raw NOR flash, used by
+# `swipe_log` to persist fob swipes offline (standalone mode). Pinned to
+# 3.0.1 for its simple free-function queue API (`queue::push`/`iter`).
+# It speaks the async embedded-storage traits, so `esp-storage`'s blocking
+# `FlashStorage` is wrapped with `embassy-embedded-hal`'s `BlockingAsync`.
+sequential-storage = { version = "=3.0.1", default-features = false, optional = true }
+embassy-embedded-hal = { version = "0.5", default-features = false, optional = true }
+
+# Use same embassy versions that esp-rtos uses
+embassy-executor = { version = "0.9", optional = true }
+embassy-time = { version = "0.5", optional = true }
+embassy-sync = { version = "0.7", optional = true }
+embassy-net = { version = "0.8", features = ["dhcpv4", "dhcpv4-hostname", "tcp", "udp", "medium-ethernet", "proto-ipv4", "dns"], optional = true }
+embassy-futures = { version = "0.1", optional = true }
+
+smoltcp = { version = "0.12", default-features = false, features = ["medium-ethernet", "proto-ipv4", "proto-dhcpv4", "socket-tcp", "socket-udp", "socket-dhcpv4"], optional = true }
+embedded-io-async = { version = "0.7", optional = true }
+static_cell = { version = "2", optional = true }
+
+[dev-dependencies]
+proptest = "1"
+
+[features]
+default = ["esp32"]
+esp32 = [
+    "dep:esp-hal", "esp-hal/esp32",
+    "dep:esp-radio", "esp-radio/esp32",
+    "dep:esp-rtos", "esp-rtos/esp32",
+    "dep:esp-alloc",
+    "dep:esp-println", "esp-println/esp32",
+    "dep:esp-bootloader-esp-idf",
+    "dep:esp-storage",
+    "dep:embedded-storage",
+    "dep:sequential-storage",
+    "dep:embassy-embedded-hal",
+    "dep:embassy-executor",
+    "dep:embassy-time",
+    "dep:embassy-sync",
+    "dep:embassy-net",
+    "dep:embassy-futures",
+    "dep:smoltcp",
+    "dep:embedded-io-async",
+    "dep:static_cell",
+]
+# Host-side deterministic simulation tests. Enables std, no hardware deps.
+# Run with: cargo test --no-default-features --features sim --target x86_64-unknown-linux-gnu
+sim = []
+
+# Override esp32 PAC to use the git version that esp-hal 1.0 was built against
+[patch.crates-io]
+esp32 = { git = "https://github.com/esp-rs/esp-pacs", rev = "5d7a479" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+
+# esp-storage's ROM-call shims require opt-level >= 2 to inline correctly;
+# building it at "s" panics at compile time.
+[profile.release.package.esp-storage]
+opt-level = 3
+
+# Keep AEAD + hash hot loops at -O3 for sane code size and speed; the
+# default release "s" inlines poorly and bloats both stores' boot path.
+[profile.release.package.chacha20poly1305]
+opt-level = 3
+[profile.release.package.sha2]
+opt-level = 3
