@@ -23,7 +23,7 @@ const events = new Set([
 
 function configured(env, admin = false) {
   origin(env);
-  if (!env.DISCORD_CLIENT_ID || !env.DISCORD_CLIENT_SECRET || (!admin && !env.STRIPE_SECRET_KEY)) throw new HttpError(503, 'Discord sign-in or membership signup is not configured yet. Please contact leadership.');
+  if (!env.DISCORD_CLIENT_ID || !env.DISCORD_CLIENT_SECRET || (!admin && !env.STRIPE_SECRET_KEY)) throw new HttpError(503, 'Sign-in is temporarily unavailable. Please contact leadership.');
 }
 
 async function signup(request, env, admin = false) {

@@ -21,7 +21,7 @@ export async function requireKioskNetwork(request, env) {
   if (!client) throw new HttpError(403, 'Fob enrollment is only available at the makerspace kiosk.');
   const hostname = env.KIOSK_HOSTNAME;
   if (typeof hostname !== 'string' || hostname.length > 253 || !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63}$/i.test(hostname)) {
-    throw new HttpError(503, 'The kiosk network hostname is not configured.');
+    throw new HttpError(503, 'Fob enrollment is temporarily unavailable. Please ask a member for help.');
   }
   if (!cached || cached.hostname !== hostname || cached.until <= Date.now()) {
     try {
@@ -43,7 +43,7 @@ export async function requireKioskNetwork(request, env) {
       cached = { hostname, addresses, until: started + ttl * 1000 };
     } catch {
       cached = null;
-      throw new HttpError(503, 'Could not verify the makerspace network. Please try again.');
+      throw new HttpError(503, 'Fob enrollment is temporarily unavailable. Please try again.');
     }
   }
   if (!cached.addresses.includes(client)) throw new HttpError(403, 'Fob enrollment is only available at the makerspace kiosk.');

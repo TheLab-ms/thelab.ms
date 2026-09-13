@@ -16,7 +16,7 @@ export async function fobClaim(env, token) {
 export async function linkFob(env, member, input) {
   // Executed inside the same member lock as admin edits and identity changes.
   if (member.discord_user_id !== input.discord_user_id || member.auth_version !== input.auth_version) {
-    throw new HttpError(401, 'Your membership identity changed. Sign in again.');
+    throw new HttpError(401, 'Please sign in again to continue.');
   }
   const claim = await fobClaim(env, input.token);
   await armEdge(env);

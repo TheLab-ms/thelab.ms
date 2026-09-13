@@ -83,7 +83,6 @@ export async function waiverRequest(request, env) {
     return response;
   }
   try {
-    if (request.headers.get('Origin') !== origin(env)) throw new HttpError(403, 'Invalid form origin. Reload the waiver and try again.');
     if (request.headers.get('Content-Type')?.split(';')[0] !== 'application/x-www-form-urlencoded') throw new HttpError(415, 'Submit the waiver form.');
     const form = new URLSearchParams(await boundedText(request, 16 * 1024));
     if (nonce !== existingNonce || form.get('csrf') !== csrf || [...form.keys()].some(key => form.getAll(key).length !== 1)) throw new HttpError(403, 'The form expired. Reload the waiver and try again.');
@@ -115,7 +114,7 @@ export async function waiverRequest(request, env) {
       ]);
       signed = results[1].results[0];
     }
-    if (!signed) throw new HttpError(409, 'The member association changed or is ambiguous. Please reload or contact leadership.');
+    if (!signed) throw new HttpError(409, 'We couldn’t link your waiver to your membership. Please reload or contact leadership.');
     await kickEdge(env);
     if (signup) return redirect('/payment/resume');
     return publicPage(`<h1>Waiver signed</h1><p role="status">Your waiver has been submitted successfully. You can print this page for your records.</p><p>Signature #${signed.id} · ${e(new Date().toISOString())}</p>${text(waiver)}<ul>${waiver.agreements.map(a => `<li>${e(a)}</li>`).join('')}</ul><p>Signed by ${e(options.name)} · ${e(options.email)}</p><a class="btn btn-primary" href="/">Done</a>`);

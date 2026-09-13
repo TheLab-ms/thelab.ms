@@ -1037,7 +1037,7 @@ describe('billing safeguards', () => {
     await seed({ billing_email: user.email });
     mockSubs(); mockPrice();
     mockStripe(`/customers/${customer}`, {}, { method: 'POST', status: 500 });
-    await expect(checkout()).rejects.toThrow('HTTP 500');
+    await expect(checkout()).rejects.toThrow('Stripe is temporarily unavailable. Please try again.');
     const stub = await memberStub();
     await runInDurableObject(stub, async (_instance, state) => {
       expect(await state.storage.get('checkout')).toBeUndefined();
@@ -1047,7 +1047,7 @@ describe('billing safeguards', () => {
   it('blocks checkout when the configured recurring price is missing', async () => {
     await seed(); mockSubs();
     mockStripe(/^\/v1\/prices\?/, { data: [], has_more: false });
-    await expect(checkout()).rejects.toThrow('price is not configured');
+    await expect(checkout()).rejects.toThrow('Membership checkout is temporarily unavailable. Please contact leadership.');
   });
 
   it.each([false, true])('automatically applies the admin discount for annual=%s', async annual => {
@@ -1072,7 +1072,7 @@ describe('billing safeguards', () => {
     await seed({ discount_type: 'family' });
     mockSubs(); mockPrice();
     mockStripe(/^\/v1\/coupons\?/, { data: [], has_more: false });
-    await expect(checkout()).rejects.toThrow('no valid Stripe coupon');
+    await expect(checkout()).rejects.toThrow('We couldn’t apply your discount. Please contact leadership before paying.');
   });
 
   it.each(['', 'family', 'free'])('ignores user-supplied discount %j and preserves the admin category', async discount => {
@@ -1117,7 +1117,7 @@ describe('billing safeguards', () => {
       firstKey = new Headers(options.headers).get('Idempotency-Key');
       return {};
     });
-    await expect(checkout()).rejects.toThrow('HTTP 500');
+    await expect(checkout()).rejects.toThrow('Stripe is temporarily unavailable. Please try again.');
     mockSubs(); mockPrice();
     fetchMock.get('https://api.stripe.com').intercept({ path: '/v1/checkout/sessions', method: 'POST' }).reply(200, options => {
       retryKey = new Headers(options.headers).get('Idempotency-Key');
@@ -1158,7 +1158,7 @@ describe('billing safeguards', () => {
     mockStripe('/checkout/sessions/cs_race', { id: 'cs_race', status: 'open' });
     mockStripe('/checkout/sessions/cs_race/expire', {}, { method: 'POST', status: 400 });
     mockStripe('/checkout/sessions/cs_race', { id: 'cs_race', status: 'complete', subscription: 'sub_member' });
-    await expect(assignAnnualBilling()).rejects.toThrow('HTTP 400');
+    await expect(assignAnnualBilling()).rejects.toThrow('Stripe is temporarily unavailable. Please try again.');
     expect(await readMember()).toMatchObject({ bill_annually: 0 });
   });
 
@@ -1333,7 +1333,7 @@ describe('provider failures and diagnostics', () => {
     }));
     await expect(provider('https://discord.com/api/v10/oauth2/token', {
       method: 'POST', body: 'code=private-code', headers: { Authorization: 'Bearer private-token' },
-    }, 'Discord', env)).rejects.toThrow('unexpected redirect');
+    }, 'Discord', env)).rejects.toThrow('Discord is temporarily unavailable. Please try again.');
     expect(fetch).toHaveBeenCalledOnce();
     expect(fetch.mock.calls[0][1].redirect).toBe('manual');
     expect(JSON.parse(log.mock.calls[0][0])).toMatchObject({ event: 'provider.failed', service: 'Discord',
@@ -1360,7 +1360,7 @@ describe('provider failures and diagnostics', () => {
   it.each(['<html>private-provider-body</html>', 'null', '[]'])('logs invalid responses without parser/body leaks: %s', async body => {
     const log = vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.mocked(globalThis.fetch).mockResolvedValueOnce(new Response(body, { status: 502 }));
-    await expect(provider('https://discord.com/api/v10/users/@me', {}, 'Discord', env)).rejects.toThrow('invalid response');
+    await expect(provider('https://discord.com/api/v10/users/@me', {}, 'Discord', env)).rejects.toThrow('Discord is temporarily unavailable. Please try again.');
     expect(JSON.parse(log.mock.calls[0][0])).toMatchObject({ failure: 'invalid_response', provider_status: 502 });
     expect(JSON.stringify(log.mock.calls)).not.toContain('private-provider-body');
   });

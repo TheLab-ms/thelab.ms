@@ -86,13 +86,13 @@ export async function wikiRequest(request, env) {
       if (reading) return startLogin(request, env, 'member');
       throw new HttpError(401, 'Your sign-in expired. Copy your draft and sign in again before saving.');
     }
-    if (!await eligibleEditor(env, member)) throw new HttpError(403, 'Wiki editing requires non-billable membership, or a signed waiver with legacy billing or an active subscription.');
+    if (!await eligibleEditor(env, member)) throw new HttpError(403, 'Wiki editing requires an active membership.');
     const csrf = await hash(`wiki-csrf:${cookie(request, 'thelab_member')}`);
     if (reading) {
       const page = newPage ? null : await wikiCall(env, 'page', { slug });
       return wikiEditor(page, await readMarkdown(env, page), csrf, newPage ? '' : slug);
     }
-    if (request.headers.get('Origin') !== origin(env) || request.headers.get('X-Wiki-CSRF') !== csrf) throw new HttpError(403, 'Invalid editor token or origin. Copy your draft and reload the editor.');
+    if (request.headers.get('Origin') !== origin(env) || request.headers.get('X-Wiki-CSRF') !== csrf) throw new HttpError(403, 'Your editing session expired. Copy your draft and reload the editor.');
     if (upload) return json(await wikiCall(env, 'upload', { member, bytes: await boundedBytes(request, MAX_IMAGE) }), 201);
     const input = await readJSON(request);
     if (preview) {

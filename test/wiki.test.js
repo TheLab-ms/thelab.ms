@@ -82,9 +82,11 @@ it('rechecks membership, identity revocation, CSRF, and origin for writes', asyn
   expect((await post('/wiki/preview', { markdown: 'draft' }, { Origin: 'https://evil.example' })).status).toBe(403);
   expect((await post('/wiki/guide/delete', { revision: '' }, { 'X-Wiki-CSRF': 'bad' })).status).toBe(403);
   await env.DB.prepare('UPDATE members SET non_billable = 0').run();
-  expect((await save('another')).status).toBe(403);
+  const denied = await save('another');
+  expect(denied.status).toBe(403);
+  expect(await denied.json()).toEqual({ error: 'Wiki editing requires an active membership.' });
   // The coordinator independently rejects an old member snapshot.
-  await expect(wikiCall(env, 'save', { member, slug: 'another', title: 'Title', markdown: '', revision: '' })).rejects.toThrow('eligible membership');
+  await expect(wikiCall(env, 'save', { member, slug: 'another', title: 'Title', markdown: '', revision: '' })).rejects.toThrow('Wiki editing requires an active membership.');
   await env.DB.prepare('UPDATE members SET non_billable = 1, auth_version = auth_version + 1').run();
   expect((await save('another')).status).toBe(401);
   expect((await request('/wiki/guide')).status).toBe(200);

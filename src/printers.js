@@ -8,7 +8,7 @@ export function printerOrigin(env) {
     const url = new URL(env.PRINTER_EDGE_URL);
     if (url.protocol === 'https:' && url.origin === env.PRINTER_EDGE_URL) return url.origin;
   } catch { /* Report a configuration error below. */ }
-  throw new HttpError(503, 'Machine status access is not configured. Set PRINTER_EDGE_URL to the HTTPS edge origin.');
+  throw new HttpError(503, 'Machine status is temporarily unavailable. Please try again later.');
 }
 
 export async function printerAccess(request, env) {
@@ -26,7 +26,7 @@ export async function printerAccess(request, env) {
     const bytes = Uint8Array.from(atob(env.PRINTER_JWT_PRIVATE_KEY), c => c.charCodeAt(0));
     key = await crypto.subtle.importKey('pkcs8', bytes, 'Ed25519', false, ['sign']);
   } catch {
-    throw new HttpError(503, 'Machine status access signing is not configured correctly.');
+    throw new HttpError(503, 'Machine status is temporarily unavailable. Please try again later.');
   }
   const issued = now();
   const data = `${json({ alg: 'EdDSA', typ: 'JWT' })}.${json({

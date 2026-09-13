@@ -201,8 +201,10 @@ directly; signup, waiver, callback, payment and webhook paths run through the Wo
 
 ### Fob linking kiosk
 
-Open **`/kiosk`** on the makerspace kiosk. A keyboard/HID reader can send a decimal
-fob ID followed by Enter or one second of inactivity; zero-padded IDs are accepted.
+Open **`/kiosk`** on the makerspace kiosk and keep the browser window active. The
+full-screen display captures decimal fob IDs from a keyboard/HID reader without
+an input field or manual submission. Scans submit after **300 ms of no keystrokes**;
+optional Enter/Tab suffixes and zero-padded IDs are accepted.
 The kiosk displays a QR code generated inside the Worker. Members scan it with
 their phone, sign in through Discord, and tap **Link fob**. The phone can use
 cellular data. An existing member record (including a waiver-only record claimable

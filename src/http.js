@@ -23,7 +23,7 @@ export async function hash(value) {
 export function origin(env) {
   const url = new URL(env.SITE_URL);
   if (url.origin !== env.SITE_URL || (url.protocol !== 'https:' && !['localhost', '127.0.0.1'].includes(url.hostname))) {
-    throw new HttpError(503, 'The membership site URL is not configured correctly.');
+    throw new HttpError(503, 'Membership services are temporarily unavailable. Please contact leadership.');
   }
   return url.origin;
 }

@@ -15,12 +15,12 @@ import { fobEnabledSQL } from './fob-access.js';
 const PAGE_SIZE = 25;
 
 export function adminConfigured(env) {
-  if (!discordID.test(env.DISCORD_ADMIN_ROLE_ID || '')) throw new HttpError(503, 'Admin access is not configured. Set DISCORD_ADMIN_ROLE_ID to the leadership/admin Discord role ID.');
+  if (!discordID.test(env.DISCORD_ADMIN_ROLE_ID || '')) throw new HttpError(503, 'Admin access is temporarily unavailable. Please contact leadership.');
 }
 
 function requireRole(env, member) {
   adminConfigured(env);
-  if (!Array.isArray(member.roles) || !member.roles.includes(env.DISCORD_ADMIN_ROLE_ID)) throw new HttpError(403, 'You need TheLab’s configured admin Discord role to access this page.');
+  if (!Array.isArray(member.roles) || !member.roles.includes(env.DISCORD_ADMIN_ROLE_ID)) throw new HttpError(403, 'Admin access is required to view this page.');
 }
 
 export async function finishAdminLogin(env, user, guildMember, destination) {
@@ -45,10 +45,10 @@ async function list(request, env, csrf) {
 }
 
 async function readForm(request, env, csrf) {
-  if (request.headers.get('Origin') !== origin(env)) throw new HttpError(403, 'Invalid form origin. Reload this page and try again.');
+  if (request.headers.get('Origin') !== origin(env)) throw new HttpError(403, 'We couldn’t submit your changes. Reload this page and try again.');
   if (request.headers.get('Content-Type')?.split(';')[0] !== 'application/x-www-form-urlencoded') throw new HttpError(415, 'Submit the member edit form.');
   const form = new URLSearchParams(await boundedText(request, 128 * 1024));
-  if ([...form.keys()].some(key => form.getAll(key).length !== 1) || form.get('csrf') !== csrf) throw new HttpError(403, 'Invalid form token. Reload this page and try again.');
+  if ([...form.keys()].some(key => form.getAll(key).length !== 1) || form.get('csrf') !== csrf) throw new HttpError(403, 'Your form expired. Reload this page and try again.');
   return Object.fromEntries(form);
 }
 
@@ -89,7 +89,7 @@ export async function adminRequest(request, env, context = requestContext(reques
     let guildMember;
     try { guildMember = await discord(env, `/guilds/${env.DISCORD_GUILD_ID}/members/${claims.sub}`); }
     catch (error) {
-      if (error.providerStatus === 404) throw new HttpError(403, 'You must be in TheLab’s Discord server with the admin role.');
+      if (error.providerStatus === 404) throw new HttpError(403, 'Admin access is required to view this page.');
       throw error;
     }
     requireRole(env, guildMember);

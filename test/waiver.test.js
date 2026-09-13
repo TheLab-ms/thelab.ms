@@ -111,9 +111,19 @@ describe('public liability waivers', () => {
     expect((await waivers()).results).toHaveLength(1);
   });
 
-  it('rejects cross-site forms and duplicate fields', async () => {
+  it.each([null, 'null', 'https://alternate.example'])('accepts a valid waiver regardless of Origin: %s', async origin => {
     const f = await form();
-    expect((await submit(f, {}, { Origin: 'https://evil.example' })).status).toBe(403);
+    const headers = new Headers({ Cookie: f.cookie, 'Content-Type': 'application/x-www-form-urlencoded' });
+    if (origin !== null) headers.set('Origin', origin);
+    human();
+    const response = await api('/waiver', { method: 'POST', headers, body: new URLSearchParams(f.fields) });
+    expect(response.status).toBe(200);
+    expect((await waivers()).results).toHaveLength(1);
+  });
+
+  it('rejects missing form cookies and duplicate fields', async () => {
+    const f = await form();
+    expect((await submit(f, {}, { Cookie: '' })).status).toBe(403);
     expect((await api('/waiver', { method: 'POST', body: new URLSearchParams(f.fields).toString() + '&email=other@example.com',
       headers: { Cookie: f.cookie, Origin: env.SITE_URL, 'Content-Type': 'application/x-www-form-urlencoded' } })).status).toBe(403);
     expect(http).not.toHaveBeenCalled();

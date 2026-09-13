@@ -1,41 +1,43 @@
-const scanner = document.getElementById('scanner');
+const kiosk = document.getElementById('kiosk');
+const standby = document.getElementById('standby');
 const status = document.getElementById('status');
 const panel = document.getElementById('claim');
+let buffer = '';
 let generation = 0, idleTimer, pollTimer, expiryTimer, controller;
 
-function interactive(target) {
-  return target instanceof Element && target.closest('input, textarea, select, button, a, [contenteditable], [tabindex]');
-}
-function focus() {
-  if (!interactive(document.activeElement)) scanner.focus({ preventScroll: true });
-}
 function notice(message, error = false) {
   status.setAttribute('role', error ? 'alert' : 'status');
   status.textContent = message;
 }
-function reset(message = 'Ready to scan.', error = false) {
+function reset(message = 'Ready when you are. Just tap your fob.', error = false) {
   generation++;
   controller?.abort();
   clearTimeout(idleTimer);
   clearTimeout(pollTimer);
   clearTimeout(expiryTimer);
-  scanner.value = '';
+  buffer = '';
   panel.hidden = true;
+  standby.hidden = false;
+  kiosk.dataset.state = error ? 'error' : 'ready';
   document.getElementById('qr').removeAttribute('src');
-  document.getElementById('claim-link').removeAttribute('href');
   notice(message, error);
-  focus();
 }
 async function api(url, options = {}) {
-  const response = await fetch(url, { ...options, signal: controller.signal, cache: 'no-store' });
-  const result = await response.json();
+  let response, result;
+  try {
+    response = await fetch(url, { ...options, signal: controller.signal, cache: 'no-store' });
+    result = await response.json();
+  } catch {
+    throw new Error('Fob enrollment is temporarily unavailable. Please scan again.');
+  }
   if (!response.ok) throw Object.assign(new Error(result.error || 'Enrollment failed. Try again.'), { status: response.status });
   return result;
 }
 async function submit() {
-  const value = scanner.value;
+  const value = buffer;
   if (!value) return;
   reset('Reading fob…');
+  kiosk.dataset.state = 'reading';
   const current = generation;
   controller = new AbortController();
   try {
@@ -44,16 +46,18 @@ async function submit() {
     const claim = await api('/kiosk/claims', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ fob_id: fob }) });
     if (current !== generation) return;
     document.getElementById('qr').src = claim.qr;
-    document.getElementById('claim-link').href = claim.url;
     document.getElementById('expiry').textContent = `Expires at ${new Date(claim.expires * 1000).toLocaleTimeString()}.`;
     panel.hidden = false;
+    standby.hidden = true;
+    kiosk.dataset.state = 'claim';
     notice('Scan the QR code with your phone. Sign in through Discord, then tap Link fob.');
     expiryTimer = setTimeout(() => reset('Code expired. Scan your fob again.'), Math.max(0, claim.expires * 1000 - Date.now()));
     const poll = async () => {
       try {
         const result = await api(`/kiosk/claims?token=${encodeURIComponent(claim.token)}`);
         if (current !== generation) return;
-        if (result.claimed) { reset('Fob linked. Ready for the next scan.'); return; }
+        if (result.claimed) { reset('You’re all set! Fob linked. Ready for the next scan.'); return; }
+        notice('Scan the QR code with your phone. Sign in through Discord, then tap Link fob.');
       } catch (error) {
         if (current !== generation) return;
         if ([403, 404, 410].includes(error.status)) { reset(error.message, true); return; }
@@ -66,25 +70,20 @@ async function submit() {
     if (current === generation) reset(error.message, true);
   }
 }
-function idle() {
-  clearTimeout(idleTimer);
-  if (scanner.value) idleTimer = setTimeout(submit, 1000);
-}
-scanner.addEventListener('input', idle);
-document.getElementById('scanner-form').addEventListener('submit', event => { event.preventDefault(); void submit(); });
 document.addEventListener('keydown', event => {
-  if (event.defaultPrevented || event.isComposing || event.ctrlKey || event.metaKey || event.altKey) return;
-  if (event.target !== scanner && interactive(event.target)) return;
-  if (event.key === 'Enter' && scanner.value) { event.preventDefault(); void submit(); }
-  else if (event.key.length === 1 && event.target !== scanner) {
-    event.preventDefault(); scanner.value += event.key; focus(); idle();
-  }
+  if (event.defaultPrevented || event.isComposing || event.repeat || event.ctrlKey || event.metaKey || event.altKey) return;
+  // Capture the HID reader globally, even after someone clicks a kiosk control.
+  // Enter/Tab suffixes are part of the burst; only silence submits the scan.
+  if (event.key.length === 1) {
+    event.preventDefault();
+    if (!buffer) { reset('Receiving fob…'); kiosk.dataset.state = 'reading'; }
+    // Keep an overlong scan invalid without letting the buffer grow indefinitely.
+    if (buffer.length < 21) buffer += event.key;
+  } else if (!buffer) return;
+  else if (event.key === 'Enter' || event.key === 'Tab') event.preventDefault();
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(submit, 300);
 });
-document.addEventListener('focusin', event => {
-  if (event.target !== scanner && interactive(event.target)) { clearTimeout(idleTimer); scanner.value = ''; }
-});
-document.getElementById('done').addEventListener('click', () => { reset(); scanner.focus(); });
-document.addEventListener('click', focus);
-window.addEventListener('focus', focus);
+document.getElementById('done').addEventListener('click', () => reset());
+window.addEventListener('blur', () => { if (buffer) reset('Scan interrupted. Tap your fob again.'); });
 window.addEventListener('pagehide', () => reset());
-window.addEventListener('pageshow', focus);

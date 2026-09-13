@@ -34,7 +34,7 @@ export async function provider(url, init, service, env = {}) {
   }
   if (response.status >= 300 && response.status < 400) {
     await response.body?.cancel();
-    throw fail(new HttpError(502, `${service} returned an unexpected redirect. Please try again.`), 'redirect');
+    throw fail(new HttpError(502, `${service} is temporarily unavailable. Please try again.`), 'redirect');
   }
   let data;
   try {
@@ -43,18 +43,18 @@ export async function provider(url, init, service, env = {}) {
     if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Invalid provider payload');
   } catch {
     // JSON parser errors may include provider body fragments; never log them.
-    throw fail(new HttpError(502, `${service} returned an invalid response. Please try again.`), 'invalid_response');
+    throw fail(new HttpError(502, `${service} is temporarily unavailable. Please try again.`), 'invalid_response');
   }
   if (!response.ok) {
     const delay = Number(response.headers.get('Retry-After') || data.retry_after || 0);
     // Never log provider bodies, OAuth codes, or tokens.
-    throw fail(new HttpError(502, `${service} request failed (HTTP ${response.status}). Please try again.`, Number.isFinite(delay) ? Math.min(43200, Math.max(0, Math.ceil(delay))) : 0), 'http');
+    throw fail(new HttpError(502, `${service} is temporarily unavailable. Please try again.`, Number.isFinite(delay) ? Math.min(43200, Math.max(0, Math.ceil(delay))) : 0), 'http');
   }
   return data;
 }
 
 export function stripe(env, path, form, key) {
-  if (!env.STRIPE_SECRET_KEY) throw new HttpError(503, 'Stripe is not configured.');
+  if (!env.STRIPE_SECRET_KEY) throw new HttpError(503, 'Billing is temporarily unavailable. Please contact leadership.');
   return provider(`https://api.stripe.com/v1${path}`, {
     method: form ? 'POST' : 'GET',
     headers: {
@@ -72,18 +72,18 @@ export async function stripeList(env, path, params = {}) {
   const query = new URLSearchParams({ ...params, limit: '100' });
   for (let page = 0; page < 100; page++) {
     const result = await stripe(env, `${path}?${query}`);
-    if (!Array.isArray(result.data)) throw new HttpError(502, 'Stripe returned an invalid list.');
+    if (!Array.isArray(result.data)) throw new HttpError(502, 'Billing is temporarily unavailable. Please try again.');
     all.push(...result.data);
     if (!result.has_more) return all;
     if (!result.data.length) break;
     query.set('starting_after', result.data.at(-1).id);
   }
-  throw new HttpError(502, 'Stripe pagination could not be completed.');
+  throw new HttpError(502, 'Billing is temporarily unavailable. Please try again.');
 }
 
 export function discord(env, path, method = 'GET') {
   if (!env.DISCORD_BOT_TOKEN || !discordID.test(env.DISCORD_GUILD_ID) || !discordID.test(env.DISCORD_ROLE_ID)) {
-    throw new HttpError(503, 'Discord membership is not configured.');
+    throw new HttpError(503, 'Discord membership services are temporarily unavailable. Please contact leadership.');
   }
   return provider(`https://discord.com/api/v10${path}`, { method, headers: { Authorization: `Bot ${env.DISCORD_BOT_TOKEN}` } }, 'Discord', env);
 }
@@ -94,9 +94,9 @@ export async function discordIdentity(env, code) {
     body: new URLSearchParams({ client_id: env.DISCORD_CLIENT_ID, client_secret: env.DISCORD_CLIENT_SECRET,
       grant_type: 'authorization_code', code, redirect_uri: `${origin(env)}/login/discord/callback` }).toString(),
   }, 'Discord', env);
-  if (typeof token.access_token !== 'string' || !/^[A-Za-z0-9._~+-]{1,2048}$/.test(token.access_token) || token.token_type?.toLowerCase() !== 'bearer') throw new HttpError(502, 'Discord returned an invalid sign-in token.');
+  if (typeof token.access_token !== 'string' || !/^[A-Za-z0-9._~+-]{1,2048}$/.test(token.access_token) || token.token_type?.toLowerCase() !== 'bearer') throw new HttpError(502, 'Discord sign-in failed. Please try again.');
   const user = await provider('https://discord.com/api/v10/users/@me', { headers: { Authorization: `Bearer ${token.access_token}` } }, 'Discord', env);
-  if (!discordID.test(user.id || '') || typeof user.id !== 'string' || typeof user.username !== 'string' || !user.username.trim() || user.username.length > 80 || user.bot === true) throw new HttpError(502, 'Discord returned an invalid user identity.');
+  if (!discordID.test(user.id || '') || typeof user.id !== 'string' || typeof user.username !== 'string' || !user.username.trim() || user.username.length > 80 || user.bot === true) throw new HttpError(502, 'Discord sign-in failed. Please try again.');
   if (user.verified !== true || typeof user.email !== 'string' || user.email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(user.email)) throw new HttpError(403, 'Please verify your email in Discord before signing up.');
   return { id: user.id, username: user.username, email: user.email };
 }

@@ -24,7 +24,7 @@ export class Membership extends DurableObject {
           throw new HttpError(404, 'Membership not found. Please sign in again.');
         }
         if (['checkout', 'refreshIdentity'].includes(operation) && member.discord_user_id !== input.user?.id) {
-          throw new HttpError(409, 'Membership identity changed. Please reload and try again.');
+          throw new HttpError(409, 'Please sign in again to continue.');
         }
         let value;
         switch (operation) {
@@ -150,7 +150,7 @@ export class Membership extends DurableObject {
   async resolvePricing(annual, discount) {
     const prices = await stripeList(this.env, '/prices', { active: 'true', 'lookup_keys[]': annual ? 'yearly' : 'monthly' });
     const price = prices.find(item => item.type === 'recurring' && item.recurring?.interval === (annual ? 'year' : 'month') && item.recurring.interval_count === 1);
-    if (!price) throw new HttpError(503, 'The membership price is not configured. Please contact leadership.');
+    if (!price) throw new HttpError(503, 'Membership checkout is temporarily unavailable. Please contact leadership.');
     let coupon;
     if (discount) {
       const coupons = await stripeList(this.env, '/coupons');
@@ -158,7 +158,7 @@ export class Membership extends DurableObject {
       coupon = coupons.find(item => item.valid
         && (item.metadata?.discountTypes || '').split(',').some(value => value.trim().toLowerCase() === discount.toLowerCase())
         && (!item.applies_to?.products || item.applies_to.products.includes(product)));
-      if (!coupon) throw new HttpError(503, 'Your assigned discount has no valid Stripe coupon. Please contact leadership before paying.');
+      if (!coupon) throw new HttpError(503, 'We couldn’t apply your discount. Please contact leadership before paying.');
     }
     return { price, coupon };
   }
@@ -171,7 +171,7 @@ export class Membership extends DurableObject {
       'metadata[thelab_discord_id]': member.discord_user_id,
       'metadata[thelab_member_id]': member.member_id,
     });
-    if (!/^cus_[A-Za-z0-9]+$/.test(customer.id)) throw new HttpError(502, 'Stripe returned an invalid customer.');
+    if (!/^cus_[A-Za-z0-9]+$/.test(customer.id)) throw new HttpError(502, 'Billing is temporarily unavailable. Please try again.');
     return this.env.DB.prepare('UPDATE members SET stripe_customer_id = ?, billing_name = ?, billing_email = ? WHERE member_id = ? RETURNING *')
       .bind(customer.id, customer.name || '', customer.email || '', member.member_id).first();
   }
@@ -181,7 +181,7 @@ export class Membership extends DurableObject {
     if (!operation) return null;
     const created = await this.write('checkout', operation.path, operation.form);
     const session = await stripe(this.env, `/checkout/sessions/${encodeURIComponent(created.id)}`);
-    if (!['open', 'expired', 'complete'].includes(session.status)) throw new HttpError(502, 'Stripe returned an invalid checkout status.');
+    if (!['open', 'expired', 'complete'].includes(session.status)) throw new HttpError(502, 'Billing is temporarily unavailable. Please try again.');
     return { ...operation, session };
   }
 
@@ -297,13 +297,13 @@ export class Membership extends DurableObject {
   stripeURL(value, host) {
     let url;
     try { url = new URL(value); } catch { /* Validate below. */ }
-    if (!url || url.protocol !== 'https:' || url.hostname !== host) throw new HttpError(502, 'Stripe returned an invalid redirect.');
+    if (!url || url.protocol !== 'https:' || url.hostname !== host) throw new HttpError(502, 'Billing is temporarily unavailable. Please try again.');
     return url.href;
   }
 
   async sync(member, { customer_id: customer = member.stripe_customer_id }) {
     const id = member.discord_user_id;
-    if (member.stripe_customer_id !== customer) throw new HttpError(409, 'Billing identity changed.');
+    if (member.stripe_customer_id !== customer) throw new HttpError(409, 'Your billing details changed. Please reload and try again.');
     // Every delivery reconciles current Stripe state, including delayed webhooks.
     const billing = customer ? await stripe(this.env, `/customers/${customer}`) : {};
     const subscriptions = await this.subscriptions(member);

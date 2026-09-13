@@ -45,7 +45,7 @@ export class Wiki extends DurableObject {
     return this.serialize(async () => {
       try {
         if (['save', 'delete', 'upload'].includes(operation) && !await eligibleEditor(this.env, input.member)) {
-          throw new HttpError(403, 'An eligible membership is required to edit the wiki.');
+          throw new HttpError(403, 'Wiki editing requires an active membership.');
         }
         let value;
         if (operation === 'index') value = { revision: this.rows('SELECT revision FROM wiki_meta WHERE id = 1')[0]?.revision || 'empty', pages: this.rows('SELECT slug, title, updated FROM wiki_pages ORDER BY title COLLATE NOCASE, slug') };

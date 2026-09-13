@@ -7,7 +7,7 @@ export const TOKEN_AGE = { member: 86400, admin: 8 * 3600, oauth: 600, fob: 300 
 const encoder = new TextEncoder();
 
 function configured(env) {
-  if (typeof env.AUTH_SECRET !== 'string' || encoder.encode(env.AUTH_SECRET).length < 32) throw new HttpError(503, 'Sign-in is not configured. Set AUTH_SECRET to a random secret of at least 32 bytes.');
+  if (typeof env.AUTH_SECRET !== 'string' || encoder.encode(env.AUTH_SECRET).length < 32) throw new HttpError(503, 'Sign-in is temporarily unavailable. Please contact leadership.');
 }
 
 function key(env) {
@@ -92,7 +92,7 @@ export async function verifyOAuthState(env, state, browser) {
 
 export async function startLogin(request, env, purpose = 'signup') {
   configured(env);
-  if (!env.DISCORD_CLIENT_ID || !env.DISCORD_CLIENT_SECRET) throw new HttpError(503, 'Discord sign-in is not configured yet. Please contact leadership.');
+  if (!env.DISCORD_CLIENT_ID || !env.DISCORD_CLIENT_SECRET) throw new HttpError(503, 'Sign-in is temporarily unavailable. Please contact leadership.');
   const url = new URL(request.url), browser = randomToken();
   const destination = loginDestination(url.pathname + url.search, purpose);
   const state = await issueToken(env, await hash(browser), 'oauth', {
