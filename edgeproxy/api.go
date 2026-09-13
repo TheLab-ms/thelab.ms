@@ -199,19 +199,24 @@ func (e *edge) patchGoal(w http.ResponseWriter, r *http.Request) {
 var errGoalCapacity = errors.New("goal exceeds 512 fobs")
 
 func (e *edge) fobs(w http.ResponseWriter, r *http.Request) {
-	var events []controllerSwipe
-	if !readJSON(w, r, &events) {
+	var input []struct {
+		Fob     uint32 `json:"fob"`
+		Allowed *bool  `json:"allowed"`
+	}
+	if !readJSON(w, r, &input) {
 		return
 	}
-	if events == nil || len(events) > 512 {
+	if input == nil || len(input) > 512 {
 		http.Error(w, "expected an array of at most 512 swipes", http.StatusBadRequest)
 		return
 	}
-	for _, event := range events {
-		if event.Fob == 0 {
-			http.Error(w, "invalid fob ID", http.StatusBadRequest)
+	events := make([]controllerSwipe, 0, len(input))
+	for _, event := range input {
+		if event.Fob == 0 || event.Allowed == nil {
+			http.Error(w, "each swipe requires a nonzero fob ID and boolean allowed", http.StatusBadRequest)
 			return
 		}
+		events = append(events, controllerSwipe{Fob: event.Fob, Allowed: *event.Allowed})
 	}
 	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
 	body, err := e.controllerPoll(r.Context(), ip, events)

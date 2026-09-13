@@ -86,7 +86,7 @@ func readSwipes(t *testing.T, e *edge) []swipe {
 func TestGoalAndController(t *testing.T) {
 	e := testEdge(t)
 	lan, _ := e.routes()
-	for _, body := range []string{"[]", `[{"fob":7}]`} {
+	for _, body := range []string{"[]", `[{"fob":7,"allowed":false}]`} {
 		if w := request(lan, "POST", "/api/fobs", body); w.Code != 503 || countSwipes(t, e) != 0 {
 			t.Fatalf("uninitialized: %d", w.Code)
 		}
@@ -171,10 +171,15 @@ func TestAPIValidationAndRoutes(t *testing.T) {
 	}
 	assertGoal(t, e, 1, "[1]\n")
 	for _, body := range []string{"null", "[null]", "[{}]", "[] []", `[{"fob":-1}]`, `[{"fob":4294967296}]`,
+		`[{"fob":7}]`, `[{"fob":7,"allowed":null}]`, `[{"fob":7,"allowed":"false"}]`,
+		`[{"fob":7,"allowed":true},{"fob":8}]`,
 		"[" + strings.Repeat(`{"fob":1},`, 512) + `{"fob":1}]`, strings.Repeat(" ", 16385)} {
 		if w := request(lan, "POST", "/api/fobs", body); w.Code != 400 {
 			t.Fatalf("invalid swipes accepted: %q", body)
 		}
+	}
+	if events := readSwipes(t, e); len(events) != 0 {
+		t.Fatal("invalid batch partially inserted swipes", events)
 	}
 }
 

@@ -107,9 +107,19 @@ export async function adminRequest(request, env, context = requestContext(reques
       try { await coordinated(env, member.member_id, 'updateMetadata', { fields }); }
       catch (error) {
         logError('admin.save_failed', error, context, env);
-        if (edgeEnabled(env)) await edgeCall(env, 'swipes');
-        const { events } = await queryEvents(env, { memberID: member.member_id, limit: 10 });
-        return editor(member, fields, csrf, env, error instanceof HttpError ? error.message : 'Saving failed. Please try again.', error instanceof HttpError ? error.status : 500, events, await memberWaivers(env, member));
+        let message = error instanceof HttpError ? error.message : 'Saving failed. Please try again.';
+        let events = [], waivers = '';
+        try {
+          if (edgeEnabled(env)) await edgeCall(env, 'swipes');
+          ({ events } = await queryEvents(env, { memberID: member.member_id, limit: 10 }));
+          waivers = await memberWaivers(env, member);
+        } catch (refreshError) {
+          // Keep the submitted draft even if ancillary reads fail. Never render
+          // stale history as though its required refresh succeeded.
+          logError('admin.refresh_failed', refreshError, context, env);
+          message += ` ${refreshError instanceof HttpError ? refreshError.message : 'Could not refresh member history. Reload to retry.'}`;
+        }
+        return editor(member, fields, csrf, env, message, error instanceof HttpError ? error.status : 500, events, waivers);
       }
       return redirect(`${memberPath({ ...member, discord_user_id: fields.discord_user_id.trim() })}?saved=1`);
     }

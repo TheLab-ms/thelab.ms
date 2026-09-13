@@ -240,6 +240,26 @@ it('protects manual full sync with live admin role and CSRF; sends a full snapsh
   expect(writes).toHaveLength(1);
 });
 
+it('preserves rejected admin edits when the swipe refresh also fails', async () => {
+  const m = await member();
+  const token = await issueToken(env, '333333333333333333', 'admin');
+  const normal = fetchSpy.getMockImplementation();
+  fetchSpy.mockImplementation((url, init) => String(url).endsWith('/api/swipes')
+    ? new Response(null, { status: 502 }) : normal(url, init));
+  const response = await worker.fetch(new Request(`${env.SITE_URL}/admin/members/${m.member_id}`, {
+    method: 'POST', headers: { Cookie: `thelab_admin=${token}`, Origin: env.SITE_URL, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ csrf: await hash(`admin-csrf:${token}`), metadata_version: '0',
+      discord_user_id: '', stripe_customer_id: '', stripe_subscription_id: '', name_override: 'Unsaved maker',
+      notes: 'Keep my draft <please>', billing: 'monthly', discount_type: '', fob_id: '7' }),
+  }), configured);
+  expect(response.status).toBe(409);
+  const html = await response.text();
+  expect(html).toContain('value="Unsaved maker"');
+  expect(html).toContain('Keep my draft &lt;please&gt;');
+  expect(html).toContain('Could not refresh swipes');
+  expect((await env.DB.prepare('SELECT notes FROM members WHERE member_id = ?').bind(m.member_id).first()).notes).toBe('');
+});
+
 it('backs up nightly once per Central date, including the repeated fall-back hour', async () => {
   expect(nightlyDate(Date.parse('2026-01-15T07:00:00Z'))).toBe('2026-01-15');
   expect(nightlyDate(Date.parse('2026-07-15T06:00:00Z'))).toBe('2026-07-15');
@@ -285,4 +305,28 @@ it('rejects malformed swipe payloads before importing any rows', async () => {
     { id: 'invalid', time: 'yesterday', controller: '192.168.1.2', fob: 0, allowed: 'yes' }];
   await expect(edgeCall(configured, 'swipes')).rejects.toThrow();
   expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM edge_swipes').first()).n).toBe(0);
+});
+
+it('delivers all 512 authorized fobs and rejects overflow without truncating the goal', async () => {
+  await env.DB.prepare(`INSERT INTO members(fob_id, non_billable)
+    WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<512)
+    SELECT n, 1 FROM seq`).run();
+  await edgeCall(configured, 'changes');
+  expect(goal.fobs).toEqual(Array.from({ length: 512 }, (_, i) => i + 1));
+  await env.DB.prepare('INSERT INTO members(fob_id, non_billable) VALUES (513, 1)').run();
+  await expect(edgeCall(configured, 'changes')).rejects.toMatchObject({ status: 503 });
+  expect(writes).toHaveLength(1);
+  expect(goal.fobs).toHaveLength(512);
+  await env.DB.prepare('UPDATE members SET non_billable = 0 WHERE fob_id = 1').run();
+  await runDurableObjectAlarm(stub());
+  expect(goal.fobs).toEqual(Array.from({ length: 512 }, (_, i) => i + 2));
+});
+
+it('rejects an oversized swipe response before importing and recovers on retry', async () => {
+  const normal = fetchSpy.getMockImplementation();
+  fetchSpy.mockImplementation(async () => new Response('[]', { headers: { 'Content-Length': String(32 * 1024 * 1024 + 1) } }));
+  await expect(edgeCall(configured, 'swipes')).rejects.toMatchObject({ status: 503 });
+  expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM edge_swipes').first()).n).toBe(0);
+  fetchSpy.mockImplementation(normal);
+  expect(await edgeCall(configured, 'swipes')).toEqual({ fetched: 0 });
 });

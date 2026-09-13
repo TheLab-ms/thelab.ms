@@ -6,6 +6,7 @@ function eventDetails(event) {
   if (event.event_type === 'MemberRegistered') return 'Membership registered.';
   if (event.event_type === 'NotesUpdated') return 'Internal notes updated.';
   const details = JSON.parse(event.details);
+  if (event.event_type === 'ConwayEvent') return `${details.event}: ${details.details}`;
   if (event.event_type === 'FobSwipe') return `Fob ${details.fob} · ${details.allowed ? 'Allowed' : 'Denied'} · Controller ${details.controller} · ${details.time}`;
   if (event.event_type === 'WaiverSigned') return `Signature #${details.waiver_id}, waiver version ${details.version}.`;
   const value = item => {

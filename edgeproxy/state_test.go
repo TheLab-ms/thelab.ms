@@ -128,12 +128,12 @@ func TestTransactionFailures(t *testing.T) {
 	execSQL(t, e, `CREATE TRIGGER reject_swipe BEFORE INSERT ON swipes WHEN NEW.fob = 2
 BEGIN SELECT RAISE(ABORT, 'injected insert failure'); END`)
 	etag, _ := controllerETag([]byte("[1]\n"))
-	w := request(lan, "POST", "/api/fobs", `[{"fob":1},{"fob":2}]`, "If-None-Match", etag)
+	w := request(lan, "POST", "/api/fobs", `[{"fob":1,"allowed":false},{"fob":2,"allowed":false}]`, "If-None-Match", etag)
 	if w.Code != 500 || countSwipes(t, e) != 0 {
 		t.Fatalf("partial batch acknowledged or committed: %d", w.Code)
 	}
 	execSQL(t, e, "DROP TRIGGER reject_swipe")
-	if w := request(lan, "POST", "/api/fobs", `[{"fob":1},{"fob":2}]`); w.Code != 200 {
+	if w := request(lan, "POST", "/api/fobs", `[{"fob":1,"allowed":false},{"fob":2,"allowed":false}]`); w.Code != 200 {
 		t.Fatal(w.Code)
 	}
 	before := readSwipes(t, e)
@@ -151,7 +151,7 @@ BEGIN SELECT RAISE(ABORT, 'injected goal failure'); END`)
 	execSQL(t, e, "PRAGMA query_only = ON")
 	pushVersion(t, e, 3, "[]", 500)
 	lan, _ = e.routes()
-	if w := request(lan, "POST", "/api/fobs", `[{"fob":1}]`); w.Code != 500 {
+	if w := request(lan, "POST", "/api/fobs", `[{"fob":1,"allowed":false}]`); w.Code != 500 {
 		t.Fatal("acknowledged a read-only write")
 	}
 	if w := request(lan, "POST", "/api/fobs", "[]"); w.Code != 200 {
@@ -236,7 +236,7 @@ func TestSwipeRetentionHasNoCountLimit(t *testing.T) {
 	execSQL(t, e, `WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x < ?)
 INSERT INTO swipes(id,time,controller,fob,allowed) SELECT 'event-' || x, ?, 'test', 1, 1 FROM n`, 10000, time.Now().UnixNano())
 	lan, _ := e.routes()
-	if w := request(lan, "POST", "/api/fobs", `[{"fob":1},{"fob":2}]`); w.Code != 200 {
+	if w := request(lan, "POST", "/api/fobs", `[{"fob":1,"allowed":false},{"fob":2,"allowed":false}]`); w.Code != 200 {
 		t.Fatal(w.Code)
 	}
 	if len(readSwipes(t, e)) != 10002 || countSwipes(t, e) != 10002 {

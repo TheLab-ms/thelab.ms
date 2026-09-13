@@ -72,6 +72,12 @@ stripe listen --forward-to localhost:8787/webhooks/stripe
 Use the printed signing secret for local `STRIPE_WEBHOOK_SECRET`. Local queue
 consumers call real Discord/Stripe unless running the automated tests.
 
+## Conway migration
+
+Use the local [Conway CSV importer](scripts/import-conway.md) to bootstrap an empty
+D1 database with all members and waivers, plus the last 90 days of member events
+and fob swipes. It validates the exports and generates SQL for Wrangler.
+
 ## Hero image assets
 
 The landing page uses pre-rendered WebP/JPEG variants with responsive `srcset`

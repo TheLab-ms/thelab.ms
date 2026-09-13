@@ -1,6 +1,7 @@
 import { HttpError } from './http.js';
 
 export const eventTypes = {
+  ConwayEvent: 'Conway event',
   FobChanged: 'Fob assignment changed',
   NonBillableChanged: 'Non-billable changed',
   LegacyBillingChanged: 'Legacy billing changed',

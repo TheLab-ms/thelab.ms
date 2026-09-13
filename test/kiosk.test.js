@@ -34,7 +34,9 @@ beforeEach(async () => {
   config = { ...env, KIOSK_HOSTNAME: `space-${randomToken().slice(0, 16)}.example`, KIOSK_SKIP_IP_CHECK: '' };
   fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
     expect(new URL(url).origin).toBe('https://cloudflare-dns.com');
-    expect(init.redirect).toBe('error');
+    expect(init.redirect).toBe('manual');
+    // Exercise workerd's Request option validation, even with HTTP mocked.
+    new Request(url, init);
     const type = Number(new URL(url).searchParams.get('type'));
     return Response.json({ Status: 0, Answer: [{ type, TTL: 60, data: type === 1 ? '192.0.2.10' : '2001:db8::10' }] });
   });
@@ -67,6 +69,15 @@ it('allows only the explicit localhost dev bypass and still requires signed clai
     expect((await api(`/keyfob/bind?token=${c.token}`, {}, local)).status).toBe(303);
   }
   expect(fetchSpy).not.toHaveBeenCalled();
+});
+
+it.each([301, 302, 303, 307, 308])('denies DNS redirects (%s) without following them', async status => {
+  fetchSpy.mockImplementation(async (_url, init) => {
+    expect(init.redirect).toBe('manual');
+    return new Response(null, { status, headers: { Location: 'https://unexpected.example/dns' } });
+  });
+  expect((await api('/kiosk', { headers: onsite })).status).toBe(503);
+  expect(fetchSpy).toHaveBeenCalledTimes(2);
 });
 
 it('refreshes DNS at the shortest TTL and fails closed after address changes or lookup failure', async () => {

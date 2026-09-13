@@ -28,7 +28,7 @@ export async function requireKioskNetwork(request, env) {
       const started = Date.now();
       const answers = await Promise.all([1, 28].map(async type => {
         const response = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(hostname)}&type=${type}`, {
-          headers: { Accept: 'application/dns-json' }, redirect: 'error', signal: AbortSignal.timeout(5000),
+          headers: { Accept: 'application/dns-json' }, redirect: 'manual', signal: AbortSignal.timeout(5000),
         });
         if (!response.ok) throw new Error('DNS lookup failed');
         const result = JSON.parse(await boundedText(response, 32768));
