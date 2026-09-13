@@ -59,9 +59,12 @@ func run() error {
 		return fmt.Errorf("-tunnel must bind a loopback address for trusted Cloudflare mTLS headers")
 	}
 	errors := make(chan error, 2)
-	for i, listener := range []net.Listener{local, cloud} {
+	for _, endpoint := range []struct {
+		listener net.Listener
+		handler  http.Handler
+	}{{local, lanHandler}, {cloud, tunnelHandler}} {
 		server := &http.Server{
-			Handler:           []http.Handler{lanHandler, tunnelHandler}[i],
+			Handler:           endpoint.handler,
 			ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
 			WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
 			MaxHeaderBytes: 16 << 10,
@@ -74,8 +77,8 @@ func run() error {
 				_ = server.Close()
 			}
 		}()
-		go func() { errors <- server.Serve(listener) }()
-		log.Printf("listening on %s", listener.Addr())
+		go func() { errors <- server.Serve(endpoint.listener) }()
+		log.Printf("listening on %s", endpoint.listener.Addr())
 	}
 	select {
 	case <-ctx.Done():
@@ -100,25 +103,22 @@ func (e *edge) routes() (http.Handler, http.Handler) {
 	})
 	tunnel.HandleFunc("PUT /api/goal", e.goal)
 	tunnel.HandleFunc("GET /api/swipes", e.getSwipes)
-	member := e.printerRoutes()
+	tunnel.HandleFunc("GET /machines", e.requirePrinterMember(e.printers.dashboard))
+	tunnel.HandleFunc("GET /machines/content", e.requirePrinterMember(e.printers.dashboard))
+	tunnel.HandleFunc("GET /machines/images/{image}", e.requirePrinterMember(func(w http.ResponseWriter, r *http.Request, _ *printerClaims) {
+		e.printers.snapshot(w, r)
+	}))
+	tunnel.HandleFunc("GET /machines/login", e.printerResource(e.printerLogin))
+	tunnel.HandleFunc("POST /machines/session", e.printerResource(e.printerSession))
+	tunnel.HandleFunc("GET /machines/callback", e.printerResource(printerCallback))
+	tunnel.HandleFunc("GET /machines/app.js", e.printerResource(printerScript))
 	return lan, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		if r.URL.Path == "/machines" || strings.HasPrefix(r.URL.Path, "/machines/") {
 			w.Header().Set("Referrer-Policy", "no-referrer")
 			w.Header().Set("X-Content-Type-Options", "nosniff")
 			w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
-			if _, pattern := member.Handler(r); pattern == "" {
-				http.NotFound(w, r)
-				return
-			}
-			if e.memberAuth == nil {
-				http.Error(w, "machine status access is not configured", 503)
-				return
-			}
-			member.ServeHTTP(w, r)
-			return
-		}
-		if !cloudflareMTLSVerified(r.Header) {
+		} else if !cloudflareMTLSVerified(r.Header) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}

@@ -91,7 +91,7 @@ func TestSQLiteSetupAndCorruptStartup(t *testing.T) {
 			t.Fatalf("permissions for %s: %v %v", path, info, err)
 		}
 	}
-	for _, corrupt := range []string{"database", "goal", "printers"} {
+	for _, corrupt := range []string{"database", "goal", "noncanonical goal", "printers"} {
 		t.Run(corrupt, func(t *testing.T) {
 			dir := t.TempDir()
 			if corrupt == "database" {
@@ -105,6 +105,8 @@ func TestSQLiteSetupAndCorruptStartup(t *testing.T) {
 				}
 				if corrupt == "goal" {
 					execSQL(t, e, "INSERT INTO goal VALUES (1, 1, '[0]')")
+				} else if corrupt == "noncanonical goal" {
+					execSQL(t, e, "INSERT INTO goal VALUES (1, 1, '[2,1,2]')")
 				} else {
 					execSQL(t, e, "UPDATE printer_config SET config = 'null'")
 				}
@@ -125,7 +127,7 @@ func TestTransactionFailures(t *testing.T) {
 	// Fail on the second insert, after the first row has already been written.
 	execSQL(t, e, `CREATE TRIGGER reject_swipe BEFORE INSERT ON swipes WHEN NEW.fob = 2
 BEGIN SELECT RAISE(ABORT, 'injected insert failure'); END`)
-	_, etag, _ := parseGoal([]byte("[1]"))
+	etag, _ := controllerETag([]byte("[1]\n"))
 	w := request(lan, "POST", "/api/fobs", `[{"fob":1},{"fob":2}]`, "If-None-Match", etag)
 	if w.Code != 500 || countSwipes(t, e) != 0 {
 		t.Fatalf("partial batch acknowledged or committed: %d", w.Code)

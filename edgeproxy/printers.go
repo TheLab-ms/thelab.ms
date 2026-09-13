@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,22 +27,17 @@ type printerConfig struct {
 }
 
 type printerStatus struct {
-	SerialNumber       string          `json:"serial_number"`
-	Name               string          `json:"name"`
-	GcodeFile          string          `json:"gcode_file"`
-	SubtaskName        string          `json:"subtask_name"`
-	GcodeState         string          `json:"gcode_state"`
-	PrintErrorCode     json.RawMessage `json:"print_error_code"`
-	RemainingPrintTime int             `json:"remaining_print_time"`
-	PrintPercentDone   int             `json:"print_percent_done"`
-	UpdatedAt          int64           `json:"updated_at"`
-	Error              string          `json:"error"`
+	State     string
+	Remaining int
+	UpdatedAt time.Time
+	Error     string
 }
 
+const statusTimeout = 15 * time.Second
+
 type printerSet struct {
-	lifecycle sync.Mutex
-	mu        sync.RWMutex
-	printers  map[string]*printer
+	mu       sync.RWMutex
+	printers map[string]*printer
 }
 
 type printer struct {
@@ -57,9 +53,8 @@ type printer struct {
 	command func(context.Context, printerConfig) *exec.Cmd
 }
 
+// Caller holds edge.configMu, or has exclusive ownership during startup/tests.
 func (s *printerSet) replace(configs []printerConfig) {
-	s.lifecycle.Lock()
-	defer s.lifecycle.Unlock()
 	wanted := make(map[string]printerConfig, len(configs))
 	for _, config := range configs {
 		wanted[config.SerialNumber] = config
@@ -88,7 +83,7 @@ func (s *printerSet) replace(configs []printerConfig) {
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		p := &printer{config: config, ctx: ctx, cancel: cancel, data: printerStatus{
-			SerialNumber: serial, Name: config.Name, Error: "waiting for printer status", RemainingPrintTime: -1,
+			Remaining: -1,
 		}}
 		s.printers[serial] = p
 		p.wg.Add(2)
@@ -101,33 +96,29 @@ func (s *printerSet) close() { s.replace(nil) }
 
 func (p *printer) report(payload []byte) {
 	var message struct {
-		Print map[string]json.RawMessage `json:"print"`
+		Print struct {
+			State     *string `json:"gcode_state"`
+			Remaining *int    `json:"mc_remaining_time"`
+			// Progress-only reports also confirm that the cached status is fresh.
+			Percent *int `json:"mc_percent"`
+		} `json:"print"`
 	}
 	if json.Unmarshal(payload, &message) != nil {
 		return
 	}
+	report := message.Print
+	if report.State == nil && report.Remaining == nil && report.Percent == nil {
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	next := p.data
-	next.PrintErrorCode = append(json.RawMessage(nil), next.PrintErrorCode...)
-	fields := map[string]any{
-		"gcode_file": &next.GcodeFile, "subtask_name": &next.SubtaskName,
-		"gcode_state": &next.GcodeState, "mc_print_error_code": &next.PrintErrorCode,
-		"mc_remaining_time": &next.RemainingPrintTime, "mc_percent": &next.PrintPercentDone,
+	if report.State != nil {
+		p.data.State = *report.State
 	}
-	changed := false
-	for key, target := range fields {
-		if value, ok := message.Print[key]; ok && string(value) != "null" {
-			if json.Unmarshal(value, target) != nil {
-				return
-			}
-			changed = true
-		}
+	if report.Remaining != nil {
+		p.data.Remaining = *report.Remaining
 	}
-	if changed {
-		next.UpdatedAt, next.Error = time.Now().Unix(), ""
-		p.data = next
-	}
+	p.data.UpdatedAt, p.data.Error = time.Now(), ""
 }
 
 func waitMQTT(ctx context.Context, token mqtt.Token) bool {
@@ -196,11 +187,6 @@ func (p *printer) pollConnection() string {
 			`{"pushing":{"command":"pushall","sequence_id":"0"}}`)) {
 			return "MQTT status request failed"
 		}
-		p.mu.Lock()
-		if time.Since(time.Unix(p.data.UpdatedAt, 0)) > 15*time.Second {
-			p.data.Error = "waiting for printer status"
-		}
-		p.mu.Unlock()
 		select {
 		case <-ctx.Done():
 			return "printer stopped"
@@ -219,7 +205,7 @@ func ffmpegCommand(ctx context.Context, config printerConfig) *exec.Cmd {
 		User: url.UserPassword("bblp", config.AccessCode), Path: "/streaming/live/1"}
 	return exec.CommandContext(ctx, "ffmpeg", "-nostdin", "-loglevel", "error",
 		"-rtsp_transport", "tcp", "-i", address.String(), "-c:v", "mjpeg", "-q:v", "5",
-		"-r", "15", "-an", "-f", "mpjpeg", "-boundary_tag", "frame", "pipe:1")
+		"-r", "1/5", "-an", "-f", "mpjpeg", "-boundary_tag", "frame", "pipe:1")
 }
 
 func (p *printer) runCamera() {
@@ -284,8 +270,13 @@ func (p *printer) cameraConnection() {
 
 func (s *printerSet) snapshot(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
+	image := r.PathValue("image")
+	if !strings.HasSuffix(image, ".jpg") {
+		http.NotFound(w, r)
+		return
+	}
 	s.mu.RLock()
-	p := s.printers[r.PathValue("serial")]
+	p := s.printers[strings.TrimSuffix(image, ".jpg")]
 	s.mu.RUnlock()
 	if p == nil {
 		http.Error(w, "printer not found", http.StatusNotFound)

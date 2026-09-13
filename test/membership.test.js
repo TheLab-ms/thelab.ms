@@ -2,8 +2,9 @@ import { env } from 'cloudflare:workers';
 import { applyD1Migrations, reset, runInDurableObject, SELF } from 'cloudflare:test';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker, { processMessage } from '../src/index.js';
-import { coordinated } from '../src/membership.js';
-import { hash, now, provider } from '../src/http.js';
+import { coordinated, registerMember } from '../src/membership.js';
+import { hash, now } from '../src/http.js';
+import { provider } from '../src/providers.js';
 import { issueToken, memberToken, verifyToken } from '../src/auth.js';
 
 // Global fetch spies also apply inside the bound Durable Object in this runtime.
@@ -44,7 +45,10 @@ const customer = 'cus_member';
 const api = (path, options, bindings = env) => worker.fetch(new Request(`${env.SITE_URL}${path}`, options), bindings);
 const readMember = () => env.DB.prepare('SELECT * FROM members WHERE discord_user_id = ?').bind(id).first();
 const memberStub = async () => env.MEMBERS.get(env.MEMBERS.idFromName((await readMember()).member_id));
-const checkout = (input = {}) => coordinated(env, id, '/checkout', { user, annual: false, discount: '', ...input });
+const checkout = async (input = {}) => {
+  const member = await registerMember(env, user);
+  return coordinated(env, member.member_id, 'checkout', { user, annual: false, discount: '', ...input });
+};
 const subscription = (status = 'active', subID = 'sub_member') => ({ id: subID, customer, status, created: now(), metadata: { thelab_discord_id: id } });
 
 function mockStripe(path, data, options = {}) {
@@ -434,7 +438,7 @@ describe('member administration', () => {
     expect(stale.status).toBe(409);
     const entries = log.mock.calls.map(([entry]) => JSON.parse(entry));
     const operation = entries.find(entry => entry.event === 'membership.failed');
-    expect(operation).toMatchObject({ status: 409, path: '/admin/update' });
+    expect(operation).toMatchObject({ status: 409, operation: 'updateMetadata' });
     expect(entries.find(entry => entry.event === 'admin.save_failed')).toMatchObject({ status: 409, error_id: operation.error_id });
     expect(await stale.text()).toContain('Stale notes');
     expect((await readMember()).notes).toBe('<script>alert(1)</script>');
@@ -581,7 +585,7 @@ describe('member administration', () => {
       metadata_version: String(member.metadata_version) }))).status).toBe(303);
     mockSubs([{ ...subscription(), metadata: { thelab_member_id: member.member_id } }]);
     mockStripe('/billing_portal/sessions', { url: 'https://billing.stripe.com/p/session/transferred' }, { method: 'POST' });
-    const result = await coordinated(env, replacement, '/checkout', {
+    const result = await coordinated(env, member.member_id, 'checkout', {
       user: { id: replacement, username: 'new-maker', email: 'new@example.com' }, annual: false, discount: '',
     });
     expect(result.url).toContain('billing.stripe.com');
@@ -626,6 +630,33 @@ describe('member administration', () => {
     role();
     expect((await save()).status).toBe(409);
     expect(await readMember()).toMatchObject({ name_override: 'Admin name', notes: 'Keep me', discount_status: 'requested' });
+  });
+
+  it('serializes a login profile refresh with a competing stale admin save', async () => {
+    await seed();
+    const member = await readMember();
+    const results = await Promise.allSettled([
+      coordinated(env, member.member_id, 'refreshIdentity', { user: { ...user, username: 'fresh-name', email: 'FRESH@example.com' } }),
+      coordinated(env, member.member_id, 'updateMetadata', { fields: fields() }),
+    ]);
+    expect(results[0].status).toBe('fulfilled');
+    expect(results[1].status).toBe('rejected');
+    expect(results[1].reason.status).toBe(409);
+    expect(await readMember()).toMatchObject({ discord_username: 'fresh-name', discord_email: 'fresh@example.com',
+      metadata_version: 1, notes: '', bill_annually: 0 });
+  });
+
+  it.each(['checkout', 'refreshIdentity'])('rejects stale Discord identity in %s after resolving a stable member ID', async operation => {
+    await seed();
+    const member = await readMember();
+    const replacement = '555555555555555555';
+    await env.DB.prepare('UPDATE members SET discord_user_id = ?, auth_version = auth_version + 1 WHERE member_id = ?')
+      .bind(replacement, member.member_id).run();
+    await expect(coordinated(env, member.member_id, operation, { user, annual: false, discount: '' }))
+      .rejects.toMatchObject({ status: 409 });
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(await env.DB.prepare('SELECT discord_user_id, metadata_version FROM members WHERE member_id = ?').bind(member.member_id).first())
+      .toEqual({ discord_user_id: replacement, metadata_version: 0 });
   });
 
   it('leaves completed subscriptions and checkout completion safeguards intact', async () => {
@@ -840,6 +871,27 @@ describe('payment confirmation', () => {
 });
 
 describe('webhooks and queued Discord reconciliation', () => {
+  it('rejects a customer mapping changed after queue routing', async () => {
+    await seed();
+    const member = await readMember();
+    await env.DB.prepare('UPDATE members SET stripe_customer_id = ? WHERE member_id = ?').bind('cus_replacement', member.member_id).run();
+    await expect(coordinated(env, member.member_id, 'sync', { customer_id: customer })).rejects.toMatchObject({ status: 409 });
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { statuses: ['active', 'trialing', 'past_due', 'canceled'], expected: 'trialing', method: 'PUT' },
+    { statuses: ['past_due', 'unpaid', 'canceled'], expected: 'unpaid', method: 'DELETE' },
+    { statuses: ['canceled', 'incomplete_expired'], expected: 'incomplete_expired', method: 'DELETE' },
+  ])('selects $expected by eligibility before recency during reconciliation', async ({ statuses, expected, method }) => {
+    await seed();
+    mockBilling();
+    mockSubs(statuses.map((status, index) => ({ ...subscription(status, `sub_${index}`), created: 1000 + index })));
+    mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, {}, method, 204);
+    await processMessage({ customer_id: customer }, env);
+    expect(await readMember()).toMatchObject({ stripe_subscription_state: expected, stripe_subscription_id: `sub_${statuses.indexOf(expected)}` });
+  });
+
   it('queues customer updates using the Customer ID', async () => {
     const send = vi.fn().mockResolvedValue(undefined);
     const response = await api('/webhooks/stripe', await signedEvent('customer.updated', 'evt_customer', { id: customer, name: 'Billing Name' }),
@@ -985,15 +1037,16 @@ describe('provider failures and diagnostics', () => {
 
   it('logs unexpected Durable Object errors before returning a safe correlated failure', async () => {
     const log = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const stub = env.MEMBERS.get(env.MEMBERS.idFromName(id));
+    await seed();
+    const member = await readMember();
+    const stub = await memberStub();
     await runInDurableObject(stub, async instance => {
       vi.spyOn(instance, 'checkout').mockRejectedValueOnce(new Error('storage unavailable'));
-      const response = await instance.fetch(new Request('https://membership.internal/checkout', { method: 'POST', body: '{}' }));
-      expect(response.status).toBe(500);
-      const result = await response.json();
+      const result = await instance.execute({ member_id: member.member_id, operation: 'checkout', input: { user } });
+      expect(result).toMatchObject({ ok: false, status: 500 });
       expect(result.error).toBe('Membership operation failed.');
       expect(JSON.parse(log.mock.calls[0][0])).toMatchObject({ event: 'membership.failed', error_id: result.error_id,
-        path: '/checkout', error: { message: 'storage unavailable' } });
+        member_id: member.member_id, operation: 'checkout', error: { message: 'storage unavailable' } });
     });
   });
 });

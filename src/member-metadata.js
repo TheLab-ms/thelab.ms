@@ -1,4 +1,5 @@
-import { discordID, discounts, HttpError } from './http.js';
+import { discordID, HttpError } from './http.js';
+import { discounts } from './membership-policy.js';
 
 export const memberName = member => member.name_override?.trim() || member.billing_name?.trim() || member.discord_username;
 

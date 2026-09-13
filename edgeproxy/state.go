@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -120,8 +121,12 @@ func (e *edge) initialize() error {
 			return err
 		}
 		if err == nil {
-			if _, _, err := parseGoal(data); err != nil {
+			canonical, err := normalizeGoal(data)
+			if err != nil {
 				return err
+			}
+			if !bytes.Equal(data, canonical) {
+				return fmt.Errorf("stored goal is not canonical JSON")
 			}
 		}
 		return pruneSwipes(tx)
@@ -129,6 +134,8 @@ func (e *edge) initialize() error {
 }
 
 func (e *edge) close() {
+	e.configMu.Lock()
+	defer e.configMu.Unlock()
 	e.printers.close()
 	_ = e.db.Close()
 }
@@ -232,9 +239,14 @@ func (e *edge) retainedSwipes(ctx context.Context) ([]swipe, error) {
 	return events, err
 }
 
-// Caller holds configMu until the committed configuration has been applied.
 func (e *edge) storePrinters(ctx context.Context, printers []printerConfig) error {
+	e.configMu.Lock()
+	defer e.configMu.Unlock()
 	data, _ := json.Marshal(printers)
-	_, err := e.db.ExecContext(ctx, "UPDATE printer_config SET config = ? WHERE singleton = 1", string(data))
-	return err
+	if _, err := e.db.ExecContext(ctx, "UPDATE printer_config SET config = ? WHERE singleton = 1", string(data)); err != nil {
+		return err
+	}
+	e.config = printers
+	e.printers.replace(printers)
+	return nil
 }

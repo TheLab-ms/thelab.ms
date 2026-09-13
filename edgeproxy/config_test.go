@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"net/url"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -149,5 +151,32 @@ func TestPrinterConfigPersistence(t *testing.T) {
 	defer e.printers.mu.RUnlock()
 	if e.printers.printers[p.SerialNumber] == nil {
 		t.Fatal("failed save removed running printer")
+	}
+}
+
+func TestConcurrentPrinterConfiguration(t *testing.T) {
+	e := testEdge(t)
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Go(func() {
+			config := []printerConfig{{Name: fmt.Sprint(i), Host: "127.0.0.1", AccessCode: "secret", SerialNumber: "serial"}}
+			if err := e.storePrinters(context.Background(), config); err != nil {
+				t.Errorf("save: %v", err)
+			}
+			e.printers.cards()
+		})
+	}
+	wg.Wait()
+	persisted, err := parsePrinters([]byte(storedPrinters(t, e)))
+	if err != nil || !reflect.DeepEqual(e.config, persisted) || e.printers.printers["serial"].config != persisted[0] {
+		t.Fatal("concurrent saves left persisted configuration and running printer out of sync")
+	}
+
+	// Shutdown and saves share lifecycle ownership; no printer may outlive close.
+	wg.Go(e.close)
+	wg.Go(func() { _ = e.storePrinters(context.Background(), persisted) })
+	wg.Wait()
+	if len(e.printers.printers) != 0 {
+		t.Fatal("save started a printer after shutdown")
 	}
 }

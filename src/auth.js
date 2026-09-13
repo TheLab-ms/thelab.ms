@@ -1,10 +1,9 @@
-import { cookie, cookieHeader, discordID, discounts, hash, HttpError, now, opaque, origin, randomToken, redirect } from './http.js';
+import { cookie, cookieHeader, discordID, hash, HttpError, now, opaque, origin, randomToken, redirect } from './http.js';
+import { discounts } from './membership-policy.js';
+import { encodeBase64URL as encode, decodeBase64URL as decode, encodeJSON as json } from './encoding.js';
 
 export const TOKEN_AGE = { member: 86400, admin: 8 * 3600, oauth: 600 };
 const encoder = new TextEncoder();
-const encode = bytes => btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
-const decode = value => Uint8Array.from(atob(value.replaceAll('-', '+').replaceAll('_', '/')), c => c.charCodeAt(0));
-const json = value => encode(encoder.encode(JSON.stringify(value)));
 
 function configured(env) {
   if (typeof env.AUTH_SECRET !== 'string' || encoder.encode(env.AUTH_SECRET).length < 32) throw new HttpError(503, 'Sign-in is not configured. Set AUTH_SECRET to a random secret of at least 32 bytes.');
@@ -46,6 +45,13 @@ export async function signedInMember(request, env) {
 
 export function memberToken(env, member) {
   return issueToken(env, member.discord_user_id, 'member', { member_id: member.member_id, auth_version: member.auth_version });
+}
+
+export function finishLogin(env, destination, audience, token) {
+  const response = redirect(destination);
+  response.headers.append('Set-Cookie', cookieHeader(env, `thelab_${audience}`, token, TOKEN_AGE[audience]));
+  response.headers.append('Set-Cookie', cookieHeader(env, 'thelab_oauth', '', 0));
+  return response;
 }
 
 // Only known GET destinations can survive the OAuth round-trip.

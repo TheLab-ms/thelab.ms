@@ -38,11 +38,6 @@ func readJSON(w http.ResponseWriter, r *http.Request, value any) bool {
 	return true
 }
 
-func writeJSON(w http.ResponseWriter, value any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(value)
-}
-
 func storageError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, errGoalConflict):
@@ -55,20 +50,28 @@ func storageError(w http.ResponseWriter, err error) {
 	}
 }
 
-func parseGoal(data []byte) ([]byte, string, error) {
+func normalizeGoal(data []byte) ([]byte, error) {
 	var ids []uint32
 	if err := json.Unmarshal(data, &ids); err != nil || ids == nil || len(ids) > 512 || slices.Contains(ids, 0) {
-		return nil, "", fmt.Errorf("goal must be an array of at most 512 nonzero uint32 fob IDs")
+		return nil, fmt.Errorf("goal must be an array of at most 512 nonzero uint32 fob IDs")
 	}
 	slices.Sort(ids)
 	ids = slices.Compact(ids)
 	body, _ := json.Marshal(ids)
-	body = append(body, '\n')
+	return append(body, '\n'), nil
+}
+
+func controllerETag(body []byte) (string, error) {
+	var ids []uint32
+	if err := json.Unmarshal(body, &ids); err != nil {
+		return "", err
+	}
+	// Firmware hashes decimal IDs followed by commas, not the JSON response.
 	hash := sha256.New()
 	for _, id := range ids {
 		fmt.Fprintf(hash, "%d,", id)
 	}
-	return body, fmt.Sprintf("%x", hash.Sum(nil)), nil
+	return fmt.Sprintf("%x", hash.Sum(nil)), nil
 }
 
 func (e *edge) goal(w http.ResponseWriter, r *http.Request) {
@@ -83,7 +86,7 @@ func (e *edge) goal(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "version must be a nonnegative safe integer", http.StatusBadRequest)
 		return
 	}
-	body, _, err := parseGoal(input.Fobs)
+	body, err := normalizeGoal(input.Fobs)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -111,12 +114,12 @@ func (e *edge) fobs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-	data, err := e.controllerPoll(r.Context(), ip, events)
+	body, err := e.controllerPoll(r.Context(), ip, events)
 	if err != nil {
 		storageError(w, err)
 		return
 	}
-	body, etag, err := parseGoal(data)
+	etag, err := controllerETag(body)
 	if err != nil {
 		storageError(w, err)
 		return
@@ -142,7 +145,8 @@ func (e *edge) getSwipes(w http.ResponseWriter, r *http.Request) {
 		storageError(w, err)
 		return
 	}
-	writeJSON(w, events)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(events)
 }
 
 func loadSigningSeed(path string) (ed25519.PrivateKey, error) {

@@ -140,8 +140,18 @@ func (e *edge) printerSession(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (e *edge) requirePrinterMember(next http.HandlerFunc) http.HandlerFunc {
+func (e *edge) printerResource(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if e.memberAuth == nil {
+			http.Error(w, "machine status access is not configured", http.StatusServiceUnavailable)
+			return
+		}
+		next(w, r)
+	}
+}
+
+func (e *edge) requirePrinterMember(next func(http.ResponseWriter, *http.Request, *printerClaims)) http.HandlerFunc {
+	return e.printerResource(func(w http.ResponseWriter, r *http.Request) {
 		cookie, err := r.Cookie(printerCookie)
 		var claims *printerClaims
 		if err == nil {
@@ -155,7 +165,6 @@ func (e *edge) requirePrinterMember(next http.HandlerFunc) http.HandlerFunc {
 			}
 			return
 		}
-		w.Header().Set("X-Printer-Session-Expires", fmt.Sprint(claims.Expires))
-		next(w, r)
-	}
+		next(w, r, claims)
+	})
 }

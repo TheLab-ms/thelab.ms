@@ -18,14 +18,20 @@ import (
 )
 
 func TestPrinterReports(t *testing.T) {
-	p := &printer{data: printerStatus{SerialNumber: "serial", Name: "Printer"}}
-	p.report([]byte(`{"print":{"gcode_state":"RUNNING","subtask_name":"part","mc_remaining_time":42,"mc_percent":10,"mc_print_error_code":"123"}}`))
-	p.report([]byte(`{"print":{"mc_percent":0,"mc_print_error_code":0}}`))
-	if p.data.GcodeState != "RUNNING" || p.data.SubtaskName != "part" || p.data.RemainingPrintTime != 42 || p.data.PrintPercentDone != 0 || string(p.data.PrintErrorCode) != "0" || p.data.UpdatedAt == 0 {
+	p := &printer{}
+	p.report([]byte(`{"print":{"gcode_state":"RUNNING","mc_remaining_time":42}}`))
+	p.data.UpdatedAt = time.Now().Add(-time.Minute)
+	p.data.Error = "connection lost"
+	p.report([]byte(`{"print":{"mc_percent":0}}`))
+	if p.data.State != "RUNNING" || p.data.Remaining != 42 || time.Since(p.data.UpdatedAt) > time.Second || p.data.Error != "" {
 		t.Fatalf("partial report lost fields: %+v", p.data)
 	}
+	p.report([]byte(`{"print":{"mc_remaining_time":0,"gcode_state":null}}`))
+	if p.data.Remaining != 0 || p.data.State != "RUNNING" {
+		t.Fatalf("zero/null fields not merged correctly: %+v", p.data)
+	}
 	before, _ := json.Marshal(p.data)
-	for _, payload := range []string{`{`, `{"print":{"command":"pushall"}}`, `{"print":{"mc_percent":"bad","gcode_state":"BAD"}}`, `{"print":{"gcode_state":null}}`} {
+	for _, payload := range []string{`{`, `{"print":{"command":"pushall"}}`, `{"print":{"mc_percent":"bad","gcode_state":"BAD"}}`, `{"print":{"mc_remaining_time":"bad","gcode_state":"BAD"}}`, `{"print":{"gcode_state":null}}`, `{"print":null}`} {
 		p.report([]byte(payload))
 		after, _ := json.Marshal(p.data)
 		if !bytes.Equal(before, after) {
@@ -38,7 +44,7 @@ func TestPrinterSetLifecycleAndStatus(t *testing.T) {
 	var s printerSet
 	t.Cleanup(s.close)
 	w := httptest.NewRecorder()
-	s.dashboard(w, httptest.NewRequest("GET", "/machines", nil))
+	s.dashboard(w, httptest.NewRequest("GET", "/machines", nil), &printerClaims{})
 	if !strings.Contains(w.Body.String(), "No printers are configured") {
 		t.Fatalf("zero-value status: %q", w.Body.String())
 	}
@@ -51,7 +57,7 @@ func TestPrinterSetLifecycleAndStatus(t *testing.T) {
 	}
 	first.report([]byte(`{"print":{"gcode_state":"IDLE"}}`))
 	w = httptest.NewRecorder()
-	s.dashboard(w, httptest.NewRequest("GET", "/machines", nil))
+	s.dashboard(w, httptest.NewRequest("GET", "/machines", nil), &printerClaims{})
 	for _, secret := range []string{config.AccessCode, config.Host, "access_code", "host"} {
 		if strings.Contains(w.Body.String(), secret) {
 			t.Fatalf("status exposes %q: %s", secret, w.Body.String())
@@ -218,7 +224,7 @@ func TestPrinterSnapshotFailures(t *testing.T) {
 				cancel()
 			}
 			r := httptest.NewRequest("GET", "/", nil)
-			r.SetPathValue("serial", "camera")
+			r.SetPathValue("image", "camera.jpg")
 			w := httptest.NewRecorder()
 			s.snapshot(w, r)
 			if w.Code != want || strings.Contains(w.Body.String(), "secret-password") {
@@ -237,12 +243,12 @@ func TestPrinterHTTPSnapshot(t *testing.T) {
 	want := waitCameraFrame(t, p, 3)
 	s := printerSet{printers: map[string]*printer{"camera": p}}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{serial}", s.snapshot)
+	mux.HandleFunc("GET /{image}", s.snapshot)
 	server := httptest.NewServer(mux)
 	defer server.Close()
 	client := &http.Client{Timeout: 5 * time.Second}
 	for i := 0; i < 3; i++ {
-		response, err := client.Get(server.URL + "/camera")
+		response, err := client.Get(server.URL + "/camera.jpg")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -288,7 +294,7 @@ func TestPrinterSnapshotDeadline(t *testing.T) {
 	waitCameraFrame(t, p, 3)
 	s := printerSet{printers: map[string]*printer{"camera": p}}
 	r := httptest.NewRequest("GET", "/", nil)
-	r.SetPathValue("serial", "camera")
+	r.SetPathValue("image", "camera.jpg")
 	w := &printerDeadlineWriter{ResponseRecorder: httptest.NewRecorder(), t: t}
 	s.snapshot(w, r)
 	if w.writes != 1 || !w.deadline.IsZero() {

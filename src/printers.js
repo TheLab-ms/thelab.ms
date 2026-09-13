@@ -1,8 +1,7 @@
 import { signedInMember, startLogin } from './auth.js';
 import { HttpError, now, origin, randomToken, redirect } from './http.js';
-
-const encode = bytes => btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
-const json = value => encode(new TextEncoder().encode(JSON.stringify(value)));
+import { grantsMembership } from './membership-policy.js';
+import { encodeBase64URL as encode, encodeJSON as json } from './encoding.js';
 
 export function printerOrigin(env) {
   try {
@@ -21,7 +20,7 @@ export async function printerAccess(request, env) {
   if (!/^[a-f0-9]{64}$/.test(state || '') || url.searchParams.size !== 1) throw new HttpError(400, 'Invalid machine status sign-in. Please start again from the Machines page.');
   const member = await signedInMember(request, env);
   if (!member) return startLogin(request, env, 'member');
-  if (!['active', 'trialing'].includes(member.stripe_subscription_state)) throw new HttpError(403, 'An active membership is required to view machine status.');
+  if (!grantsMembership(member.stripe_subscription_state)) throw new HttpError(403, 'An active membership is required to view machine status.');
   let key;
   try {
     const bytes = Uint8Array.from(atob(env.PRINTER_JWT_PRIVATE_KEY), c => c.charCodeAt(0));

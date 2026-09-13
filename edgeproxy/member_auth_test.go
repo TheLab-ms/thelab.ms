@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -121,7 +122,7 @@ func TestPrinterBrowserHandoff(t *testing.T) {
 		t.Fatal("unsafe session cookies")
 	}
 	w = request(cloud, "GET", "/machines", "", "Cookie", printerCookie+"="+token)
-	if w.Code != 200 || !strings.Contains(w.Body.String(), "<h1>Machines</h1>") || w.Header().Get("Cache-Control") != "no-store" || w.Header().Get("X-Printer-Session-Expires") == "" {
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "<h1>Machines</h1>") || w.Header().Get("Cache-Control") != "no-store" || !strings.Contains(w.Body.String(), fmt.Sprintf(`data-expires="%v"`, claims["exp"])) {
 		t.Fatal("member dashboard unavailable")
 	}
 	for _, path := range []string{"/machines/content", "/machines/images/camera.jpg"} {
@@ -131,6 +132,15 @@ func TestPrinterBrowserHandoff(t *testing.T) {
 	}
 	if w := request(cloud, "GET", "/api/swipes", "", "Cookie", printerCookie+"="+token); w.Code != 401 {
 		t.Fatal("member JWT bypasses machine auth")
+	}
+	for _, path := range []string{"/machines/callback", "/machines/app.js"} {
+		w := request(cloud, "GET", path, "")
+		if w.Code != 200 || w.Body.Len() == 0 || w.Header().Get("Content-Security-Policy") == "" {
+			t.Fatalf("public handoff resource unavailable: %s: %d", path, w.Code)
+		}
+	}
+	if w := request(cloud, "GET", "/machines/images/camera.png", "", "Cookie", printerCookie+"="+token); w.Code != 404 {
+		t.Fatal("unsupported image suffix accepted")
 	}
 	for _, path := range []string{"/api/printers", "/api/printers/camera/snapshot.jpg"} {
 		if w := mtlsRequest(cloud, "GET", path, ""); w.Code != 404 {
@@ -145,8 +155,8 @@ func TestPrinterPageAndProtectedSnapshot(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	e.printers.printers = map[string]*printer{"camera": {
-		ctx: ctx, cancel: cancel, config: printerConfig{Host: "192.168.5.6", AccessCode: "private-password"},
-		data:  printerStatus{SerialNumber: "camera", Name: "<script>Maker</script>", GcodeState: "RUNNING", RemainingPrintTime: 125, UpdatedAt: time.Now().Unix()},
+		ctx: ctx, cancel: cancel, config: printerConfig{SerialNumber: "camera", Name: "<script>Maker</script>", Host: "192.168.5.6", AccessCode: "private-password"},
+		data:  printerStatus{State: "RUNNING", Remaining: 125, UpdatedAt: time.Now()},
 		frame: []byte{0xff, 0xd8, 0xff, 0xd9}, frameAt: time.Now(),
 	}}
 	_, cloud := e.routes()
@@ -176,12 +186,12 @@ func TestPrinterPageAndProtectedSnapshot(t *testing.T) {
 		t.Fatal("expired session accessed camera")
 	}
 	p := e.printers.printers["camera"]
-	p.data.UpdatedAt = time.Now().Unix() - 30
+	p.data.UpdatedAt = time.Now().Add(-30 * time.Second)
 	cards := e.printers.cards()
 	if !cards[0].Unavailable || cards[0].Remaining != "—" {
 		t.Fatal("stale remaining time presented as current")
 	}
-	p.data.UpdatedAt = 0
+	p.data.UpdatedAt = time.Time{}
 	if e.printers.cards()[0].Status != "Waiting for printer" {
 		t.Fatal("missing initial state")
 	}

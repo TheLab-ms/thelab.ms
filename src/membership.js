@@ -1,10 +1,9 @@
 import { DurableObject } from 'cloudflare:workers';
-import { discord, discounts, hash, HttpError, json, now, origin, randomToken, stripe, stripeList } from './http.js';
+import { hash, HttpError, now, origin, randomToken } from './http.js';
+import { discord, stripe, stripeList } from './providers.js';
+import { discounts, grantsMembership, isOngoingSubscription, selectCurrentSubscription } from './membership-policy.js';
 import { memberName, validateMetadata } from './member-metadata.js';
-import { logError, requestContext } from './logging.js';
-
-const healthy = subscription => ['active', 'trialing'].includes(subscription.status);
-const ongoing = subscription => !['canceled', 'incomplete_expired'].includes(subscription.status);
+import { logError } from './logging.js';
 
 // Checkout, admin edits, and queue work share a stable membership instance.
 // A promise chain is needed because external fetches allow DO requests to interleave.
@@ -14,32 +13,40 @@ export class Membership extends DurableObject {
     this.tail = Promise.resolve();
   }
 
-  async fetch(request) {
+  async execute({ member_id, operation, input = {} }) {
     const work = this.tail.then(async () => {
       try {
-        const input = await request.json();
-        const path = new URL(request.url).pathname;
-        if (input.expected_member_id && path !== '/sync') {
-          const member = await this.member(input.user?.id || input.discord_user_id);
-          if (member.member_id !== input.expected_member_id) throw new HttpError(409, 'Membership identity changed. Please reload and try again.');
+        const member = await this.env.DB.prepare('SELECT * FROM members WHERE member_id = ?').bind(member_id).first();
+        if (!member) {
+          if (operation === 'sync') return { ok: true };
+          throw new HttpError(404, 'Membership not found. Please sign in again.');
         }
-        if (path === '/checkout') return json({ url: await this.checkout(input) });
-        if (path === '/sync') { await this.sync(input); return json({ ok: true }); }
-        if (path === '/admin/update') { await this.updateMetadata(input); return json({ ok: true }); }
-        throw new HttpError(404, 'Unknown membership operation.');
+        if (['checkout', 'refreshIdentity'].includes(operation) && member.discord_user_id !== input.user?.id) {
+          throw new HttpError(409, 'Membership identity changed. Please reload and try again.');
+        }
+        let value;
+        switch (operation) {
+          case 'checkout': value = { url: await this.checkout(member, input) }; break;
+          case 'refreshIdentity': value = await this.refreshIdentity(member, input.user); break;
+          case 'sync': await this.sync(member, input); break;
+          case 'updateMetadata': await this.updateMetadata(member, input); break;
+          default: throw new HttpError(404, 'Unknown membership operation.');
+        }
+        return { ok: true, value };
       } catch (error) {
-        const errorID = logError('membership.failed', error, requestContext(request), this.env);
-        return json({ error: error instanceof HttpError ? error.message : 'Membership operation failed.', retry_after: error.retryAfter || 0, error_id: errorID }, error instanceof HttpError ? error.status : 500);
+        const errorID = logError('membership.failed', error, { member_id, operation }, this.env);
+        return { ok: false, error: error instanceof HttpError ? error.message : 'Membership operation failed.',
+          status: error instanceof HttpError ? error.status : 500, retry_after: error.retryAfter || 0, error_id: errorID };
       }
     });
     this.tail = work.catch(() => {});
     return work;
   }
 
-  async member(id) {
-    const member = await this.env.DB.prepare('SELECT * FROM members WHERE discord_user_id = ?').bind(id).first();
-    if (!member) throw new HttpError(404, 'Membership not found. Please sign in again.');
-    return member;
+  async refreshIdentity(member, user) {
+    return this.env.DB.prepare(`UPDATE members SET discord_username = ?, discord_email = ?,
+      metadata_version = metadata_version + 1 WHERE member_id = ? RETURNING *`)
+      .bind(user.username, user.email.toLowerCase(), member.member_id).first();
   }
 
   async write(slot, path, form) {
@@ -66,16 +73,12 @@ export class Membership extends DurableObject {
       .filter(sub => sub.metadata?.thelab_member_id ? sub.metadata.thelab_member_id === member.member_id : sub.metadata?.thelab_discord_id === member.discord_user_id);
   }
 
-  async checkout({ user, annual, discount }) {
+  async checkout(member, { user, annual, discount }) {
     const id = user.id;
-    await this.member(id);
-    await this.env.DB.prepare(`UPDATE members SET discord_username = ?, discord_email = ?,
-      metadata_version = metadata_version + 1 WHERE discord_user_id = ?`)
-      .bind(user.username, user.email.toLowerCase(), id).run();
-    let member = await this.member(id);
+    member = await this.refreshIdentity(member, user);
     if (member.stripe_customer_id) {
       const subscriptions = await this.subscriptions(member);
-      if (subscriptions.some(ongoing)) {
+      if (subscriptions.some(sub => isOngoingSubscription(sub.status))) {
         // Reconcile a just-completed Checkout even if its webhook is still in flight.
         await this.env.MEMBERSHIP_QUEUE.send({ customer_id: member.stripe_customer_id });
         const session = await stripe(this.env, '/billing_portal/sessions', {
@@ -88,23 +91,19 @@ export class Membership extends DurableObject {
     if (!discounts.includes(discount) || typeof annual !== 'boolean') throw new HttpError(400, 'Invalid membership selection.');
     // Resolve a previous ambiguous checkout using its ORIGINAL parameters before
     // expiring/replacing it. This also survives a crash before persisting its ID.
-    let prior = await this.ctx.storage.get('checkout');
+    let prior = await this.loadTrackedCheckout();
     if (prior) {
-      const created = await this.write('checkout', prior.path, prior.form);
-      const session = await stripe(this.env, `/checkout/sessions/${encodeURIComponent(created.id)}`);
+      const { session } = prior;
       let finished = session.status === 'expired';
       if (session.status === 'complete') {
         const subID = typeof session.subscription === 'string' ? session.subscription : session.subscription?.id;
         const subscriptions = await this.subscriptions(member);
-        finished = subscriptions.some(sub => sub.id === subID && !ongoing(sub));
+        finished = subscriptions.some(sub => sub.id === subID && !isOngoingSubscription(sub.status));
         if (!finished) throw new HttpError(409, 'Your previous checkout is being processed. Please try again shortly.');
       }
-      if (!['open', 'expired', 'complete'].includes(session.status)) throw new HttpError(502, 'Stripe returned an invalid checkout status.');
       if (finished) {
         await this.ctx.storage.delete('checkout');
         prior = null;
-      } else {
-        prior.session = session;
       }
     }
 
@@ -112,37 +111,16 @@ export class Membership extends DurableObject {
     // A changed selection or a revoked approval must invalidate any old payment link.
     const changed = Boolean(member.bill_annually) !== annual || member.discount_type !== discount || (discount && status !== 'approved');
     if (prior && changed) {
-      await this.expire(prior.session);
-      await this.ctx.storage.delete('checkout');
+      await this.expireTrackedCheckout(prior.session);
       prior = null;
     }
-    await this.env.DB.prepare('UPDATE members SET bill_annually = ?, discount_type = ?, discount_status = ?, metadata_version = metadata_version + 1 WHERE discord_user_id = ?')
-      .bind(annual ? 1 : 0, discount, status, id).run();
+    await this.env.DB.prepare('UPDATE members SET bill_annually = ?, discount_type = ?, discount_status = ?, metadata_version = metadata_version + 1 WHERE member_id = ?')
+      .bind(annual ? 1 : 0, discount, status, member.member_id).run();
     if (status === 'requested') return `${origin(this.env)}/membership-pending`;
     if (status === 'denied') throw new HttpError(403, 'Your discount request was declined. Contact leadership or select the standard rate to continue.');
 
-    const prices = await stripeList(this.env, '/prices', { active: 'true', 'lookup_keys[]': annual ? 'yearly' : 'monthly' });
-    const price = prices.find(item => item.type === 'recurring' && item.recurring?.interval === (annual ? 'year' : 'month') && item.recurring.interval_count === 1);
-    if (!price) throw new HttpError(503, 'The membership price is not configured. Please contact leadership.');
-    let coupon;
-    if (discount) {
-      const coupons = await stripeList(this.env, '/coupons');
-      coupon = coupons.find(item => item.valid && (item.metadata?.discountTypes || '').split(',').map(s => s.trim().toLowerCase()).includes(discount.toLowerCase()) && (!item.applies_to?.products || item.applies_to.products.includes(typeof price.product === 'string' ? price.product : price.product.id)));
-      if (!coupon) throw new HttpError(503, 'Your approved discount has no valid Stripe coupon. Please contact leadership before paying.');
-    }
-
-    if (!member.stripe_customer_id) {
-      const previous = await this.ctx.storage.get('customer');
-      const customer = await this.write('customer', '/customers', previous?.form || {
-        name: memberName(member),
-        'metadata[thelab_discord_id]': id,
-        'metadata[thelab_member_id]': member.member_id,
-      });
-      if (!/^cus_[A-Za-z0-9]+$/.test(customer.id)) throw new HttpError(502, 'Stripe returned an invalid customer.');
-      await this.env.DB.prepare('UPDATE members SET stripe_customer_id = ?, billing_name = ?, billing_email = ? WHERE discord_user_id = ?')
-        .bind(customer.id, customer.name || '', customer.email || '', id).run();
-      member = await this.member(id);
-    }
+    const { price, coupon } = await this.resolvePricing(annual, discount);
+    member = await this.ensureCustomer(member);
 
     // Stripe locks an existing Customer's email in Checkout. Clear it so the
     // member can choose their billing email; Checkout saves their entry back.
@@ -166,15 +144,52 @@ export class Membership extends DurableObject {
       ...(coupon ? { 'discounts[0][coupon]': coupon.id } : {}),
     };
     if (prior) {
-      if (await hash(JSON.stringify(form)) === await hash(JSON.stringify(prior.form))) return this.stripeURL(prior.session.url, 'checkout.stripe.com');
-      await this.expire(prior.session);
-      await this.ctx.storage.delete('checkout');
+      if (JSON.stringify(form) === JSON.stringify(prior.form)) return this.stripeURL(prior.session.url, 'checkout.stripe.com');
+      await this.expireTrackedCheckout(prior.session);
     }
     const session = await this.write('checkout', '/checkout/sessions', form);
     return this.stripeURL(session.url, 'checkout.stripe.com');
   }
 
-  async expire(session) {
+  async resolvePricing(annual, discount) {
+    const prices = await stripeList(this.env, '/prices', { active: 'true', 'lookup_keys[]': annual ? 'yearly' : 'monthly' });
+    const price = prices.find(item => item.type === 'recurring' && item.recurring?.interval === (annual ? 'year' : 'month') && item.recurring.interval_count === 1);
+    if (!price) throw new HttpError(503, 'The membership price is not configured. Please contact leadership.');
+    let coupon;
+    if (discount) {
+      const coupons = await stripeList(this.env, '/coupons');
+      const product = typeof price.product === 'string' ? price.product : price.product.id;
+      coupon = coupons.find(item => item.valid
+        && (item.metadata?.discountTypes || '').split(',').some(value => value.trim().toLowerCase() === discount.toLowerCase())
+        && (!item.applies_to?.products || item.applies_to.products.includes(product)));
+      if (!coupon) throw new HttpError(503, 'Your approved discount has no valid Stripe coupon. Please contact leadership before paying.');
+    }
+    return { price, coupon };
+  }
+
+  async ensureCustomer(member) {
+    if (member.stripe_customer_id) return member;
+    const previous = await this.ctx.storage.get('customer');
+    const customer = await this.write('customer', '/customers', previous?.form || {
+      name: memberName(member),
+      'metadata[thelab_discord_id]': member.discord_user_id,
+      'metadata[thelab_member_id]': member.member_id,
+    });
+    if (!/^cus_[A-Za-z0-9]+$/.test(customer.id)) throw new HttpError(502, 'Stripe returned an invalid customer.');
+    return this.env.DB.prepare('UPDATE members SET stripe_customer_id = ?, billing_name = ?, billing_email = ? WHERE member_id = ? RETURNING *')
+      .bind(customer.id, customer.name || '', customer.email || '', member.member_id).first();
+  }
+
+  async loadTrackedCheckout() {
+    const operation = await this.ctx.storage.get('checkout');
+    if (!operation) return null;
+    const created = await this.write('checkout', operation.path, operation.form);
+    const session = await stripe(this.env, `/checkout/sessions/${encodeURIComponent(created.id)}`);
+    if (!['open', 'expired', 'complete'].includes(session.status)) throw new HttpError(502, 'Stripe returned an invalid checkout status.');
+    return { ...operation, session };
+  }
+
+  async expireTrackedCheckout(session) {
     try {
       await stripe(this.env, `/checkout/sessions/${encodeURIComponent(session.id)}/expire`, {}, `expire-${session.id}`);
     } catch (error) {
@@ -182,11 +197,12 @@ export class Membership extends DurableObject {
       const current = await stripe(this.env, `/checkout/sessions/${encodeURIComponent(session.id)}`);
       if (current.status !== 'expired') throw error;
     }
+    await this.ctx.storage.delete('checkout');
   }
 
-  async updateMetadata({ discord_user_id: id, fields }) {
+  async updateMetadata(member, { fields }) {
     const value = validateMetadata(fields);
-    const member = await this.member(id);
+    const id = member.discord_user_id;
     if (member.metadata_version !== value.metadata_version) throw new HttpError(409, 'This member was changed after you opened the form. Reload the member and reapply your edits.');
     const discordChanged = member.discord_user_id !== value.discord_user_id;
     const customerChanged = member.stripe_customer_id !== value.stripe_customer_id;
@@ -221,12 +237,10 @@ export class Membership extends DurableObject {
     if (pricingChanged || identityChanged) {
       // Resolve ambiguous creation before expiring the old URL. This shares the
       // checkout lock and durable idempotency record, including its age limit.
-      const prior = await this.ctx.storage.get('checkout');
+      const prior = await this.loadTrackedCheckout();
       if (prior) {
-        const created = await this.write('checkout', prior.path, prior.form);
-        const session = await stripe(this.env, `/checkout/sessions/${encodeURIComponent(created.id)}`);
-        if (session.status === 'open') await this.expire(session);
-        else if (!['expired', 'complete'].includes(session.status)) throw new HttpError(502, 'Stripe returned an invalid checkout status.');
+        const { session } = prior;
+        if (session.status === 'open') await this.expireTrackedCheckout(session);
         // Keep completed checkout tracking so signup still guards against a
         // second checkout while Stripe is finishing the first subscription.
         if (identityChanged && session.status === 'complete') {
@@ -234,7 +248,7 @@ export class Membership extends DurableObject {
           const subID = typeof session.subscription === 'string' ? session.subscription : session.subscription?.id;
           if (!subscriptions.some(sub => sub.id === subID)) throw new HttpError(409, 'The completed checkout is still being processed. Retry after Stripe synchronizes.');
         }
-        if (session.status !== 'complete' || identityChanged) await this.ctx.storage.delete('checkout');
+        if (session.status === 'expired' || identityChanged) await this.ctx.storage.delete('checkout');
       }
     }
     if (identityChanged) {
@@ -256,18 +270,15 @@ export class Membership extends DurableObject {
       // The queued sync uses this same stable lock, so it runs after the save.
       await this.env.MEMBERSHIP_QUEUE.send({ member_id: member.member_id });
     }
-    const statements = [];
-    statements.push(this.env.DB.prepare(`UPDATE members SET discord_user_id = ?, discord_username = ?, discord_email = ?,
+    const result = await this.env.DB.prepare(`UPDATE members SET discord_user_id = ?, discord_username = ?, discord_email = ?,
       billing_name = ?, billing_email = ?, name_override = ?, notes = ?, bill_annually = ?, discount_type = ?,
       discount_status = ?, stripe_customer_id = ?, stripe_subscription_id = ?,
       stripe_subscription_state = ?, stripe_synced_at = ?, discord_last_synced = ?,
-      auth_version = auth_version + ?, metadata_version = metadata_version + 1 WHERE discord_user_id = ? AND metadata_version = ?`)
+      auth_version = auth_version + ?, metadata_version = metadata_version + 1 WHERE member_id = ? AND metadata_version = ?`)
       .bind(value.discord_user_id, username, email, billingName, billingEmail, value.name_override, value.notes,
         value.bill_annually, value.discount_type, value.discount_status, value.stripe_customer_id, value.stripe_subscription_id,
         identityChanged ? selected?.status || null : member.stripe_subscription_state,
-        identityChanged ? null : member.stripe_synced_at, identityChanged ? null : member.discord_last_synced, discordChanged ? 1 : 0, id, value.metadata_version));
-    const results = await this.env.DB.batch(statements);
-    const result = results[results.length - 1];
+        identityChanged ? null : member.stripe_synced_at, identityChanged ? null : member.discord_last_synced, discordChanged ? 1 : 0, member.member_id, value.metadata_version).run();
     if (result.meta.changes !== 1) throw new HttpError(409, 'This member was changed. Reload the member and reapply your edits.');
   }
 
@@ -278,47 +289,39 @@ export class Membership extends DurableObject {
     return url.href;
   }
 
-  async sync({ discord_user_id: id, member_id: memberID, customer_id: customer }) {
-    const member = memberID ? await this.env.DB.prepare('SELECT * FROM members WHERE member_id = ?').bind(memberID).first() : await this.member(id);
-    if (!member) return;
-    id = member.discord_user_id;
-    if (memberID) customer = member.stripe_customer_id;
+  async sync(member, { customer_id: customer = member.stripe_customer_id }) {
+    const id = member.discord_user_id;
     if (member.stripe_customer_id !== customer) throw new HttpError(409, 'Billing identity changed.');
     // Every delivery reconciles current Stripe state, including delayed webhooks.
     const billing = customer ? await stripe(this.env, `/customers/${customer}`) : {};
     const subscriptions = await this.subscriptions(member);
-    const paid = subscriptions.some(healthy);
-    const current = subscriptions.filter(healthy).sort((a, b) => b.created - a.created)[0]
-      || subscriptions.filter(ongoing).sort((a, b) => b.created - a.created)[0]
-      || subscriptions.sort((a, b) => b.created - a.created)[0];
+    const current = selectCurrentSubscription(subscriptions);
+    const paid = grantsMembership(current?.status);
     await this.env.DB.prepare(`UPDATE members SET stripe_subscription_id = ?, stripe_subscription_state = ?, stripe_synced_at = ?,
-      billing_name = ?, billing_email = ?, metadata_version = metadata_version + 1 WHERE discord_user_id = ?`)
-      .bind(current?.id || null, current?.status || null, now(), billing.name || '', billing.email || '', id).run();
+      billing_name = ?, billing_email = ?, metadata_version = metadata_version + 1 WHERE member_id = ?`)
+      .bind(current?.id || null, current?.status || null, now(), billing.name || '', billing.email || '', member.member_id).run();
 
     const path = `/guilds/${this.env.DISCORD_GUILD_ID}/members/${id}/roles/${this.env.DISCORD_ROLE_ID}`;
     // Repeating PUT/DELETE is safe if the process crashes after Discord succeeds.
     // Retry even if the saved Stripe state matches: a previous Discord call may have failed.
     // Failed removals/additions remain unacknowledged and are retried by the queue.
     await discord(this.env, path, paid ? 'PUT' : 'DELETE');
-    await this.env.DB.prepare('UPDATE members SET discord_last_synced = ? WHERE discord_user_id = ?').bind(now(), id).run();
+    await this.env.DB.prepare('UPDATE members SET discord_last_synced = ? WHERE member_id = ?').bind(now(), member.member_id).run();
   }
 }
 
-export async function coordinated(env, id, path, input) {
-  if (path === '/checkout') {
-    await env.DB.prepare(`INSERT INTO members (discord_user_id, discord_username, discord_email) VALUES (?, ?, ?)
-      ON CONFLICT(discord_user_id) DO NOTHING`).bind(id, input.user.username, input.user.email.toLowerCase()).run();
-  }
-  const member = input.member_id ? { member_id: input.member_id } : await env.DB.prepare('SELECT member_id FROM members WHERE discord_user_id = ?').bind(id).first();
-  if (!member) throw new HttpError(404, 'Membership not found. Please sign in again.');
-  const response = await env.MEMBERS.get(env.MEMBERS.idFromName(member.member_id)).fetch(`https://membership.internal${path}`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...input, expected_member_id: member.member_id }),
-  });
-  const value = await response.json();
-  if (!response.ok) {
-    const error = new HttpError(response.status, value.error, value.retry_after);
-    error.errorId = value.error_id;
+export async function registerMember(env, user) {
+  await env.DB.prepare(`INSERT INTO members (discord_user_id, discord_username, discord_email) VALUES (?, ?, ?)
+    ON CONFLICT(discord_user_id) DO NOTHING`).bind(user.id, user.username, user.email.toLowerCase()).run();
+  return env.DB.prepare('SELECT * FROM members WHERE discord_user_id = ?').bind(user.id).first();
+}
+
+export async function coordinated(env, memberID, operation, input = {}) {
+  const result = await env.MEMBERS.get(env.MEMBERS.idFromName(memberID)).execute({ member_id: memberID, operation, input });
+  if (!result.ok) {
+    const error = new HttpError(result.status, result.error, result.retry_after);
+    error.errorId = result.error_id;
     throw error;
   }
-  return value;
+  return result.value;
 }

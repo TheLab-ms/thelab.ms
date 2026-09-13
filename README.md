@@ -272,6 +272,28 @@ and subscriptions in Stripe before repairing such an operation; retain both D1
 and Durable Object storage during deployments. Do not delete member/customer
 mappings while subscriptions are in use.
 
+## Worker source layout
+
+- `src/index.js`: HTTP routing, OAuth/payment flows, webhooks, and queue delivery.
+- `src/membership.js`: explicit member registration and stable-member-ID Durable
+  Object RPC. Checkout, login profile refreshes, admin edits, and reconciliation
+  share a promise-chain lock, including across provider requests. RPC failures
+  carry an explicit status, retry delay, and error ID.
+- `src/membership-policy.js`: discount categories, access eligibility, and current
+  subscription selection.
+- `src/providers.js`: bounded provider HTTP, Stripe/Discord APIs, Discord identity
+  exchange, and Stripe signature verification.
+- `src/auth.js` and `src/encoding.js`: login tokens, browser-bound OAuth state,
+  cookies, and shared JWT encoding.
+- `src/admin.js`, `src/admin-views.js`, and `src/member-metadata.js`: admin request
+  handling, HTML rendering, and editable-field validation.
+- `src/printers.js`: member authorization and the edge JWT handoff.
+- `src/http.js` and `src/logging.js`: HTTP utilities and redacted diagnostics.
+
+Discord and Stripe IDs are resolved at request/queue boundaries. Internal member
+operations use the immutable `member_id`; identity-sensitive calls recheck the
+expected Discord account or Stripe customer inside the lock.
+
 ## Error logging
 
 Workers observability is enabled in `wrangler.jsonc`. For live diagnostics, run
