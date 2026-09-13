@@ -1,3 +1,5 @@
+import { logError } from './logging.js';
+
 export const now = () => Math.floor(Date.now() / 1000);
 export const opaque = /^[a-f0-9]{64}$/;
 export const discordID = /^[1-9][0-9]{16,19}$/;
@@ -84,24 +86,52 @@ export async function boundedText(message, limit = 1024 * 1024) {
   return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
 }
 
-export async function provider(url, init, service) {
+export async function provider(url, init, service, env = {}) {
+  const endpoint = new URL(url);
+  const context = { service, method: init?.method || 'GET', host: endpoint.hostname, path: endpoint.pathname };
+  const started = Date.now();
+  const authorization = new Headers(init?.headers).get('Authorization');
+  const secrets = { ...env, PROVIDER_TOKEN: authorization?.replace(/^(Bearer|Bot) /i, '') };
+  if (typeof init?.body === 'string') {
+    for (const key of ['code', 'client_secret', 'access_token', 'refresh_token']) {
+      secrets[`PROVIDER_SECRET_${key}`] = new URLSearchParams(init.body).get(key);
+    }
+  }
+  const fail = (error, failure, cause) => {
+    if (cause) error.cause = cause;
+    error.providerStatus = response?.status;
+    logError('provider.failed', error, { ...context, failure, provider_status: response?.status,
+      duration_ms: Date.now() - started }, secrets);
+    // The transport cause is logged here with provider-specific redaction.
+    // Callers retain the error ID without re-logging potentially secret data.
+    delete error.cause;
+    return error;
+  };
   let response;
   try {
-    response = await fetch(url, { ...init, redirect: 'error', signal: AbortSignal.timeout(15000) });
-  } catch {
-    throw new HttpError(502, `${service} is temporarily unavailable. Please try again.`);
+    // workerd supports manual/follow, but rejects redirect: 'error'. Manual also
+    // prevents credentials from being forwarded to an unexpected redirect target.
+    response = await fetch(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(15000) });
+  } catch (cause) {
+    throw fail(new HttpError(502, `${service} is temporarily unavailable. Please try again.`), 'transport', cause);
+  }
+  if (response.status >= 300 && response.status < 400) {
+    await response.body?.cancel();
+    throw fail(new HttpError(502, `${service} returned an unexpected redirect. Please try again.`), 'redirect');
   }
   let data;
   try {
     const text = await boundedText(response, 2 * 1024 * 1024);
     data = text ? JSON.parse(text) : {};
+    if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Invalid provider payload');
   } catch {
-    throw new HttpError(502, `${service} returned an invalid response. Please try again.`);
+    // JSON parser errors may include provider body fragments; never log them.
+    throw fail(new HttpError(502, `${service} returned an invalid response. Please try again.`), 'invalid_response');
   }
   if (!response.ok) {
     const delay = Number(response.headers.get('Retry-After') || data.retry_after || 0);
     // Never log provider bodies, OAuth codes, or tokens.
-    throw new HttpError(502, `${service} request failed (HTTP ${response.status}). Please try again.`, Number.isFinite(delay) ? Math.min(43200, Math.max(0, Math.ceil(delay))) : 0);
+    throw fail(new HttpError(502, `${service} request failed (HTTP ${response.status}). Please try again.`, Number.isFinite(delay) ? Math.min(43200, Math.max(0, Math.ceil(delay))) : 0), 'http');
   }
   return data;
 }
@@ -117,7 +147,7 @@ export function stripe(env, path, form, key) {
       ...(key ? { 'Idempotency-Key': key } : {}),
     },
     body: form ? new URLSearchParams(form).toString() : undefined,
-  }, 'Stripe');
+  }, 'Stripe', env);
 }
 
 export async function stripeList(env, path, params = {}) {
@@ -138,7 +168,7 @@ export function discord(env, path, method = 'GET') {
   if (!env.DISCORD_BOT_TOKEN || !discordID.test(env.DISCORD_GUILD_ID) || !discordID.test(env.DISCORD_ROLE_ID)) {
     throw new HttpError(503, 'Discord membership is not configured.');
   }
-  return provider(`https://discord.com/api/v10${path}`, { method, headers: { Authorization: `Bot ${env.DISCORD_BOT_TOKEN}` } }, 'Discord');
+  return provider(`https://discord.com/api/v10${path}`, { method, headers: { Authorization: `Bot ${env.DISCORD_BOT_TOKEN}` } }, 'Discord', env);
 }
 
 export async function verifyStripe(request, env, text) {

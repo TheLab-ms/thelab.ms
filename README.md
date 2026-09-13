@@ -117,34 +117,47 @@ npm run deploy
 The existing `make dev` and `make deploy` commands still work. Assets are served
 directly; signup, callback, payment and webhook paths run through the Worker first.
 
-## Manual discount approval
+## Member administration and discount approval
 
-Leadership inspects pending requests in D1, verifies eligibility, and approves the
-specific **numeric Discord ID and category**. Family eligibility is leadership's
-judgment; there is no linked-primary-member rule. Requests do not send automated
-notifications, so check pending requests and ask members to contact leadership.
+Set `DISCORD_ADMIN_ROLE_ID` in `wrangler.jsonc` (or `.dev.vars` locally) to the
+numeric Discord role ID that grants leadership/admin access. Open **`/admin`**
+and sign in with Discord. Admin access is disabled until that role is configured.
+The bot checks the user's current guild roles on every member list, detail, and
+save request. Removing the role immediately removes access. Admin sign-in uses
+the existing Discord callback URL, but has its own eight-hour session and does
+not register a member or start checkout. Use **Sign out** to end that session.
 
-```sh
-npx wrangler d1 execute thelab-membership --remote --command "SELECT discord_user_id, discord_username, discount_type, bill_annually, created FROM members WHERE discount_status = 'requested' ORDER BY created;"
-npx wrangler d1 execute thelab-membership --remote --command "UPDATE members SET discount_status = 'approved' WHERE discord_user_id = 'VERIFIED_DISCORD_ID' AND discount_type = 'student' AND discount_status = 'requested' RETURNING discord_user_id, discount_type, discount_status;"
-```
+The list includes all members registered in this app, including pending and
+inactive members, in pages of 25 ordered newest first. Open a member to view IDs,
+registration and sync timestamps, and last-synced subscription status, and edit:
 
-To decline, use the same conditional update with `discount_status = 'denied'`.
-Check that exactly the intended request was updated. For local development,
-replace `--remote` with `--local`.
+- Stored Discord username/email (refreshed from Discord at the next member sign-in).
+- Separate contact name/email, internal notes, and custom JSON text key/value pairs.
+- Saved monthly/yearly billing cycle, discount category, and approval status.
 
-Tell the member to click **Check approval & continue** on the pending page, or
-send a link preserving their selection, for example:
-`https://thelab.ms/signup?billing=yearly&discount=student`. They authenticate again
-and proceed directly to Checkout. Selecting a different category creates a new
-pending request; selecting standard rate explicitly clears the discount request.
+For a discount request, verify the member's numeric Discord ID and eligibility,
+then select **Approved** or **Denied** for the requested category and save. Use
+**None** with the standard rate. Family eligibility remains leadership's judgment.
+Requests do not send automated notifications, so check the list regularly.
+
+Tell the member to click **Check approval & continue** on the pending page or use
+`/payment/resume` while signed in. Alternatively, send a signup URL preserving
+the saved selection, such as `/signup?billing=yearly&discount=student`. Choosing
+a different category creates a new request; choosing standard rate clears it.
 Denied requests remain denied when retried with the same category.
 
-These commands approve **pending requests**, before any discounted Checkout is
-issued. To revoke an already approved discount, first expire any open Checkout
-session and adjust existing subscriptions in the Stripe dashboard, then change
-the D1 status. Editing D1 alone does not alter Stripe invoices or an already-issued
-hosted Checkout URL. Existing subscribers manage billing through Stripe Portal.
+Billing edits are **metadata only**: existing Stripe subscriptions and invoices
+are unaffected. Manage those in Stripe. Saving changed billing/discount metadata
+expires any outstanding Checkout link through the member's serialized Durable
+Object. If Stripe cannot resolve or expire that link, the save fails and keeps
+the entered fields for retry. Completed Checkout subscriptions are left intact.
+Concurrent profile/billing edits are rejected with a reload message so stale
+forms cannot silently overwrite newer changes. Stripe/Discord sync fields are
+read-only and are not used to grant membership from this editor.
+
+The initial migration includes the admin schema; no upgrade migration is needed
+for this undeployed app. For a local database created with the old schema,
+recreate the disposable local D1 database and run `npm run db:local` before use.
 
 ## Queue delivery and recovery
 
@@ -177,6 +190,33 @@ charge after Stripe expires its idempotency key. Inspect the customer's sessions
 and subscriptions in Stripe before repairing such an operation; retain both D1
 and Durable Object storage during deployments. Do not delete member/customer
 mappings while subscriptions are in use.
+
+## Error logging
+
+Workers observability is enabled in `wrangler.jsonc`. For live diagnostics, run
+`npx wrangler tail --format json`, or open the Worker's **Observability → Logs**
+in Cloudflare. Local errors appear in the `npm run dev` terminal. Include warning
+logs when investigating rejected sign-ins/forms (4xx); operational failures (5xx)
+are logged at error level.
+
+Structured events cover provider calls (`provider.failed`), HTTP requests,
+admin access/saves, Durable Object operations, and queue deliveries. They include
+the operation/path, status, error ID, and stack/cause for unexpected exceptions.
+Matching `error_id` values connect provider/DO failures to the calling request or
+queue delivery. Request errors also include a generated `request_id`; queue
+failures include message ID, attempt, and retry delay.
+
+For Discord login failures, inspect `provider.failed` for the endpoint
+(`/api/v10/oauth2/token`, `/api/v10/users/@me`, or the guild member lookup),
+failure kind (`transport`, `redirect`, `http`, `invalid_response`), elapsed time,
+and upstream HTTP status. Transport failures retain the underlying exception;
+401/403 upstream responses indicate credentials/access need investigation, and
+429 includes the provider retry delay. Provider redirects are rejected rather
+than followed, so credentials stay on the intended host.
+
+Application logs omit request headers/bodies, URL queries, and provider response
+bodies. Configured secrets and common credential patterns are redacted from
+exception diagnostics. Do not add raw OAuth payloads or member edit fields to logs.
 
 ## Verification
 

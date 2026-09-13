@@ -1,5 +1,7 @@
 import { boundedText, cookie, cookieHeader, discord, discordID, discounts, errorPage, hash, HttpError, json, now, opaque, origin, provider, randomToken, redirect, stripe, verifyStripe } from './http.js';
 import { coordinated } from './membership.js';
+import { adminConfigured, adminRequest, finishAdminLogin } from './admin.js';
+import { logError, requestContext } from './logging.js';
 export { Membership } from './membership.js';
 
 const OAUTH_AGE = 600;
@@ -10,13 +12,14 @@ const events = new Set([
   'invoice.paid', 'invoice.payment_failed',
 ]);
 
-function configured(env) {
+function configured(env, admin = false) {
   origin(env);
-  if (!env.DISCORD_CLIENT_ID || !env.DISCORD_CLIENT_SECRET || !env.STRIPE_SECRET_KEY) throw new HttpError(503, 'Membership signup is not configured yet. Please contact leadership.');
+  if (!env.DISCORD_CLIENT_ID || !env.DISCORD_CLIENT_SECRET || (!admin && !env.STRIPE_SECRET_KEY)) throw new HttpError(503, 'Discord sign-in or membership signup is not configured yet. Please contact leadership.');
 }
 
-async function signup(request, env) {
-  configured(env);
+async function signup(request, env, admin = false) {
+  configured(env, admin);
+  if (admin) adminConfigured(env);
   const url = new URL(request.url);
   const frequency = url.searchParams.get('billing') || 'monthly';
   const discount = url.searchParams.get('discount') || '';
@@ -25,8 +28,8 @@ async function signup(request, env) {
   await env.DB.batch([
     env.DB.prepare('DELETE FROM oauth_states WHERE expires <= ?').bind(now()),
     env.DB.prepare('DELETE FROM sessions WHERE expires <= ?').bind(now()),
-    env.DB.prepare('INSERT INTO oauth_states (state_hash, browser_hash, bill_annually, discount_type, expires) VALUES (?, ?, ?, ?, ?)')
-      .bind(await hash(state), await hash(browser), frequency === 'yearly' ? 1 : 0, discount, now() + OAUTH_AGE),
+    env.DB.prepare('INSERT INTO oauth_states (state_hash, browser_hash, bill_annually, discount_type, expires, purpose) VALUES (?, ?, ?, ?, ?, ?)')
+      .bind(await hash(state), await hash(browser), frequency === 'yearly' ? 1 : 0, discount, now() + OAUTH_AGE, admin ? 'admin' : 'signup'),
   ]);
   const target = new URL('https://discord.com/oauth2/authorize');
   target.search = new URLSearchParams({ client_id: env.DISCORD_CLIENT_ID, response_type: 'code', scope: 'identify email', redirect_uri: `${origin(env)}/login/discord/callback`, state }).toString();
@@ -46,11 +49,11 @@ async function resume(request, env) {
 }
 
 async function callback(request, env) {
-  configured(env);
+  configured(env, true);
   const url = new URL(request.url);
   const state = url.searchParams.get('state'), browser = cookie(request, 'thelab_oauth');
   if (!opaque.test(state || '') || !opaque.test(browser || '') || url.searchParams.getAll('state').length !== 1) throw new HttpError(400, 'Invalid or expired Discord sign-in. Please start again.');
-  const pending = await env.DB.prepare('DELETE FROM oauth_states WHERE state_hash = ? AND browser_hash = ? AND expires > ? RETURNING bill_annually, discount_type')
+  const pending = await env.DB.prepare('DELETE FROM oauth_states WHERE state_hash = ? AND browser_hash = ? AND expires > ? RETURNING bill_annually, discount_type, purpose')
     .bind(await hash(state), await hash(browser), now()).first();
   if (!pending) throw new HttpError(400, 'Invalid or expired Discord sign-in. Please start again.');
   const code = url.searchParams.get('code');
@@ -58,17 +61,20 @@ async function callback(request, env) {
   const token = await provider('https://discord.com/api/v10/oauth2/token', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ client_id: env.DISCORD_CLIENT_ID, client_secret: env.DISCORD_CLIENT_SECRET, grant_type: 'authorization_code', code, redirect_uri: `${origin(env)}/login/discord/callback` }).toString(),
-  }, 'Discord');
+  }, 'Discord', env);
   if (typeof token.access_token !== 'string' || !/^[A-Za-z0-9._~+-]{1,2048}$/.test(token.access_token) || token.token_type?.toLowerCase() !== 'bearer') throw new HttpError(502, 'Discord returned an invalid sign-in token.');
-  const user = await provider('https://discord.com/api/v10/users/@me', { headers: { Authorization: `Bearer ${token.access_token}` } }, 'Discord');
+  const user = await provider('https://discord.com/api/v10/users/@me', { headers: { Authorization: `Bearer ${token.access_token}` } }, 'Discord', env);
   if (!discordID.test(user.id || '') || typeof user.id !== 'string' || typeof user.username !== 'string' || !user.username.trim() || user.username.length > 80 || user.bot === true) throw new HttpError(502, 'Discord returned an invalid user identity.');
   if (user.verified !== true || typeof user.email !== 'string' || user.email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(user.email)) throw new HttpError(403, 'Please verify your email in Discord before signing up.');
+  let guildMember;
   try {
-    await discord(env, `/guilds/${env.DISCORD_GUILD_ID}/members/${user.id}`);
+    guildMember = await discord(env, `/guilds/${env.DISCORD_GUILD_ID}/members/${user.id}`);
   } catch (error) {
-    if (error.message.includes('HTTP 404')) throw new HttpError(403, 'Please join TheLab’s Discord server using the link below, then return to signup.');
+    if (error.providerStatus === 404) throw new HttpError(403, 'Please join TheLab’s Discord server using the link below, then return to signup.');
     throw error;
   }
+  if (pending.purpose === 'admin') return finishAdminLogin(request, env, user, guildMember);
+  configured(env);
   const result = await coordinated(env, user.id, '/checkout', { user: { id: user.id, username: user.username, email: user.email }, annual: Boolean(pending.bill_annually), discount: pending.discount_type });
   const session = randomToken();
   const old = cookie(request, 'thelab_session');
@@ -128,21 +134,31 @@ export async function processMessage(body, env) {
 export default {
   async fetch(request, env) {
     const path = new URL(request.url).pathname;
+    const context = requestContext(request);
     const routes = new Map([
       ['/signup', ['GET', signup]],
       ['/login/discord/callback', ['GET', callback]],
       ['/payment/success', ['GET', success]],
       ['/payment/resume', ['GET', resume]],
       ['/webhooks/stripe', ['POST', webhook]],
+      ['/admin/login', ['GET', (request, env) => signup(request, env, true)]],
     ]);
     const route = routes.get(path);
-    if (!route) return env.ASSETS.fetch(request);
-    if (request.method !== route[0]) return new Response('Method not allowed', { status: 405, headers: { Allow: route[0], 'Cache-Control': 'no-store' } });
+    const isAdmin = path === '/admin' || path.startsWith('/admin/');
     try {
+      if (!route && !isAdmin) {
+        const response = await env.ASSETS.fetch(request);
+        if (response.status >= 400) logError('assets.failed', new HttpError(response.status, 'Asset request failed.'), context, env);
+        return response;
+      }
+      if (route && request.method !== route[0]) {
+        logError('request.rejected', new HttpError(405, 'Method not allowed.'), context, env);
+        return new Response('Method not allowed', { status: 405, headers: { Allow: route[0], 'Cache-Control': 'no-store' } });
+      }
       if (new URL(request.url).origin !== origin(env)) throw new HttpError(400, 'Please use the configured membership site address.');
-      return await route[1](request, env);
+      return route ? await route[1](request, env) : await adminRequest(request, env, context);
     } catch (error) {
-      console.error('Membership request failed', path, error instanceof HttpError ? error.message : 'Internal error');
+      logError('request.failed', error, context, env);
       if (path === '/webhooks/stripe') return json({ error: 'Webhook could not be accepted.' }, error instanceof HttpError ? error.status : 500);
       const response = errorPage(error);
       if (path === '/login/discord/callback') {
@@ -158,8 +174,9 @@ export default {
         await processMessage(message.body, env);
         message.ack();
       } catch (error) {
-        console.error('Membership queue delivery failed', message.id, error instanceof HttpError ? error.message : 'Internal error');
-        message.retry({ delaySeconds: Math.min(43200, Math.max(error.retryAfter || 0, 30 * 2 ** Math.min(message.attempts - 1, 10))) });
+        const delaySeconds = Math.min(43200, Math.max(error.retryAfter || 0, 30 * 2 ** Math.min(message.attempts - 1, 10)));
+        logError('queue.failed', error, { message_id: message.id, attempt: message.attempts, retry_delay_seconds: delaySeconds }, env);
+        message.retry({ delaySeconds });
       }
     }
   },

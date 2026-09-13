@@ -1,0 +1,26 @@
+.admin-main { max-width: 1200px; }
+.admin-header, .admin-pagination, .admin-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; margin-bottom: 2rem; }
+.admin-header .membership-brand { margin: 0 auto 0 0; }
+.admin-main h1 { margin-bottom: 1rem; }
+.admin-main p { margin-bottom: 1rem; }
+.admin-table { overflow-x: auto; margin: 1.5rem 0; border: 1px solid var(--color-border); border-radius: var(--radius-md); }
+.admin-table table { width: 100%; border-collapse: collapse; text-align: left; background: var(--color-surface); }
+.admin-table th, .admin-table td { padding: 1rem; border-bottom: 1px solid var(--color-border); vertical-align: top; }
+.admin-table th { color: var(--color-heading); }
+.admin-table small { display: block; color: var(--color-text-muted); }
+.admin-pagination { justify-content: center; }
+.admin-section { padding: 1.5rem; margin: 1.5rem 0; min-width: 0; }
+.admin-section legend { color: var(--color-heading); font-weight: 700; padding: 0 0.5rem; }
+.admin-section dl { display: grid; grid-template-columns: minmax(150px, 1fr) 3fr; gap: 0.75rem 1rem; margin-top: 1rem; }
+.admin-section dd { margin: 0; overflow-wrap: anywhere; }
+.admin-section dt { color: var(--color-text-muted); }
+.admin-form label { display: block; margin: 1rem 0 0.4rem; color: var(--color-heading); }
+.admin-form input, .admin-form select, .admin-form textarea { width: 100%; padding: 0.75rem; background: var(--color-bg); color: var(--color-text); border: 1px solid var(--color-border-light); border-radius: var(--radius-md); font: inherit; color-scheme: dark; }
+.admin-form textarea { resize: vertical; }
+.admin-form input:focus-visible, .admin-form select:focus-visible, .admin-form textarea:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+.admin-notice { padding: 1rem; border-left: 3px solid var(--color-accent); background: var(--color-surface); }
+@media (max-width: 600px) {
+  .admin-section dl { grid-template-columns: 1fr; }
+  .admin-section dd { margin-bottom: 0.75rem; }
+  .admin-section { padding: 1rem; }
+}

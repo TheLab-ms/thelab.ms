@@ -14,6 +14,7 @@ export default defineConfig(async () => ({
         DISCORD_BOT_TOKEN: 'test-bot',
         DISCORD_GUILD_ID: '111111111111111111',
         DISCORD_ROLE_ID: '222222222222222222',
+        DISCORD_ADMIN_ROLE_ID: '444444444444444444',
         STRIPE_SECRET_KEY: 'sk_test_fake',
         STRIPE_WEBHOOK_SECRET: 'whsec_fake',
         TEST_MIGRATIONS: await readD1Migrations('./migrations'),

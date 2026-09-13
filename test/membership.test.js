@@ -3,7 +3,7 @@ import { applyD1Migrations, reset, runInDurableObject, SELF } from 'cloudflare:t
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker, { processMessage } from '../src/index.js';
 import { coordinated } from '../src/membership.js';
-import { hash, now } from '../src/http.js';
+import { hash, now, provider } from '../src/http.js';
 
 // Global fetch spies also apply inside the bound Durable Object in this runtime.
 // Every unexpected provider request fails; no tests can reach live services.
@@ -12,6 +12,8 @@ const fetchMock = {
   activate() {
     interceptors = [];
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init = {}) => {
+      // Exercise workerd's Request validation even when provider HTTP is mocked.
+      new Request(input, init);
       const url = new URL(typeof input === 'string' ? input : input.url);
       const path = url.pathname + url.search;
       const mock = interceptors.find(item => item.remaining > 0 && item.origin === url.origin && item.method === (init.method || 'GET') && (typeof item.path === 'string' ? item.path === path : item.path.test(path)));
@@ -80,10 +82,10 @@ async function start(query = '') {
   return { target, state: target.searchParams.get('state'), cookie: response.headers.get('Set-Cookie').split(';')[0] };
 }
 
-function oauthMock({ verified = true, guildStatus = 200 } = {}) {
+function oauthMock({ verified = true, guildStatus = 200, roles = [] } = {}) {
   mockDiscord('/oauth2/token', { access_token: 'access-token', token_type: 'Bearer' }, 'POST');
   mockDiscord('/users/@me', { ...user, verified });
-  if (verified) mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}`, { user }, 'GET', guildStatus);
+  if (verified) mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}`, { user, roles }, 'GET', guildStatus);
 }
 
 async function signedEvent(type = 'customer.subscription.updated', eventID = 'evt_update') {
@@ -168,6 +170,207 @@ describe('Discord signup', () => {
     await seed({ bill_annually: 1, discount_type: 'family', discount_status: 'approved' });
     const response = await api('/payment/resume', { headers: { Cookie: await loginCookie() } });
     expect(response.headers.get('Location')).toBe(`${env.SITE_URL}/signup?billing=yearly&discount=family`);
+  });
+});
+
+describe('member administration', () => {
+  const token = 'b'.repeat(64);
+  const cookie = `thelab_admin=${token}`;
+  const role = (roles = [env.DISCORD_ADMIN_ROLE_ID]) => mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}`, { roles });
+  const fields = (extra = {}) => ({ discord_username: 'edited-maker', discord_email: 'edited@example.com', contact_name: 'Maker Name',
+    contact_email: 'contact@example.com', notes: 'Orientation complete', custom_metadata: '{"locker":"42"}', billing: 'yearly',
+    discount_type: 'student', discount_status: 'approved', metadata_version: '0', ...extra });
+  async function authenticate() {
+    await env.DB.prepare('INSERT INTO admin_sessions (token_hash, discord_user_id, expires) VALUES (?, ?, ?)')
+      .bind(await hash(token), id, now() + 3600).run();
+  }
+  async function save(values = fields(), options = {}) {
+    return api(`/admin/members/${id}`, { method: 'POST', body: new URLSearchParams({ csrf: await hash(`admin-csrf:${token}`), ...values }),
+      headers: { Cookie: cookie, Origin: env.SITE_URL, 'Content-Type': 'application/x-www-form-urlencoded', ...options } });
+  }
+
+  it('isolates admin OAuth from signup, requires a role, and consumes browser-bound state', async () => {
+    const response = await api('/admin/login', undefined, { ...env, STRIPE_SECRET_KEY: '' });
+    expect(response.status).toBe(303);
+    const state = new URL(response.headers.get('Location')).searchParams.get('state');
+    const browser = response.headers.get('Set-Cookie').split(';')[0];
+    expect((await api(`/login/discord/callback?state=${state}&code=test`)).status).toBe(400);
+    oauthMock({ roles: [env.DISCORD_ADMIN_ROLE_ID] });
+    const signedIn = await api(`/login/discord/callback?state=${state}&code=test`, { headers: { Cookie: browser } }, { ...env, STRIPE_SECRET_KEY: '' });
+    expect(signedIn.status).toBe(303);
+    expect(signedIn.headers.get('Location')).toBe(`${env.SITE_URL}/admin`);
+    expect(signedIn.headers.get('Set-Cookie')).toContain('thelab_admin=');
+    expect(signedIn.headers.get('Set-Cookie')).toContain('HttpOnly; SameSite=Lax');
+    expect(await readMember()).toBeNull();
+    expect((await env.DB.prepare('SELECT COUNT(*) AS total FROM sessions').first()).total).toBe(0);
+    expect((await api(`/login/discord/callback?state=${state}&code=test`, { headers: { Cookie: browser } })).status).toBe(400);
+    const denied = await api('/admin/login');
+    const deniedState = new URL(denied.headers.get('Location')).searchParams.get('state');
+    oauthMock();
+    expect((await api(`/login/discord/callback?state=${deniedState}&code=test`, { headers: { Cookie: denied.headers.get('Set-Cookie').split(';')[0] } })).status).toBe(403);
+    expect((await env.DB.prepare('SELECT COUNT(*) AS total FROM admin_sessions').first()).total).toBe(1);
+  });
+
+  it('rejects anonymous, expired, unconfigured, and revoked access to reads and writes', async () => {
+    expect((await api('/admin')).status).toBe(401);
+    expect((await save()).status).toBe(401);
+    await seed();
+    expect((await api('/admin', { headers: { Cookie: await loginCookie() } })).status).toBe(401);
+    await authenticate();
+    expect((await api('/admin', { headers: { Cookie: cookie } }, { ...env, DISCORD_ADMIN_ROLE_ID: '' })).status).toBe(503);
+    role([]);
+    expect((await api('/admin', { headers: { Cookie: cookie } })).status).toBe(403);
+    role([]);
+    expect((await save()).status).toBe(403);
+    expect((await readMember()).discord_username).toBe('maker');
+    await env.DB.prepare('UPDATE admin_sessions SET expires = 0').run();
+    expect((await api(`/admin/members/${id}`, { headers: { Cookie: cookie } })).status).toBe(401);
+  });
+
+  it('logs unexpected admin database errors with context and keeps details out of HTML', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const response = await api('/admin?code=private-code', { headers: { Cookie: cookie } }, {
+      ...env, DB: { prepare() { throw new Error('D1 connection failed', { cause: new Error('database offline') }); } },
+    });
+    expect(response.status).toBe(500);
+    expect(await response.text()).not.toContain('D1 connection failed');
+    const entry = JSON.parse(log.mock.calls[0][0]);
+    expect(entry).toMatchObject({ event: 'admin.failed', path: '/admin', method: 'GET', status: 500,
+      error: { message: 'D1 connection failed', cause: { message: 'database offline' } } });
+    expect(entry.error.stack).toContain('membership.test.js');
+    expect(entry.request_id).toBeTruthy();
+    expect(JSON.stringify(log.mock.calls)).not.toContain('private-code');
+    expect(JSON.stringify(log.mock.calls)).not.toContain(token);
+  });
+
+  it('paginates all members with deterministic ordering and handles empty/invalid pages', async () => {
+    await authenticate();
+    role();
+    expect(await (await api('/admin', { headers: { Cookie: cookie } })).text()).toContain('No members have registered yet.');
+    await env.DB.batch(Array.from({ length: 26 }, (_, i) => env.DB.prepare('INSERT INTO members (discord_user_id, discord_username, discord_email, created) VALUES (?, ?, ?, ?)')
+      .bind(String(BigInt(id) + BigInt(i)), `maker-${i}`, `maker${i}@example.com`, 1000)));
+    role();
+    const first = await api('/admin', { headers: { Cookie: cookie } });
+    const html = await first.text();
+    expect(first.headers.get('Cache-Control')).toBe('no-store');
+    expect(html).toContain('26 registered members');
+    expect(html).toContain('Page 1 of 2');
+    expect(html.match(/href="\/admin\/members\//g)).toHaveLength(25);
+    expect(html).toContain('>maker-25</a>');
+    expect(html).not.toContain('>maker-0</a>');
+    role();
+    const second = await (await api('/admin?page=2', { headers: { Cookie: cookie } })).text();
+    expect(second.match(/href="\/admin\/members\//g)).toHaveLength(1);
+    expect(second).toContain('>maker-0</a>');
+    role();
+    expect((await api('/admin?page=3', { headers: { Cookie: cookie } })).headers.get('Location')).toBe('/admin?page=2');
+    role();
+    expect((await api('/admin?page=-1', { headers: { Cookie: cookie } })).status).toBe(400);
+  });
+
+  it('saves editable metadata without changing Stripe state, escapes HTML, and rejects stale forms', async () => {
+    const log = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await seed({ stripe_subscription_id: 'sub_member', stripe_subscription_state: 'active' });
+    await authenticate();
+    role();
+    const result = await save(fields({ notes: '<script>alert(1)</script>', stripe_customer_id: 'cus_attacker', stripe_subscription_state: 'canceled' }));
+    expect(result.status).toBe(303);
+    expect(await readMember()).toMatchObject({ discord_username: 'edited-maker', contact_name: 'Maker Name', contact_email: 'contact@example.com',
+      custom_metadata: '{"locker":"42"}', bill_annually: 1, discount_type: 'student', discount_status: 'approved', metadata_version: 1,
+      stripe_customer_id: customer, stripe_subscription_state: 'active', stripe_subscription_id: 'sub_member' });
+    role();
+    const view = await api(`/admin/members/${id}?saved=1`, { headers: { Cookie: cookie } });
+    const html = await view.text();
+    expect(html).toContain('Member metadata saved.');
+    expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+    expect(html).not.toContain('<script>');
+    expect(html).toContain(await hash(`admin-csrf:${token}`));
+    expect(view.headers.get('Content-Security-Policy')).toContain("frame-ancestors 'none'");
+    role();
+    const stale = await save(fields({ notes: 'Stale notes' }));
+    expect(stale.status).toBe(409);
+    const entries = log.mock.calls.map(([entry]) => JSON.parse(entry));
+    const operation = entries.find(entry => entry.event === 'membership.failed');
+    expect(operation).toMatchObject({ status: 409, path: '/admin/update' });
+    expect(entries.find(entry => entry.event === 'admin.save_failed')).toMatchObject({ status: 409, error_id: operation.error_id });
+    expect(await stale.text()).toContain('Stale notes');
+    expect((await readMember()).notes).toBe('<script>alert(1)</script>');
+  });
+
+  it('rejects cross-site and malformed saves before changing data', async () => {
+    await seed(); await authenticate();
+    expect((await save(fields(), { Origin: 'https://elsewhere.example' })).status).toBe(403);
+    expect((await save({ ...fields(), csrf: 'wrong' })).status).toBe(403);
+    expect((await save(fields(), { 'Content-Type': 'application/json' })).status).toBe(415);
+    for (const invalid of [{ discount_status: '' }, { billing: 'weekly' }, { discord_email: 'invalid' }, { custom_metadata: '[]' },
+      { custom_metadata: '{"nested":{}}' }, { notes: 'x'.repeat(5001) }]) {
+      role();
+      expect((await save(fields(invalid))).status).toBe(400);
+    }
+    expect((await readMember()).metadata_version).toBe(0);
+    role();
+    expect((await api('/admin/members/999999999999999999', { headers: { Cookie: cookie } })).status).toBe(404);
+  });
+
+  it('expires outstanding checkout before changing billing and preserves metadata on Stripe failure', async () => {
+    await seed(); await authenticate();
+    mockSubs(); mockPrice();
+    mockStripe('/checkout/sessions', { id: 'cs_admin', url: 'https://checkout.stripe.com/c/pay/admin' }, { method: 'POST' });
+    await checkout();
+    const version = String((await readMember()).metadata_version);
+    role();
+    mockStripe('/checkout/sessions/cs_admin', { id: 'cs_admin', status: 'open' }).times(2);
+    mockStripe('/checkout/sessions/cs_admin/expire', {}, { method: 'POST', status: 500 });
+    expect((await save(fields({ metadata_version: version }))).status).toBe(502);
+    expect((await readMember()).bill_annually).toBe(0);
+    role();
+    mockStripe('/checkout/sessions/cs_admin', { id: 'cs_admin', status: 'open' });
+    mockStripe('/checkout/sessions/cs_admin/expire', { id: 'cs_admin', status: 'expired' }, { method: 'POST' });
+    expect((await save(fields({ metadata_version: version }))).status).toBe(303);
+    expect((await readMember()).bill_annually).toBe(1);
+    const stub = env.MEMBERS.get(env.MEMBERS.idFromName(id));
+    await runInDurableObject(stub, async (_instance, state) => { expect(await state.storage.get('checkout')).toBeUndefined(); });
+  });
+
+  it('invalidates stale admin forms on member sign-in and preserves admin contact metadata', async () => {
+    await seed({ contact_name: 'Admin contact', notes: 'Keep me' }); await authenticate();
+    mockSubs();
+    await checkout({ discount: 'student' });
+    role();
+    expect((await save()).status).toBe(409);
+    expect(await readMember()).toMatchObject({ contact_name: 'Admin contact', notes: 'Keep me', discount_status: 'requested' });
+  });
+
+  it('leaves completed subscriptions and checkout completion safeguards intact', async () => {
+    await seed(); await authenticate();
+    mockSubs(); mockPrice();
+    mockStripe('/checkout/sessions', { id: 'cs_complete', url: 'https://checkout.stripe.com/c/pay/complete' }, { method: 'POST' });
+    await checkout();
+    role();
+    mockStripe('/checkout/sessions/cs_complete', { id: 'cs_complete', status: 'complete', subscription: 'sub_member' });
+    expect((await save(fields({ metadata_version: String((await readMember()).metadata_version) }))).status).toBe(303);
+    mockSubs().times(2);
+    mockStripe('/checkout/sessions/cs_complete', { id: 'cs_complete', status: 'complete', subscription: 'sub_member' });
+    await expect(checkout({ annual: true, discount: 'student' })).rejects.toThrow('previous checkout is being processed');
+    expect((await readMember()).bill_annually).toBe(1);
+  });
+
+  it('serializes simultaneous admin saves so only one stale-version update wins', async () => {
+    await seed(); await authenticate();
+    role().times(2);
+    const results = await Promise.all([save(fields({ notes: 'First edit' })), save(fields({ notes: 'Second edit' }))]);
+    expect(results.map(result => result.status).sort()).toEqual([303, 409]);
+    expect((await readMember()).metadata_version).toBe(1);
+  });
+
+  it('logs out without requiring continued role membership', async () => {
+    await authenticate();
+    const result = await api('/admin/logout', { method: 'POST', headers: { Cookie: cookie, Origin: env.SITE_URL, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ csrf: await hash(`admin-csrf:${token}`) }) });
+    expect(result.status).toBe(303);
+    expect(result.headers.get('Set-Cookie')).toContain('Max-Age=0');
+    expect((await api('/admin', { headers: { Cookie: cookie } })).status).toBe(401);
+    expect((await api('/admin/logout')).status).toBe(405);
   });
 });
 
@@ -335,9 +538,12 @@ describe('webhooks and queued Discord reconciliation', () => {
   });
 
   it('acknowledges Stripe only after a successful queue send, including redelivery', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
     const send = vi.fn().mockRejectedValueOnce(new Error('queue unavailable')).mockResolvedValue(undefined);
     const bindings = { ...env, MEMBERSHIP_QUEUE: { send } };
     expect((await api('/webhooks/stripe', await signedEvent(), bindings)).status).toBe(500);
+    expect(JSON.parse(log.mock.calls[0][0])).toMatchObject({ event: 'request.failed', path: '/webhooks/stripe',
+      error: { message: 'queue unavailable' } });
     expect((await api('/webhooks/stripe', await signedEvent(), bindings)).status).toBe(204);
     expect(send).toHaveBeenCalledTimes(2);
     expect(send).toHaveBeenLastCalledWith({ event_id: 'evt_update', customer_id: customer });
@@ -367,6 +573,7 @@ describe('webhooks and queued Discord reconciliation', () => {
   });
 
   it('retries Discord rate limits without marking the event processed', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
     await seed();
     mockSubs([subscription()]);
     mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, { retry_after: 120 }, 'PUT', 429);
@@ -374,6 +581,11 @@ describe('webhooks and queued Discord reconciliation', () => {
     await worker.queue({ messages: [message] }, env);
     expect(message.ack).not.toHaveBeenCalled();
     expect(message.retry).toHaveBeenCalledWith({ delaySeconds: 120 });
+    const entries = log.mock.calls.map(([entry]) => JSON.parse(entry));
+    const providerError = entries.find(entry => entry.event === 'provider.failed');
+    expect(providerError).toMatchObject({ service: 'Discord', failure: 'http', provider_status: 429, retry_after: 120 });
+    expect(entries.find(entry => entry.event === 'queue.failed')).toMatchObject({ message_id: 'queue-message',
+      attempt: 1, retry_delay_seconds: 120, error_id: providerError.error_id });
     expect(await env.DB.prepare('SELECT id FROM stripe_events WHERE id = ?').bind('evt_retry').first()).toBeNull();
     mockSubs([subscription()]);
     mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, {}, 'PUT', 204);
@@ -392,7 +604,72 @@ describe('webhooks and queued Discord reconciliation', () => {
   });
 });
 
+describe('provider failures and diagnostics', () => {
+  it.each([301, 302, 303, 307, 308])('rejects HTTP %s without following redirects or forwarding credentials', async status => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const fetch = vi.mocked(globalThis.fetch).mockResolvedValueOnce(new Response(null, {
+      status, headers: { Location: 'https://unexpected.example/?access_token=private-token' },
+    }));
+    await expect(provider('https://discord.com/api/v10/oauth2/token', {
+      method: 'POST', body: 'code=private-code', headers: { Authorization: 'Bearer private-token' },
+    }, 'Discord', env)).rejects.toThrow('unexpected redirect');
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(fetch.mock.calls[0][1].redirect).toBe('manual');
+    expect(JSON.parse(log.mock.calls[0][0])).toMatchObject({ event: 'provider.failed', service: 'Discord',
+      path: '/api/v10/oauth2/token', method: 'POST', provider_status: status, failure: 'redirect' });
+    expect(JSON.stringify(log.mock.calls)).not.toContain('private-');
+  });
+
+  it.each(['TypeError', 'TimeoutError'])('preserves %s diagnostics and redacts credentials', async name => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const cause = new Error(`Transport failed ${env.DISCORD_CLIENT_SECRET} Bearer private-token code=private-code https://discord.com/api?state=private-state`);
+    cause.name = name;
+    vi.mocked(globalThis.fetch).mockRejectedValueOnce(cause);
+    await expect(provider('https://discord.com/api/v10/oauth2/token', {
+      method: 'POST', body: 'code=private-code', headers: { Authorization: 'Bearer private-token' },
+    }, 'Discord', env)).rejects.toThrow('temporarily unavailable');
+    const entry = JSON.parse(log.mock.calls[0][0]);
+    expect(entry).toMatchObject({ event: 'provider.failed', failure: 'transport', error: { cause: { name } } });
+    expect(entry.error.cause.stack).toContain('membership.test.js');
+    expect(entry.duration_ms).toBeGreaterThanOrEqual(0);
+    expect(JSON.stringify(entry)).not.toContain('private-');
+    expect(JSON.stringify(entry)).not.toContain(env.DISCORD_CLIENT_SECRET);
+  });
+
+  it.each(['<html>private-provider-body</html>', 'null', '[]'])('logs invalid responses without parser/body leaks: %s', async body => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(new Response(body, { status: 502 }));
+    await expect(provider('https://discord.com/api/v10/users/@me', {}, 'Discord', env)).rejects.toThrow('invalid response');
+    expect(JSON.parse(log.mock.calls[0][0])).toMatchObject({ failure: 'invalid_response', provider_status: 502 });
+    expect(JSON.stringify(log.mock.calls)).not.toContain('private-provider-body');
+  });
+
+  it('logs unexpected Durable Object errors before returning a safe correlated failure', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const stub = env.MEMBERS.get(env.MEMBERS.idFromName(id));
+    await runInDurableObject(stub, async instance => {
+      vi.spyOn(instance, 'checkout').mockRejectedValueOnce(new Error('storage unavailable'));
+      const response = await instance.fetch(new Request('https://membership.internal/checkout', { method: 'POST', body: '{}' }));
+      expect(response.status).toBe(500);
+      const result = await response.json();
+      expect(result.error).toBe('Membership operation failed.');
+      expect(JSON.parse(log.mock.calls[0][0])).toMatchObject({ event: 'membership.failed', error_id: result.error_id,
+        path: '/checkout', error: { message: 'storage unavailable' } });
+    });
+  });
+});
+
 describe('deployed asset routing', () => {
+  it('routes admin navigation through authorization and serves admin styling', async () => {
+    for (const path of ['/admin', '/admin/', `/admin/members/${id}`]) {
+      const response = await SELF.fetch(`${env.SITE_URL}${path}`, { headers: { 'Sec-Fetch-Mode': 'navigate' }, redirect: 'manual' });
+      expect(response.status).toBe(401);
+      expect(response.headers.get('Cache-Control')).toBe('no-store');
+      expect(await response.text()).toContain('Sign in with Discord');
+    }
+    expect((await SELF.fetch(`${env.SITE_URL}/admin.css`)).status).toBe(200);
+  });
+
   it('serves static welcome/pending pages and routes signup navigation through the Worker', async () => {
     for (const path of ['/welcome', '/membership-pending']) {
       const response = await SELF.fetch(`${env.SITE_URL}${path}`);

@@ -1,5 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { discord, discounts, hash, HttpError, json, now, origin, randomToken, stripe, stripeList } from './http.js';
+import { validateMetadata } from './member-metadata.js';
+import { logError, requestContext } from './logging.js';
 
 const healthy = subscription => ['active', 'trialing'].includes(subscription.status);
 const ongoing = subscription => !['canceled', 'incomplete_expired'].includes(subscription.status);
@@ -19,9 +21,11 @@ export class Membership extends DurableObject {
         const path = new URL(request.url).pathname;
         if (path === '/checkout') return json({ url: await this.checkout(input) });
         if (path === '/sync') { await this.sync(input); return json({ ok: true }); }
+        if (path === '/admin/update') { await this.updateMetadata(input); return json({ ok: true }); }
         throw new HttpError(404, 'Unknown membership operation.');
       } catch (error) {
-        return json({ error: error instanceof HttpError ? error.message : 'Membership operation failed.', retry_after: error.retryAfter || 0 }, error instanceof HttpError ? error.status : 500);
+        const errorID = logError('membership.failed', error, requestContext(request), this.env);
+        return json({ error: error instanceof HttpError ? error.message : 'Membership operation failed.', retry_after: error.retryAfter || 0, error_id: errorID }, error instanceof HttpError ? error.status : 500);
       }
     });
     this.tail = work.catch(() => {});
@@ -62,7 +66,8 @@ export class Membership extends DurableObject {
     const id = user.id;
     await this.env.DB.prepare(`INSERT INTO members (discord_user_id, discord_username, discord_email)
       VALUES (?, ?, ?) ON CONFLICT(discord_user_id) DO UPDATE SET
-      discord_username = excluded.discord_username, discord_email = excluded.discord_email`)
+      discord_username = excluded.discord_username, discord_email = excluded.discord_email,
+      metadata_version = members.metadata_version + 1`)
       .bind(id, user.username, user.email.toLowerCase()).run();
     let member = await this.member(id);
     if (member.stripe_customer_id) {
@@ -108,7 +113,7 @@ export class Membership extends DurableObject {
       await this.ctx.storage.delete('checkout');
       prior = null;
     }
-    await this.env.DB.prepare('UPDATE members SET bill_annually = ?, discount_type = ?, discount_status = ? WHERE discord_user_id = ?')
+    await this.env.DB.prepare('UPDATE members SET bill_annually = ?, discount_type = ?, discount_status = ?, metadata_version = metadata_version + 1 WHERE discord_user_id = ?')
       .bind(annual ? 1 : 0, discount, status, id).run();
     if (status === 'requested') return `${origin(this.env)}/membership-pending`;
     if (status === 'denied') throw new HttpError(403, 'Your discount request was declined. Contact leadership or select the standard rate to continue.');
@@ -168,6 +173,33 @@ export class Membership extends DurableObject {
     }
   }
 
+  async updateMetadata({ discord_user_id: id, fields }) {
+    const value = validateMetadata(fields);
+    const member = await this.member(id);
+    if (member.metadata_version !== value.metadata_version) throw new HttpError(409, 'This member was changed after you opened the form. Reload the member and reapply your edits.');
+    const pricingChanged = ['bill_annually', 'discount_type', 'discount_status'].some(key => member[key] !== value[key]);
+    if (pricingChanged) {
+      // Resolve ambiguous creation before expiring the old URL. This shares the
+      // checkout lock and durable idempotency record, including its age limit.
+      const prior = await this.ctx.storage.get('checkout');
+      if (prior) {
+        const created = await this.write('checkout', prior.path, prior.form);
+        const session = await stripe(this.env, `/checkout/sessions/${encodeURIComponent(created.id)}`);
+        if (session.status === 'open') await this.expire(session);
+        else if (!['expired', 'complete'].includes(session.status)) throw new HttpError(502, 'Stripe returned an invalid checkout status.');
+        // Keep completed checkout tracking so signup still guards against a
+        // second checkout while Stripe is finishing the first subscription.
+        if (session.status !== 'complete') await this.ctx.storage.delete('checkout');
+      }
+    }
+    const result = await this.env.DB.prepare(`UPDATE members SET discord_username = ?, discord_email = ?,
+      contact_name = ?, contact_email = ?, notes = ?, custom_metadata = ?, bill_annually = ?, discount_type = ?,
+      discount_status = ?, metadata_version = metadata_version + 1 WHERE discord_user_id = ? AND metadata_version = ?`)
+      .bind(value.discord_username, value.discord_email, value.contact_name, value.contact_email, value.notes,
+        value.custom_metadata, value.bill_annually, value.discount_type, value.discount_status, id, value.metadata_version).run();
+    if (result.meta.changes !== 1) throw new HttpError(409, 'This member was changed. Reload the member and reapply your edits.');
+  }
+
   stripeURL(value, host) {
     let url;
     try { url = new URL(value); } catch { /* Validate below. */ }
@@ -202,6 +234,10 @@ export async function coordinated(env, id, path, input) {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
   });
   const value = await response.json();
-  if (!response.ok) throw new HttpError(response.status, value.error, value.retry_after);
+  if (!response.ok) {
+    const error = new HttpError(response.status, value.error, value.retry_after);
+    error.errorId = value.error_id;
+    throw error;
+  }
   return value;
 }
