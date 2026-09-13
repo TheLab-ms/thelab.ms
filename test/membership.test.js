@@ -561,7 +561,15 @@ describe('member administration', () => {
     expect(html).not.toContain('contact_name');
     expect(html).not.toContain('discount_status');
     for (const name of ['discord_username', 'discord_email', 'billing_name', 'billing_email']) {
-      expect(html).toMatch(new RegExp(`<input id="${name}"[^>]+ readonly>`));
+      expect(html).not.toContain(`name="${name}"`);
+    }
+    expect(html).toContain(`<dt>Discord username</dt><dd>${user.username}</dd>`);
+    expect(html).toContain(`<dt>Discord email</dt><dd>${user.email}</dd>`);
+    expect(html).toContain('<dt>Billing name (Stripe)</dt><dd>—</dd>');
+    expect(html).toContain('<dt>Billing email (Stripe)</dt><dd>—</dd>');
+    expect(html).toContain('<details class="admin-section admin-linked-accounts">');
+    for (const name of ['discord_user_id', 'stripe_customer_id', 'stripe_subscription_id']) {
+      expect(html).toMatch(new RegExp(`<input id="${name}"[^>]+name="${name}"`));
     }
     expect(html).toContain(await hash(`admin-csrf:${token}`));
     expect(view.headers.get('Content-Security-Policy')).toContain("frame-ancestors 'none'");
@@ -572,7 +580,10 @@ describe('member administration', () => {
     const operation = entries.find(entry => entry.event === 'membership.failed');
     expect(operation).toMatchObject({ status: 409, operation: 'updateMetadata' });
     expect(entries.find(entry => entry.event === 'admin.save_failed')).toMatchObject({ status: 409, error_id: operation.error_id });
-    expect(await stale.text()).toContain('Stale notes');
+    const staleHTML = await stale.text();
+    expect(staleHTML).toContain('Stale notes');
+    expect(staleHTML).toContain('<details class="admin-section admin-linked-accounts" open>');
+    expect(staleHTML).toContain('admin-notice--error" role="alert"');
     expect((await readMember()).notes).toBe('<script>alert(1)</script>');
   });
 
@@ -584,7 +595,13 @@ describe('member administration', () => {
     for (const invalid of [{ discount_type: 'free' }, { billing: 'weekly' }, { discord_user_id: 'invalid' }, { stripe_customer_id: 'bad' },
       { stripe_subscription_id: 'bad' }, { stripe_customer_id: '', stripe_subscription_id: 'sub_member' }, { name_override: 'x'.repeat(161) }, { notes: 'x'.repeat(5001) }]) {
       role();
-      expect((await save(fields(invalid))).status).toBe(400);
+      const response = await save(fields(invalid));
+      expect(response.status).toBe(400);
+      const html = await response.text();
+      expect(html).toContain('<details class="admin-section admin-linked-accounts" open>');
+      for (const name of ['discord_user_id', 'stripe_customer_id', 'stripe_subscription_id']) {
+        if (name in invalid) expect(html).toContain(`name="${name}" type="text" value="${invalid[name]}"`);
+      }
     }
     expect((await readMember()).metadata_version).toBe(0);
     role();

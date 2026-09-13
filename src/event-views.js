@@ -21,7 +21,7 @@ export function eventTable(events, showMember = true) {
     const member = event.discord_user_id ? `<a href="/admin/members/${e(event.discord_user_id)}">${e(memberName(event))}</a>` : 'Deleted member';
     return `<tr><td>${e(timestamp)}</td><td>${e(eventTypes[event.event_type] || event.event_type)}</td>${showMember ? `<td>${member}</td>` : ''}<td>${e(eventDetails(event))}</td></tr>`;
   }).join('');
-  return `<div class="admin-table"><table><thead><tr><th scope="col">Timestamp</th><th scope="col">Event</th>${showMember ? '<th scope="col">Member</th>' : ''}<th scope="col">Details</th></tr></thead><tbody>${rows || `<tr><td colspan="${showMember ? 4 : 3}">No member history found.</td></tr>`}</tbody></table></div>`;
+  return `<div class="admin-table" role="region" aria-label="Member history" tabindex="0"><table><thead><tr><th scope="col">Timestamp</th><th scope="col">Event</th>${showMember ? '<th scope="col">Member</th>' : ''}<th scope="col">Details</th></tr></thead><tbody>${rows || `<tr><td colspan="${showMember ? 4 : 3}">No member history found.</td></tr>`}</tbody></table></div>`;
 }
 
 export function recentHistory(member, events) {
