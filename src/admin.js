@@ -9,6 +9,7 @@ import { eventListParams, eventListURL, queryEvents } from './member-events.js';
 import { eventList } from './event-views.js';
 import { memberName, memberPath } from './member-metadata.js';
 import { memberWaivers } from './waiver.js';
+import { edgeCall, edgeEnabled } from './edge-sync.js';
 
 const PAGE_SIZE = 25;
 
@@ -53,6 +54,7 @@ async function readForm(request, env, csrf) {
 async function history(request, env, csrf, member) {
   const url = new URL(request.url);
   const params = eventListParams(url.searchParams);
+  if (edgeEnabled(env) && (!params.type || params.type === 'FobSwipe')) await edgeCall(env, 'swipes');
   const result = await queryEvents(env, { ...params, memberID: member?.member_id });
   if (result.current > result.pages) return redirect(eventListURL(url.pathname, result.pages, params.type));
   return page(member ? `History for ${memberName(member)}` : 'Member history', eventList(result, url.pathname, member), csrf);
@@ -61,7 +63,7 @@ async function history(request, env, csrf, member) {
 export async function adminRequest(request, env, context = requestContext(request)) {
   const url = new URL(request.url), path = url.pathname;
   const match = path.match(/^\/admin\/members\/([1-9][0-9]{16,19}|[a-f0-9]{32})(\/events)?$/);
-  const methods = path === '/admin' || path === '/admin/' || path === '/admin/events' || match?.[2] ? ['GET'] : path === '/admin/logout' ? ['POST'] : match ? ['GET', 'POST'] : [];
+  const methods = path === '/admin' || path === '/admin/' || path === '/admin/events' || match?.[2] ? ['GET'] : path === '/admin/logout' || path === '/admin/edge/resync' ? ['POST'] : match ? ['GET', 'POST'] : [];
   if (!methods.length) {
     logError('admin.rejected', new HttpError(404, 'Admin page not found.'), context, env);
     return page('Not found', '<p>This admin page does not exist. <a href="/admin">Return to members</a>.</p>', null, 404);
@@ -90,6 +92,10 @@ export async function adminRequest(request, env, context = requestContext(reques
       throw error;
     }
     requireRole(env, guildMember);
+    if (path === '/admin/edge/resync') {
+      await edgeCall(env, 'full');
+      return page('Full resync complete', '<p role="status">The complete authorized fob set was sent to edgeproxy and swipe history was backed up.</p><p><a href="/admin/events?event_type=FobSwipe">View swipes</a></p>', csrf);
+    }
     if (path === '/admin/events') return await history(request, env, csrf);
     if (!match) return await list(request, env, csrf);
     const member = await env.DB.prepare(`SELECT * FROM members WHERE ${match[1].length === 32 ? 'member_id' : 'discord_user_id'} = ?`).bind(match[1]).first();
@@ -99,15 +105,20 @@ export async function adminRequest(request, env, context = requestContext(reques
       try { await coordinated(env, member.member_id, 'updateMetadata', { fields }); }
       catch (error) {
         logError('admin.save_failed', error, context, env);
+        if (edgeEnabled(env)) await edgeCall(env, 'swipes');
         const { events } = await queryEvents(env, { memberID: member.member_id, limit: 10 });
         return editor(member, fields, csrf, env, error instanceof HttpError ? error.message : 'Saving failed. Please try again.', error instanceof HttpError ? error.status : 500, events, await memberWaivers(env, member));
       }
       return redirect(`${memberPath({ ...member, discord_user_id: fields.discord_user_id.trim() })}?saved=1`);
     }
+    if (edgeEnabled(env)) await edgeCall(env, 'swipes');
     const { events } = await queryEvents(env, { memberID: member.member_id, limit: 10 });
     return editor(member, null, csrf, env, url.searchParams.get('saved') === '1' ? 'Member metadata saved.' : '', 200, events, await memberWaivers(env, member));
   } catch (error) {
     logError('admin.failed', error, context, env);
-    return page('Admin access', `<p role="alert">${e(error instanceof HttpError ? error.message : 'Admin is temporarily unavailable. Please try again.')}</p><p><a href="/admin">Return to members</a> · <a href="/admin/login">Sign in again</a></p>`, csrf, error instanceof HttpError ? error.status : 500);
+    if (path === '/admin/edge/resync' && csrf && error.status === 503) {
+      return page('Full resync pending', `<p role="alert">${e(error.message)}</p><form method="post" action="/admin/edge/resync"><input type="hidden" name="csrf" value="${e(csrf)}"><button class="btn btn-primary" type="submit">Retry full resync</button></form><p><a href="/admin">Return to members</a></p>`, csrf, 503);
+    }
+    return page('Admin access', `<p role="alert">${e(error instanceof HttpError ? error.message : 'Admin is temporarily unavailable. Please try again.')}</p><p><a href="${e(path + url.search)}">Retry</a> · <a href="/admin">Return to members</a> · <a href="/admin/login">Sign in again</a></p>`, csrf, error instanceof HttpError ? error.status : 500);
   }
 }

@@ -28,6 +28,50 @@ func pushVersion(t *testing.T, e *edge, version int, fobs string, want int) {
 	}
 }
 
+func TestGoalDiff(t *testing.T) {
+	e := testEdge(t)
+	_, cloud := e.routes()
+	if got := mtlsRequest(cloud, "GET", "/api/goal", "").Code; got != 503 {
+		t.Fatal(got)
+	}
+	pushVersion(t, e, 1, "[7,8]", 204)
+	patch := `{"base_version":1,"version":2,"add":[9],"remove":[7]}`
+	for _, body := range []string{patch, patch} {
+		if w := mtlsRequest(cloud, "PATCH", "/api/goal", body); w.Code != 204 {
+			t.Fatal(w.Code, w.Body.String())
+		}
+	}
+	e = restartEdge(t, e)
+	_, cloud = e.routes()
+	if got := mtlsRequest(cloud, "PATCH", "/api/goal", patch).Code; got != 204 {
+		t.Fatal(got)
+	}
+	for _, tc := range []struct {
+		body   string
+		status int
+	}{
+		{`{"base_version":1,"version":3,"add":[],"remove":[8]}`, 409},
+		{`{"base_version":1,"version":2,"add":[10],"remove":[7]}`, 409},
+		{`{"base_version":2,"version":3,"add":[8],"remove":[8]}`, 400},
+		{`{"base_version":2,"version":3,"add":null,"remove":[]}`, 400},
+	} {
+		if w := mtlsRequest(cloud, "PATCH", "/api/goal", tc.body); w.Code != tc.status {
+			t.Fatal(w.Code, w.Body.String())
+		}
+	}
+	w := mtlsRequest(cloud, "GET", "/api/goal", "")
+	if w.Code != 200 || w.Body.String() != "{\"version\":2,\"fobs\":[8,9]}\n" {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if got := mtlsRequest(cloud, "PATCH", "/api/goal", `{"base_version":2,"version":3,"add":[],"remove":[8,9]}`).Code; got != 204 {
+		t.Fatal(got)
+	}
+	lan, _ := e.routes()
+	if w := request(lan, "POST", "/api/fobs", "[]"); w.Body.String() != "[]\n" {
+		t.Fatal(w.Body.String())
+	}
+}
+
 func readSwipes(t *testing.T, e *edge) []swipe {
 	t.Helper()
 	_, cloud := e.routes()

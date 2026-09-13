@@ -33,6 +33,7 @@ type edge struct {
 	printers   printerSet
 	signingKey ed25519.PrivateKey
 	memberAuth *printerAuth
+	accessAuth *accessAuth
 }
 
 const schema = `
@@ -41,6 +42,7 @@ CREATE TABLE IF NOT EXISTS goal (
   version INTEGER NOT NULL CHECK (version BETWEEN 0 AND 9007199254740991),
   fobs TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS goal_patch (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), patch TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS printer_config (
   singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
   config TEXT NOT NULL

@@ -1,6 +1,6 @@
 # conwayedge
 
-A standalone Go HTTP service for LAN access controllers and Bambu printer status/cameras. The cloud computes authorized fob IDs and pushes a complete versioned snapshot. Edge persists access permissions, printer configuration, and swipes in SQLite; it does no cloud polling or membership business logic.
+A standalone Go HTTP service for LAN access controllers and Bambu printer status/cameras. The cloud computes authorized fob IDs and pushes versioned diffs or complete snapshots. Edge persists access permissions, printer configuration, and swipes in SQLite; it does no cloud polling or membership business logic.
 
 ## Run
 
@@ -13,7 +13,7 @@ go build .
 
 Defaults: `-lan :8080`, `-tunnel 127.0.0.1:8081`, `-data data`. Run one instance per data directory on a local filesystem, as an unprivileged user. New directories use mode 0700 and the database uses 0600. Protect existing directories equivalently: the database contains printer access codes.
 
-Point controllers at the LAN listener. Its configuration page at `/` is unauthenticated and trusts the LAN; saves require the page's CSRF token. Point cloudflared **only** at the tunnel listener, which must bind loopback because it trusts certificate-status headers from local cloudflared. Machine APIs require mTLS; member printer routes validate Worker-issued JWTs using a public key.
+Point controllers at the LAN listener. Its configuration page at `/` is unauthenticated and trusts the LAN; saves require the page's CSRF token. Point cloudflared **only** at the loopback tunnel listener. Machine APIs use Cloudflare Access JWT assertions when configured, otherwise mTLS certificate-status headers from local cloudflared. Member printer routes validate Worker-issued JWTs using a public key.
 
 ### Switching from file-backed edge
 
@@ -26,6 +26,8 @@ Controller firmware keeps its existing protocol and optional signing identity. B
 | Listener | Endpoint | Contract |
 | --- | --- | --- |
 | Tunnel | `PUT /api/goal` | `{"version":123,"fobs":[7,42]}`; 204 after persistence, 409 for older/conflicting versions. |
+| Tunnel | `GET /api/goal` | Current `{"version":123,"fobs":[7,42]}`; 503 before initialization. |
+| Tunnel | `PATCH /api/goal` | `{"base_version":123,"version":124,"add":[8],"remove":[7]}`; atomic version-checked diff. |
 | Tunnel | `GET /api/swipes` | JSON array of all events retained from the last seven days; does not consume them. No pagination parameters. |
 | Tunnel | `GET /machines` | Active-member machines dashboard; status and images refresh every five seconds. |
 | Tunnel | `GET /machines/content` | Protected HTML printer cards used by the dashboard refresh. |
@@ -51,6 +53,14 @@ Send at most 512 nonzero unsigned 32-bit IDs. IDs are sorted and deduplicated. A
 - An older version, or an equal version with different contents, returns 409, including after restart.
 
 The cloud must allocate versions durably and monotonically in snapshot order. Read the current authorized set immediately before pushing and serialize reconciliation so a stale snapshot cannot receive a newer version. There is no freshness expiry: cloud outages retain the last goal indefinitely.
+
+Diffs require `base_version` to match the stored goal and `version` to be a larger
+safe integer. `add` and `remove` are required arrays of at most 512 nonzero uint32
+IDs each; overlap is rejected. Arrays are canonicalized. The resulting set must
+fit the 512-ID capacity. A repeated identical diff at the resulting version returns
+204, including after restart; older, conflicting, or wrong-base diffs return 409.
+Read the goal and reconcile again on a conflict. A diff before initialization
+returns 503; bootstrap with PUT. PUT remains the nightly/manual full-resync API.
 
 ### Swipe delivery and history
 
@@ -97,7 +107,40 @@ Set `CONWAYEDGE_SIGNING_SEED=/secure/path/fob-signing.ed25519` to retain existin
 
 There is no in-memory goal/queue mirror, atomic-file replacement code, or separate recovery state. SQLite handles transaction rollback and crash recovery. Startup validates persisted goal and printer configuration and rejects unreadable/corrupt databases, including noncanonical goal JSON. Goals written through the API are always canonical; controller polls serve those stored bytes directly. Stop edge before copying its data directory for backup, or use SQLite's online backup facility. Do not copy only the database file while it is running: committed data may be in `edge.db-wal`.
 
-## Cloudflare API Shield mTLS setup
+## Cloudflare Access service-token setup
+
+This is the transport used by the membership Worker; it works with Cloudflare
+Tunnel without a separate relay.
+
+1. Create a self-hosted Access application for `edge.example.com/api/*`.
+   Configure only a **Service Auth** policy allowing the dedicated Worker service
+   token. Do not use a human Allow or Bypass policy on this machine application.
+2. Copy the application's **AUD tag** and your team origin. Set on edgeproxy:
+
+   ```sh
+   export CONWAYEDGE_ACCESS_ISSUER=https://your-team.cloudflareaccess.com
+   export CONWAYEDGE_ACCESS_AUDIENCE='<application AUD tag>'
+   ```
+
+   Set both or neither; partial/invalid configuration prevents startup. Restart
+   edgeproxy. Access mode requires `Cf-Access-Jwt-Assertion` on machine requests
+   and does not accept mTLS as a bypass. It verifies RS256 signatures against the
+   team's HTTPS JWKS, issuer, application audience, issuance, not-before, and
+   expiration. Keys are cached for an hour; unknown-key refreshes are rate-limited
+   to once per minute. Raw service-token headers alone do not authorize the origin.
+3. Store the Client ID and Client Secret as `EDGE_ACCESS_CLIENT_ID` and
+   `EDGE_ACCESS_CLIENT_SECRET` Worker secrets, and set `EDGE_URL` to this origin.
+   The Worker sends both headers on every request and rejects redirects.
+4. Remove the old hostname-wide mTLS WAF requirement for `/api/*`, so Access can
+   authenticate the service token. Keep `/machines` and `/machines/*` outside the
+   Access application; those browser routes use the separate member JWT flow.
+   Route the hostname through cloudflared to `http://127.0.0.1:8081`, followed by
+   a catch-all `http_status:404`. Do not expose the LAN listener through the tunnel.
+5. Use **Full resync** in the membership admin UI to bootstrap the goal and verify
+   both API directions. Rotate/renew the service token in Access and update Worker
+   secrets before it expires; edgeproxy only holds public verification settings.
+
+## Cloudflare API Shield mTLS setup (standalone fallback)
 
 1. Create a client certificate under **SSL/TLS → Client Certificates**, retain its private key for the calling client, and enable mTLS for the tunnel's public hostname (for example, `edge.example.com`).
 2. Deploy an API Shield/WAF custom rule with action **Block** for the hostname **except `/machines` and `/machines/*`**, which use member JWTs. Restrict controller API access to the intended client certificate(s), for example:

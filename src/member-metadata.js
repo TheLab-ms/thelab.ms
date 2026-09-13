@@ -19,6 +19,11 @@ export function validateMetadata(input) {
     name_override: text('name_override', 160),
     notes: text('notes', 5000),
   };
+  if (Object.hasOwn(input, 'fob_id')) {
+    const fob = text('fob_id', 10);
+    if (fob && (!/^[1-9]\d{0,9}$/.test(fob) || Number(fob) > 4294967295)) invalid('Enter a fob ID from 1 through 4294967295, or leave blank.');
+    value.fob_id = fob ? Number(fob) : null;
+  }
   if (value.discord_user_id && !discordID.test(value.discord_user_id)) invalid('Enter a valid Discord ID.');
   if (value.stripe_customer_id && !/^cus_[A-Za-z0-9]+$/.test(value.stripe_customer_id)) invalid('Enter a valid Stripe customer ID.');
   if (value.stripe_subscription_id && (!value.stripe_customer_id || !/^sub_[A-Za-z0-9]+$/.test(value.stripe_subscription_id))) invalid('A valid Stripe subscription ID requires a Stripe customer ID.');

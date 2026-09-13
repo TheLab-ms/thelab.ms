@@ -4,6 +4,7 @@ import { discord, stripe, stripeList } from './providers.js';
 import { grantsMembership, isOngoingSubscription, selectCurrentSubscription } from './membership-policy.js';
 import { memberName, validateMetadata } from './member-metadata.js';
 import { logError } from './logging.js';
+import { armEdge, kickEdge } from './edge-sync.js';
 
 // Checkout, admin edits, and queue work share a stable membership instance.
 // A promise chain is needed because external fetches allow DO requests to interleave.
@@ -205,6 +206,11 @@ export class Membership extends DurableObject {
 
   async updateMetadata(member, { fields }) {
     const value = validateMetadata(fields);
+    value.fob_id = Object.hasOwn(value, 'fob_id') ? value.fob_id : member.fob_id;
+    if (value.fob_id !== null) {
+      const duplicate = await this.env.DB.prepare('SELECT member_id FROM members WHERE fob_id = ? AND member_id != ?').bind(value.fob_id, member.member_id).first();
+      if (duplicate) throw new HttpError(409, 'That fob already belongs to another member.');
+    }
     const id = member.discord_user_id;
     if (id && !value.discord_user_id) throw new HttpError(400, 'An existing Discord association must be transferred to a valid account, not cleared.');
     if (member.metadata_version !== value.metadata_version) throw new HttpError(409, 'This member was changed after you opened the form. Reload the member and reapply your edits.');
@@ -274,18 +280,25 @@ export class Membership extends DurableObject {
       // The queued sync uses this same stable lock, so it runs after the save.
       await this.env.MEMBERSHIP_QUEUE.send({ member_id: member.member_id });
     }
-    const result = await this.env.DB.prepare(`UPDATE members SET discord_user_id = ?, discord_username = ?, discord_email = ?,
+    await armEdge(this.env);
+    let result;
+    try { result = await this.env.DB.prepare(`UPDATE members SET discord_user_id = ?, discord_username = ?, discord_email = ?,
       billing_name = ?, billing_email = ?, name_override = ?, notes = ?, bill_annually = ?, discount_type = ?,
-      stripe_customer_id = ?, stripe_subscription_id = ?,
+      stripe_customer_id = ?, stripe_subscription_id = ?, fob_id = ?,
       stripe_subscription_state = ?, stripe_synced_at = ?, discord_last_synced = ?,
       auth_version = auth_version + ?, metadata_version = metadata_version + 1 WHERE member_id = ? AND metadata_version = ? RETURNING member_id`)
       .bind(value.discord_user_id, username, email, billingName, billingEmail, value.name_override, value.notes,
-        value.bill_annually, value.discount_type, value.stripe_customer_id, value.stripe_subscription_id,
+        value.bill_annually, value.discount_type, value.stripe_customer_id, value.stripe_subscription_id, value.fob_id,
         identityChanged ? selected?.status || null : member.stripe_subscription_state,
         identityChanged ? null : member.stripe_synced_at, identityChanged ? null : member.discord_last_synced, discordChanged ? 1 : 0, member.member_id, value.metadata_version).first();
+    } catch (error) {
+      if (String(error).includes('members.fob_id')) throw new HttpError(409, 'That fob already belongs to another member.');
+      throw error;
+    }
     // D1's meta.changes also counts history trigger inserts; RETURNING only
     // reports the member matched by the optimistic-concurrency predicate.
     if (!result) throw new HttpError(409, 'This member was changed. Reload the member and reapply your edits.');
+    await kickEdge(this.env);
   }
 
   stripeURL(value, host) {
@@ -303,9 +316,11 @@ export class Membership extends DurableObject {
     const subscriptions = await this.subscriptions(member);
     const current = selectCurrentSubscription(subscriptions);
     const paid = grantsMembership(current?.status);
+    await armEdge(this.env);
     await this.env.DB.prepare(`UPDATE members SET stripe_subscription_id = ?, stripe_subscription_state = ?, stripe_synced_at = ?,
       billing_name = ?, billing_email = ?, metadata_version = metadata_version + 1 WHERE member_id = ?`)
       .bind(current?.id || null, current?.status || null, now(), billing.name || '', billing.email || '', member.member_id).run();
+    await kickEdge(this.env);
 
     const path = `/guilds/${this.env.DISCORD_GUILD_ID}/members/${id}/roles/${this.env.DISCORD_ROLE_ID}`;
     if (!id) return;

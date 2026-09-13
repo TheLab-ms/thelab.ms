@@ -3,6 +3,7 @@ import { signedInMember, startLogin } from './auth.js';
 import { provider } from './providers.js';
 import { logError } from './logging.js';
 import { waiverContent } from './waiver-content.js';
+import { armEdge, kickEdge } from './edge-sync.js';
 
 // Conway's deliberately small markdown format. All text is escaped at rendering.
 export function parseWaiver(content) {
@@ -95,6 +96,7 @@ export async function waiverRequest(request, env) {
     await verifyHuman(request, env, form.get('cf-turnstile-response'));
     const evidence = [waiver.version, waiver.content, options.name, options.email, JSON.stringify(waiver.agreements)];
     let signed;
+    await armEdge(env);
     if (signup) {
       signed = await env.DB.prepare(`INSERT INTO waivers (version, content, name, email, agreements, member_id)
         SELECT ?, ?, ?, ?, ?, member_id FROM members WHERE member_id = ? AND discord_user_id = ? AND auth_version = ?
@@ -114,6 +116,7 @@ export async function waiverRequest(request, env) {
       signed = results[1].results[0];
     }
     if (!signed) throw new HttpError(409, 'The member association changed or is ambiguous. Please reload or contact leadership.');
+    await kickEdge(env);
     if (signup) return redirect('/payment/resume');
     return publicPage(`<h1>Waiver signed</h1><p role="status">Your waiver has been submitted successfully. You can print this page for your records.</p><p>Signature #${signed.id} · ${e(new Date().toISOString())}</p>${text(waiver)}<ul>${waiver.agreements.map(a => `<li>${e(a)}</li>`).join('')}</ul><p>Signed by ${e(options.name)} · ${e(options.email)}</p><a class="btn btn-primary" href="/">Done</a>`);
   } catch (error) {

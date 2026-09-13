@@ -6,6 +6,7 @@ function eventDetails(event) {
   if (event.event_type === 'MemberRegistered') return 'Membership registered.';
   if (event.event_type === 'NotesUpdated') return 'Internal notes updated.';
   const details = JSON.parse(event.details);
+  if (event.event_type === 'FobSwipe') return `Fob ${details.fob} · ${details.allowed ? 'Allowed' : 'Denied'} · Controller ${details.controller} · ${details.time}`;
   if (event.event_type === 'WaiverSigned') return `Signature #${details.waiver_id}, waiver version ${details.version}.`;
   const value = item => {
     if (item === null) return 'Not set';
@@ -19,7 +20,7 @@ function eventDetails(event) {
 export function eventTable(events, showMember = true) {
   const rows = events.map(event => {
     const timestamp = new Date(event.created * 1000).toISOString().replace('T', ' ').replace('.000Z', ' UTC');
-    const member = event.member_id ? `<a href="${e(memberPath(event))}">${e(memberName(event))}</a>` : 'Deleted member';
+    const member = event.member_id ? `<a href="${e(memberPath(event))}">${e(memberName(event))}</a>` : event.event_type === 'FobSwipe' ? 'Unknown or deleted member' : 'Deleted member';
     return `<tr><td>${e(timestamp)}</td><td>${e(eventTypes[event.event_type] || event.event_type)}</td>${showMember ? `<td>${member}</td>` : ''}<td>${e(eventDetails(event))}</td></tr>`;
   }).join('');
   return `<div class="admin-table" role="region" aria-label="Member history" tabindex="0"><table><thead><tr><th scope="col">Timestamp</th><th scope="col">Event</th>${showMember ? '<th scope="col">Member</th>' : ''}<th scope="col">Details</th></tr></thead><tbody>${rows || `<tr><td colspan="${showMember ? 4 : 3}">No member history found.</td></tr>`}</tbody></table></div>`;

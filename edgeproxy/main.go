@@ -32,6 +32,10 @@ func run() error {
 		return err
 	}
 	defer e.close()
+	e.accessAuth, err = loadAccessAuth(os.Getenv("CONWAYEDGE_ACCESS_ISSUER"), os.Getenv("CONWAYEDGE_ACCESS_AUDIENCE"))
+	if err != nil {
+		return err
+	}
 	e.memberAuth, err = loadPrinterAuth(os.Getenv("CONWAYEDGE_MEMBER_ISSUER"), os.Getenv("CONWAYEDGE_PUBLIC_URL"), os.Getenv("CONWAYEDGE_MEMBER_PUBLIC_KEY"))
 	if err != nil {
 		return err
@@ -102,6 +106,8 @@ func (e *edge) routes() (http.Handler, http.Handler) {
 		e.configure(w, r)
 	})
 	tunnel.HandleFunc("PUT /api/goal", e.goal)
+	tunnel.HandleFunc("GET /api/goal", e.getGoal)
+	tunnel.HandleFunc("PATCH /api/goal", e.patchGoal)
 	tunnel.HandleFunc("GET /api/swipes", e.getSwipes)
 	tunnel.HandleFunc("GET /machines", e.requirePrinterMember(e.printers.dashboard))
 	tunnel.HandleFunc("GET /machines/content", e.requirePrinterMember(e.printers.dashboard))
@@ -118,7 +124,7 @@ func (e *edge) routes() (http.Handler, http.Handler) {
 			w.Header().Set("Referrer-Policy", "no-referrer")
 			w.Header().Set("X-Content-Type-Options", "nosniff")
 			w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
-		} else if !cloudflareMTLSVerified(r.Header) {
+		} else if (e.accessAuth != nil && !e.accessAuth.verify(r)) || (e.accessAuth == nil && !cloudflareMTLSVerified(r.Header)) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}

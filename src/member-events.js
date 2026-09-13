@@ -1,6 +1,8 @@
 import { HttpError } from './http.js';
 
 export const eventTypes = {
+  FobChanged: 'Fob assignment changed',
+  FobSwipe: 'Fob swipe',
   MemberRegistered: 'Member registered',
   WaiverSigned: 'Waiver signed',
   DiscordAccountChanged: 'Discord account changed',

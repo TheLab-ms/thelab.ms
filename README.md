@@ -2,7 +2,8 @@
 
 Static landing/welcome pages and a small Cloudflare Worker. Signup uses Discord
 identity, Stripe subscriptions, D1, one Durable Object per member, and a Cloudflare
-Queue for Discord role reconciliation. There are **no scheduled triggers**.
+Queue for Discord role reconciliation. A nightly scheduled job backs up edge
+swipes and reconciles door-access fobs.
 
 ## Flow
 
@@ -39,7 +40,7 @@ Queue for Discord role reconciliation. There are **no scheduled triggers**.
 The implementation follows `../conway`'s `monthly`/`yearly` Stripe lookup keys,
 coupon `metadata.discountTypes`, OAuth scopes/callback path, billing portal
 behavior and role eligibility. It is a **standalone** membership store: it does
-not update Conway records, waivers or door-access systems. New Stripe customers
+not update Conway records. Door access is managed through this app's edgeproxy integration. New Stripe customers
 and subscriptions carry `metadata.thelab_discord_id` and a stable
 `metadata.thelab_member_id`; existing Conway customers
 are not automatically imported or matched by email.
@@ -192,6 +193,74 @@ npm run deploy
 
 The existing `make dev` and `make deploy` commands still work. Assets are served
 directly; signup, waiver, callback, payment and webhook paths run through the Worker first.
+
+## Door fobs and swipe synchronization
+
+Admins assign one unique optional **Fob ID** on each member's edit form. IDs are
+decimal integers from 1 through 4294967295; blank removes the assignment. A fob
+is authorized only when **Stripe status is exactly `active` AND the member has
+a linked signed waiver**. `trialing` does not qualify for door access. Waiver
+eligibility uses the same linked-signature rule as checkout, not a separate admin
+checkbox. Discord/printer membership eligibility is separate.
+
+Fob changes, Stripe reconciliation, and waiver signatures trigger immediate
+reconciliation. A singleton `EdgeSync` Durable Object serializes fob snapshots
+and versions, reads current D1 eligibility, and sends additions/removals with
+`PATCH /api/goal`. Initial synchronization and full resync use `PUT /api/goal`.
+An empty authorized set explicitly revokes every remotely managed fob. The edge
+limit is 512; exceeding it fails the sync without sending a truncated list.
+
+D1 triggers record access changes atomically using a revision marker. Before
+access-affecting writes, the app arms a durable alarm; it checks pending revisions
+every minute and retries failures. Unchanged revisions do not contact edgeproxy.
+This is a recovery check, not periodic swipe polling. A failed edge call does not
+undo a committed membership change. The last edge goal remains effective until
+delivery succeeds, including during outages. Versions are allocated durably;
+ambiguous deliveries and conflicts recover by reading the edge goal and computing
+a new diff from current D1 state. Keep D1 and Durable Object storage across deploys.
+
+**View fresh fob swipes** on `/admin` opens the swipe filter in member history.
+History pages that include swipes, including member edit previews and pagination,
+await a fresh edge fetch and completed D1 import before rendering. Filters for
+other event types do not fetch swipes. Failed refreshes show a retry error rather
+than silently serving stale history. Swipe imports run independently of fob
+delivery, deduplicate stable edge IDs, and write in transactions of 50 events.
+Responses are bounded to 32 MiB and 20 seconds; a limit or timeout fails the refresh.
+Cloud copies are retained indefinitely. Unknown fobs remain visible; known fobs
+are attributed using assignment intervals at the edge-recorded swipe time, not
+the owner at import time. Keep the edge host's clock synchronized.
+
+At **1 a.m. America/Chicago** each night, the Worker imports swipes and pushes a
+complete authorized fob snapshot. UTC cron candidates at 06:00 and 07:00 are gated
+by local time, with durable per-date completion to suppress the repeated fall-back
+hour. Failed nightly work retries through the alarm. **Full resync** on `/admin`
+performs the same backup and full goal delivery on demand, with live admin-role
+and CSRF checks. It waits and reports completion or a retryable failure. Full resync
+uses the latest stored Stripe state; it does not refetch every subscription from
+Stripe. Nightly backups cannot recover swipes already expired from edge's seven-day
+store; firmware retries can still yield distinct IDs for the same physical swipe.
+
+### Configure Worker → edge access
+
+1. Follow the [edge Cloudflare Access setup](edgeproxy/README.md#cloudflare-access-service-token-setup)
+   to protect the machine API with a **Service Auth** policy for a dedicated token.
+2. Set `EDGE_URL` in `wrangler.jsonc` to the HTTPS tunnel origin, without a trailing
+   slash (for example `https://edge.example.com`). This may equal `PRINTER_EDGE_URL`.
+3. Store the token credentials:
+
+   ```sh
+   npx wrangler secret put EDGE_ACCESS_CLIENT_ID
+   npx wrangler secret put EDGE_ACCESS_CLIENT_SECRET
+   ```
+
+4. Deploy the Worker and edgeproxy, then select **Full resync** and confirm that
+   controller polls return the expected fob set. Keep service-token expiry/rotation
+   settings current in Cloudflare Access.
+
+Leaving `EDGE_URL` empty disables integration. Fob assignments can still be edited,
+but no goals are delivered. For this undeployed app, all new D1 schema and both
+Durable Object classes are in the initial migrations. Recreate old disposable local
+state and run `npm run db:local`; no upgrade migration is provided.
 
 ## Member machines dashboard
 

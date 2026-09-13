@@ -1,0 +1,184 @@
+import { env } from 'cloudflare:workers';
+import { applyD1Migrations, reset, runInDurableObject, runDurableObjectAlarm } from 'cloudflare:test';
+import { beforeEach, afterEach, expect, it, vi } from 'vitest';
+import { edgeCall, nightlyDate } from '../src/edge-sync.js';
+import worker from '../src/index.js';
+import { issueToken } from '../src/auth.js';
+import { hash } from '../src/http.js';
+
+const configured = { ...env, EDGE_URL: 'https://edge.example', EDGE_ACCESS_CLIENT_ID: 'client', EDGE_ACCESS_CLIENT_SECRET: 'secret' };
+const stub = () => env.EDGE_SYNC.get(env.EDGE_SYNC.idFromName('edge'));
+let goal, swipes, writes, fetchSpy;
+beforeEach(async () => {
+  await reset();
+  await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
+  await runInDurableObject(stub(), instance => {
+    instance.env = { ...instance.env, EDGE_URL: 'https://edge.example', EDGE_ACCESS_CLIENT_ID: 'client', EDGE_ACCESS_CLIENT_SECRET: 'secret' };
+  });
+  goal = null; swipes = []; writes = [];
+  fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init = {}) => {
+    if (String(url).startsWith('https://discord.com/')) return Response.json({ roles: [env.DISCORD_ADMIN_ROLE_ID] });
+    expect(init.redirect).toBe('manual');
+    expect(init.headers['CF-Access-Client-Secret']).toBe('secret');
+    if (String(url).endsWith('/api/swipes')) return Response.json(swipes);
+    expect(String(url)).toBe('https://edge.example/api/goal');
+    if (init.method === 'GET') return goal ? Response.json(goal) : new Response(null, { status: 503 });
+    const body = JSON.parse(init.body); writes.push({ method: init.method, ...body });
+    if (init.method === 'PUT') goal = body;
+    else {
+      expect(body.base_version).toBe(goal.version);
+      goal = { version: body.version, fobs: [...goal.fobs.filter(id => !body.remove.includes(id)), ...body.add].sort((a, b) => a - b) };
+    }
+    return new Response(null, { status: 204 });
+  });
+});
+afterEach(() => vi.restoreAllMocks());
+
+async function member(fob = 7, status = 'active', waiver = true) {
+  const row = await env.DB.prepare('INSERT INTO members(fob_id, stripe_subscription_state) VALUES (?, ?) RETURNING *').bind(fob, status).first();
+  if (waiver) await env.DB.prepare(`INSERT INTO waivers(member_id, version, content, name, email, agreements) VALUES (?, 1, 'Terms', 'Maker', 'maker@example.com', '[]')`).bind(row.member_id).run();
+  return row;
+}
+
+it('requires active AND a signed waiver; pushes diffs for changes and empty revocation', async () => {
+  const active = await member();
+  await member(8, 'trialing');
+  const unsigned = await member(9, 'active', false);
+  await edgeCall(configured, 'changes');
+  expect(goal.fobs).toEqual([7]);
+  await edgeCall(configured, 'changes');
+  expect(writes).toHaveLength(1);
+  await env.DB.prepare(`UPDATE members SET stripe_subscription_state = 'past_due' WHERE member_id = ?`).bind(active.member_id).run();
+  await edgeCall(configured, 'changes');
+  expect(writes[1]).toMatchObject({ method: 'PATCH', add: [], remove: [7] });
+  expect(goal.fobs).toEqual([]);
+  await env.DB.prepare(`INSERT INTO waivers(member_id, version, content, name, email, agreements) VALUES (?, 1, 'Terms', 'Maker', 'maker@example.com', '[]')`).bind(unsigned.member_id).run();
+  await edgeCall(configured, 'changes');
+  expect(goal.fobs).toEqual([9]);
+  await expect(env.DB.prepare('UPDATE members SET fob_id = 9 WHERE member_id = ?').bind(active.member_id).run()).rejects.toThrow();
+});
+
+it('recovers ambiguous delivery from edge state and keeps later revisions pending', async () => {
+  const m = await member();
+  await edgeCall(configured, 'changes');
+  await env.DB.prepare('UPDATE members SET fob_id = 10 WHERE member_id = ?').bind(m.member_id).run();
+  const normal = fetchSpy.getMockImplementation();
+  fetchSpy.mockImplementation(async (url, init) => {
+    const response = await normal(url, init);
+    if (init.method === 'PATCH') {
+      await env.DB.prepare('UPDATE members SET fob_id = 11 WHERE member_id = ?').bind(m.member_id).run();
+      throw new Error('Connection lost after commit');
+    }
+    return response;
+  });
+  await expect(edgeCall(configured, 'changes')).rejects.toThrow();
+  expect(goal.fobs).toEqual([10]);
+  fetchSpy.mockImplementation(normal);
+  await runDurableObjectAlarm(stub());
+  expect(goal.fobs).toEqual([11]);
+  expect(goal.version).toBeGreaterThan(writes[1].version);
+});
+
+it('deduplicates swipe backups and uses ownership at swipe time after reassignment', async () => {
+  const first = await member();
+  await env.DB.prepare('UPDATE fob_assignments SET started = 1000 WHERE member_id = ?').bind(first.member_id).run();
+  await env.DB.prepare('UPDATE members SET fob_id = NULL WHERE member_id = ?').bind(first.member_id).run();
+  await env.DB.prepare('UPDATE fob_assignments SET ended = 2000 WHERE member_id = ?').bind(first.member_id).run();
+  const second = await member();
+  await env.DB.prepare('UPDATE fob_assignments SET started = 2000 WHERE member_id = ?').bind(second.member_id).run();
+  swipes = [1500, 2500].map((time, i) => ({ id: `swipe-${i}`, time: new Date(time * 1000).toISOString(), fob: 7, allowed: true, controller: '192.168.1.2' }));
+  swipes.push({ ...swipes[0], id: 'unknown', fob: 99, allowed: false });
+  await edgeCall(configured, 'swipes');
+  await edgeCall(configured, 'swipes');
+  const { results } = await env.DB.prepare('SELECT id, member_id FROM edge_swipes ORDER BY id').all();
+  expect(results).toEqual([{ id: 'swipe-0', member_id: first.member_id }, { id: 'swipe-1', member_id: second.member_id }, { id: 'unknown', member_id: null }]);
+  expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM member_events WHERE event_type = 'FobSwipe'").first()).n).toBe(3);
+});
+
+it('waits for fresh swipes on admin history and reports failed refreshes', async () => {
+  const token = await issueToken(env, '333333333333333333', 'admin');
+  const request = () => new Request(`${env.SITE_URL}/admin/events?event_type=FobSwipe`, { headers: { Cookie: `thelab_admin=${token}` } });
+  let release, started;
+  const gate = new Promise(resolve => { release = resolve; });
+  const entered = new Promise(resolve => { started = resolve; });
+  // Keep the deferred UI boundary in the request context. Real D1 imports and
+  // DO RPC are exercised above; cross-context deferred fetch mocks violate
+  // workerd's stream ownership rules.
+  const execute = vi.fn(async operation => { expect(operation).toBe('swipes'); started(); await gate; return { ok: true }; });
+  const uiEnv = { ...configured, EDGE_SYNC: { idFromName: () => 'edge', get: () => ({ execute }) } };
+  let done = false;
+  const response = worker.fetch(request(), uiEnv).then(async value => { done = true; return value.text(); });
+  await entered; expect(done).toBe(false);
+  swipes = [{ id: 'fresh', fob: 42, allowed: false, controller: '192.168.1.2', time: new Date().toISOString() }];
+  await edgeCall(configured, 'swipes');
+  release();
+  expect(await response).toContain('Fob 42');
+  execute.mockResolvedValue({ ok: false, error: 'Could not refresh swipes from edgeproxy. Reload this page to retry.' });
+  const failed = await worker.fetch(request(), uiEnv);
+  expect(failed.status).toBe(503);
+  expect(await failed.text()).toContain('Could not refresh swipes');
+});
+
+it('protects manual full sync with live admin role and CSRF; sends a full snapshot', async () => {
+  await member();
+  const token = await issueToken(env, '333333333333333333', 'admin');
+  const request = csrf => new Request(`${env.SITE_URL}/admin/edge/resync`, { method: 'POST', headers: {
+    Cookie: `thelab_admin=${token}`, Origin: env.SITE_URL, 'Content-Type': 'application/x-www-form-urlencoded',
+  }, body: new URLSearchParams({ csrf }) });
+  expect((await worker.fetch(request('wrong'), configured)).status).toBe(403);
+  expect(writes).toHaveLength(0);
+  const csrf = await hash(`admin-csrf:${token}`);
+  expect((await worker.fetch(request(csrf), configured)).status).toBe(200);
+  expect(writes[0]).toMatchObject({ method: 'PUT', fobs: [7] });
+  const normal = fetchSpy.getMockImplementation();
+  fetchSpy.mockImplementation((url, init) => String(url).startsWith('https://discord.com/') ? Response.json({ roles: [] }) : normal(url, init));
+  expect((await worker.fetch(request(csrf), configured)).status).toBe(403);
+  expect(writes).toHaveLength(1);
+});
+
+it('backs up nightly once per Central date, including the repeated fall-back hour', async () => {
+  expect(nightlyDate(Date.parse('2026-01-15T07:00:00Z'))).toBe('2026-01-15');
+  expect(nightlyDate(Date.parse('2026-07-15T06:00:00Z'))).toBe('2026-07-15');
+  expect(nightlyDate(Date.parse('2026-07-15T07:00:00Z'))).toBeNull();
+  for (const time of ['2026-11-01T06:00:00Z', '2026-11-01T07:00:00Z']) {
+    expect(nightlyDate(Date.parse(time))).toBe('2026-11-01');
+    await worker.scheduled({ scheduledTime: Date.parse(time) }, configured);
+  }
+  expect(writes).toHaveLength(1);
+  expect(fetchSpy.mock.calls.filter(([url]) => String(url).endsWith('/api/swipes'))).toHaveLength(1);
+});
+
+it('retries partially imported batches without duplicating swipe history', async () => {
+  swipes = Array.from({ length: 101 }, (_, i) => ({ id: `batch-${i}`, time: new Date().toISOString(), controller: '192.168.1.2', fob: 7, allowed: true }));
+  await env.DB.exec(`CREATE TRIGGER fail_swipe BEFORE INSERT ON edge_swipes WHEN NEW.id = 'batch-100' BEGIN SELECT RAISE(ABORT, 'injected failure'); END`);
+  await expect(edgeCall(configured, 'swipes')).rejects.toThrow();
+  expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM edge_swipes').first()).n).toBe(100);
+  await env.DB.exec('DROP TRIGGER fail_swipe');
+  await edgeCall(configured, 'swipes');
+  expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM member_events WHERE event_type = 'FobSwipe'").first()).n).toBe(101);
+});
+
+it('keeps nightly work pending after failure and retries both operations', async () => {
+  await member();
+  const normal = fetchSpy.getMockImplementation();
+  fetchSpy.mockImplementation((url, init) => String(url).endsWith('/api/swipes') ? new Response(null, { status: 502 }) : normal(url, init));
+  await expect(edgeCall(configured, 'nightly', '2026-09-13')).rejects.toThrow();
+  expect(goal.fobs).toEqual([7]);
+  await runInDurableObject(stub(), async (_instance, ctx) => {
+    expect(await ctx.storage.get('nightlyDone')).toBeUndefined();
+    expect(await ctx.storage.get('fullPending')).toEqual({ date: '2026-09-13' });
+  });
+  fetchSpy.mockImplementation(normal);
+  await runDurableObjectAlarm(stub());
+  await runInDurableObject(stub(), async (_instance, ctx) => {
+    expect(await ctx.storage.get('nightlyDone')).toBe('2026-09-13');
+    expect(await ctx.storage.get('fullPending')).toBeUndefined();
+  });
+});
+
+it('rejects malformed swipe payloads before importing any rows', async () => {
+  swipes = [{ id: 'valid', time: new Date().toISOString(), controller: '192.168.1.2', fob: 7, allowed: true },
+    { id: 'invalid', time: 'yesterday', controller: '192.168.1.2', fob: 0, allowed: 'yes' }];
+  await expect(edgeCall(configured, 'swipes')).rejects.toThrow();
+  expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM edge_swipes').first()).n).toBe(0);
+});

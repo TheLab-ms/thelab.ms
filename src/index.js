@@ -8,6 +8,8 @@ import { logError, requestContext } from './logging.js';
 import { printerAccess } from './printers.js';
 import { waiverRequest } from './waiver.js';
 export { Membership } from './membership.js';
+export { EdgeSync } from './edge-sync.js';
+import { edgeCall, edgeEnabled, nightlyDate } from './edge-sync.js';
 
 const events = new Set([
   'customer.updated',
@@ -130,6 +132,10 @@ const routes = new Map([
 ]);
 
 export default {
+  async scheduled(event, env) {
+    const date = nightlyDate(event.scheduledTime);
+    if (date && edgeEnabled(env)) await edgeCall(env, 'nightly', date);
+  },
   async fetch(request, env) {
     const url = new URL(request.url);
     const path = url.pathname;

@@ -32,6 +32,10 @@
 			{
 				"name": "MEMBERS",
 				"class_name": "Membership"
+			},
+			{
+				"name": "EDGE_SYNC",
+				"class_name": "EdgeSync"
 			}
 		]
 	},
@@ -39,10 +43,11 @@
 		{
 			"tag": "v1",
 			"new_sqlite_classes": [
-				"Membership"
+				"Membership", "EdgeSync"
 			]
 		}
 	],
+	"triggers": { "crons": ["0 6,7 * * *"] },
 	"queues": {
 		"producers": [
 			{
@@ -64,6 +69,7 @@
 		"SITE_URL": "https://thelab.ms",
 		"TURNSTILE_SITE_KEY": "",
 		"PRINTER_EDGE_URL": "",
+		"EDGE_URL": "",
 		"DISCORD_GUILD_ID": "690314626289631294",
 		"DISCORD_ROLE_ID": "1252789548073619458",
 		"DISCORD_ADMIN_ROLE_ID": "",
