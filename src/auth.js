@@ -1,5 +1,4 @@
 import { cookie, cookieHeader, discordID, hash, HttpError, now, opaque, origin, randomToken, redirect } from './http.js';
-import { discounts } from './membership-policy.js';
 import { encodeBase64URL as encode, decodeBase64URL as decode, encodeJSON as json } from './encoding.js';
 
 export const TOKEN_AGE = { member: 86400, admin: 8 * 3600, oauth: 600 };
@@ -66,7 +65,7 @@ export async function verifyOAuthState(env, state, browser) {
   const claims = await verifyToken(env, state, 'oauth');
   // The subject binds this handshake to a nonce held only in the browser cookie.
   if (!claims || claims.sub !== await hash(browser) || !['signup', 'admin', 'member'].includes(claims.purpose)
-    || ![0, 1].includes(claims.bill_annually) || !discounts.includes(claims.discount_type)
+    || ![0, 1].includes(claims.bill_annually)
     || typeof claims.return_to !== 'string' || claims.return_to !== loginDestination(claims.return_to, claims.purpose)) return null;
   return claims;
 }
@@ -77,7 +76,7 @@ export async function startLogin(request, env, purpose = 'signup', selection = {
   const url = new URL(request.url), browser = randomToken();
   const destination = loginDestination(url.pathname + url.search, purpose);
   const state = await issueToken(env, await hash(browser), 'oauth', {
-    bill_annually: selection.annual ? 1 : 0, discount_type: selection.discount || '', purpose, return_to: destination,
+    bill_annually: selection.annual ? 1 : 0, purpose, return_to: destination,
   });
   const target = new URL('https://discord.com/oauth2/authorize');
   target.search = new URLSearchParams({ client_id: env.DISCORD_CLIENT_ID, response_type: 'code', scope: 'identify email', redirect_uri: `${origin(env)}/login/discord/callback`, state }).toString();

@@ -1,7 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { hash, HttpError, now, origin, randomToken } from './http.js';
 import { discord, stripe, stripeList } from './providers.js';
-import { discounts, grantsMembership, isOngoingSubscription, selectCurrentSubscription } from './membership-policy.js';
+import { grantsMembership, isOngoingSubscription, selectCurrentSubscription } from './membership-policy.js';
 import { memberName, validateMetadata } from './member-metadata.js';
 import { logError } from './logging.js';
 
@@ -73,7 +73,7 @@ export class Membership extends DurableObject {
       .filter(sub => sub.metadata?.thelab_member_id ? sub.metadata.thelab_member_id === member.member_id : sub.metadata?.thelab_discord_id === member.discord_user_id);
   }
 
-  async checkout(member, { user, annual, discount }) {
+  async checkout(member, { user, annual = Boolean(member.bill_annually) }) {
     const id = user.id;
     member = await this.refreshIdentity(member, user);
     if (member.stripe_customer_id) {
@@ -88,7 +88,7 @@ export class Membership extends DurableObject {
       }
     }
 
-    if (!discounts.includes(discount) || typeof annual !== 'boolean') throw new HttpError(400, 'Invalid membership selection.');
+    if (typeof annual !== 'boolean') throw new HttpError(400, 'Invalid membership selection.');
     // Resolve a previous ambiguous checkout using its ORIGINAL parameters before
     // expiring/replacing it. This also survives a crash before persisting its ID.
     let prior = await this.loadTrackedCheckout();
@@ -107,19 +107,17 @@ export class Membership extends DurableObject {
       }
     }
 
-    const status = discount ? (member.discount_type === discount ? member.discount_status || 'requested' : 'requested') : '';
-    // A changed selection or a revoked approval must invalidate any old payment link.
-    const changed = Boolean(member.bill_annually) !== annual || member.discount_type !== discount || (discount && status !== 'approved');
+    // A changed billing cycle must invalidate any old payment link.
+    const changed = Boolean(member.bill_annually) !== annual;
     if (prior && changed) {
       await this.expireTrackedCheckout(prior.session);
       prior = null;
     }
-    await this.env.DB.prepare('UPDATE members SET bill_annually = ?, discount_type = ?, discount_status = ?, metadata_version = metadata_version + 1 WHERE member_id = ?')
-      .bind(annual ? 1 : 0, discount, status, member.member_id).run();
-    if (status === 'requested') return `${origin(this.env)}/membership-pending`;
-    if (status === 'denied') throw new HttpError(403, 'Your discount request was declined. Contact leadership or select the standard rate to continue.');
+    await this.env.DB.prepare('UPDATE members SET bill_annually = ?, metadata_version = metadata_version + 1 WHERE member_id = ?')
+      .bind(annual ? 1 : 0, member.member_id).run();
 
-    const { price, coupon } = await this.resolvePricing(annual, discount);
+    // Discounts come only from the current admin-managed member record.
+    const { price, coupon } = await this.resolvePricing(annual, member.discount_type);
     member = await this.ensureCustomer(member);
 
     // Stripe locks an existing Customer's email in Checkout. Clear it so the
@@ -162,7 +160,7 @@ export class Membership extends DurableObject {
       coupon = coupons.find(item => item.valid
         && (item.metadata?.discountTypes || '').split(',').some(value => value.trim().toLowerCase() === discount.toLowerCase())
         && (!item.applies_to?.products || item.applies_to.products.includes(product)));
-      if (!coupon) throw new HttpError(503, 'Your approved discount has no valid Stripe coupon. Please contact leadership before paying.');
+      if (!coupon) throw new HttpError(503, 'Your assigned discount has no valid Stripe coupon. Please contact leadership before paying.');
     }
     return { price, coupon };
   }
@@ -233,7 +231,7 @@ export class Membership extends DurableObject {
         if (selected.customer !== value.stripe_customer_id) throw new HttpError(400, 'The Stripe subscription does not belong to this customer.');
       }
     }
-    const pricingChanged = ['bill_annually', 'discount_type', 'discount_status'].some(key => member[key] !== value[key]);
+    const pricingChanged = ['bill_annually', 'discount_type'].some(key => member[key] !== value[key]);
     if (pricingChanged || identityChanged) {
       // Resolve ambiguous creation before expiring the old URL. This shares the
       // checkout lock and durable idempotency record, including its age limit.
@@ -272,11 +270,11 @@ export class Membership extends DurableObject {
     }
     const result = await this.env.DB.prepare(`UPDATE members SET discord_user_id = ?, discord_username = ?, discord_email = ?,
       billing_name = ?, billing_email = ?, name_override = ?, notes = ?, bill_annually = ?, discount_type = ?,
-      discount_status = ?, stripe_customer_id = ?, stripe_subscription_id = ?,
+      stripe_customer_id = ?, stripe_subscription_id = ?,
       stripe_subscription_state = ?, stripe_synced_at = ?, discord_last_synced = ?,
       auth_version = auth_version + ?, metadata_version = metadata_version + 1 WHERE member_id = ? AND metadata_version = ?`)
       .bind(value.discord_user_id, username, email, billingName, billingEmail, value.name_override, value.notes,
-        value.bill_annually, value.discount_type, value.discount_status, value.stripe_customer_id, value.stripe_subscription_id,
+        value.bill_annually, value.discount_type, value.stripe_customer_id, value.stripe_subscription_id,
         identityChanged ? selected?.status || null : member.stripe_subscription_state,
         identityChanged ? null : member.stripe_synced_at, identityChanged ? null : member.discord_last_synced, discordChanged ? 1 : 0, member.member_id, value.metadata_version).run();
     if (result.meta.changes !== 1) throw new HttpError(409, 'This member was changed. Reload the member and reapply your edits.');

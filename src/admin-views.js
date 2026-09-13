@@ -29,7 +29,7 @@ function subscriptionLink(member, env) {
 }
 
 export function memberList(members, { total, current, pages }, env, csrf) {
-	const rows = members.map(m => `<tr><td><a href="/admin/members/${e(m.discord_user_id)}">${e(memberName(m))}</a><small>${e(m.discord_user_id)}</small></td><td>${e(m.discord_email)}</td><td>${e(date(m.created))}</td><td>${m.bill_annually ? 'Yearly' : 'Monthly'}</td><td>${e(labelDiscount(m.discount_type))}<small>${e(m.discount_status)}</small></td><td><strong>${e(subscriptionStatus(m))}</strong><small>Last synced: ${e(date(m.stripe_synced_at))}</small>${subscriptionLink(m, env)}</td></tr>`).join('');
+	const rows = members.map(m => `<tr><td><a href="/admin/members/${e(m.discord_user_id)}">${e(memberName(m))}</a><small>${e(m.discord_user_id)}</small></td><td>${e(m.discord_email)}</td><td>${e(date(m.created))}</td><td>${m.bill_annually ? 'Yearly' : 'Monthly'}</td><td>${e(labelDiscount(m.discount_type))}</td><td><strong>${e(subscriptionStatus(m))}</strong><small>Last synced: ${e(date(m.stripe_synced_at))}</small>${subscriptionLink(m, env)}</td></tr>`).join('');
 	return page('Registered members', `<p>${total} registered member${total === 1 ? '' : 's'}. Includes pending and inactive memberships.</p><div class="admin-table"><table><thead><tr><th scope="col">Member</th><th scope="col">Discord email</th><th scope="col">Registered</th><th scope="col">Saved billing</th><th scope="col">Discount</th><th scope="col">Last-synced subscription</th></tr></thead><tbody>${rows || '<tr><td colspan="6">No members have registered yet.</td></tr>'}</tbody></table></div><nav class="admin-pagination" aria-label="Member pages">${current > 1 ? `<a class="btn btn-outline" href="/admin?page=${current - 1}">Previous</a>` : ''}<span>Page ${current} of ${pages}</span>${current < pages ? `<a class="btn btn-outline" href="/admin?page=${current + 1}">Next</a>` : ''}</nav>`, csrf);
 }
 
@@ -62,8 +62,7 @@ export function editor(member, fields, csrf, env, message = '', status = 200) {
     </fieldset><fieldset class="card admin-section"><legend>Billing metadata</legend><p>These settings apply to future checkout. Existing Stripe subscriptions and invoices are unchanged. Changing pricing settings expires any open checkout link. Use Stripe to manage an existing subscription.</p>
     ${select('billing', 'Saved billing cycle', f.billing, [['monthly', 'Monthly'], ['yearly', 'Yearly']])}
     ${select('discount_type', 'Discount category', f.discount_type, discounts.map(key => [key, labelDiscount(key)]))}
-    ${select('discount_status', 'Discount status', f.discount_status, [['', 'None (standard rate)'], ['requested', 'Requested'], ['approved', 'Approved'], ['denied', 'Denied']])}
-    <p class="signup-help">Choose “None” for standard rate, or a request status for a discount category. The member can resume their saved selection at <a href="/payment/resume">/payment/resume</a>; choosing a different selection at signup replaces it.</p>
+    <p class="signup-help">Choose “Standard rate” or assign a discount category. Stripe Checkout automatically applies the assigned discount; members cannot change it. The member can continue at <a href="/payment/resume">/payment/resume</a>.</p>
     </fieldset><fieldset class="card admin-section"><legend>Internal metadata</legend>
     <label for="notes">Notes</label><textarea id="notes" name="notes" maxlength="5000" rows="6">${e(f.notes)}</textarea>
     </fieldset><div class="admin-actions"><button class="btn btn-primary" type="submit">Save changes</button><a href="/admin/members/${e(member.discord_user_id)}">Reload member</a><a href="/admin">Back to members</a></div></form>`, csrf, status);

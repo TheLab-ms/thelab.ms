@@ -64,7 +64,7 @@ export async function boundedText(message, limit = 1024 * 1024) {
   const chunks = [];
   let size = 0;
   try {
-    for (;;) {
+    for (; ;) {
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;

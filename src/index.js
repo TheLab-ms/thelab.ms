@@ -1,6 +1,6 @@
 import { boundedText, cookie, errorPage, HttpError, json, origin, redirect } from './http.js';
 import { discord, discordIdentity, stripe, verifyStripe } from './providers.js';
-import { discounts, grantsMembership } from './membership-policy.js';
+import { grantsMembership } from './membership-policy.js';
 import { finishLogin, loginDestination, memberToken, signedInMember, startLogin, verifyOAuthState } from './auth.js';
 import { coordinated, registerMember } from './membership.js';
 import { adminConfigured, adminRequest, finishAdminLogin } from './admin.js';
@@ -25,9 +25,8 @@ async function signup(request, env, admin = false) {
   if (admin) adminConfigured(env);
   const url = new URL(request.url);
   const frequency = url.searchParams.get('billing') || 'monthly';
-  const discount = url.searchParams.get('discount') || '';
-  if (!['monthly', 'yearly'].includes(frequency) || !discounts.includes(discount) || url.searchParams.getAll('billing').length > 1 || url.searchParams.getAll('discount').length > 1) throw new HttpError(400, 'Invalid membership selection.');
-  return startLogin(request, env, admin ? 'admin' : 'signup', { annual: frequency === 'yearly', discount });
+  if (!['monthly', 'yearly'].includes(frequency) || url.searchParams.getAll('billing').length > 1) throw new HttpError(400, 'Invalid membership selection.');
+  return startLogin(request, env, admin ? 'admin' : 'signup', { annual: frequency === 'yearly' });
 }
 
 async function resume(request, env) {
@@ -35,7 +34,6 @@ async function resume(request, env) {
   if (!member) return startLogin(request, env, 'member');
   const result = await coordinated(env, member.member_id, 'checkout', {
     user: { id: member.discord_user_id, username: member.discord_username, email: member.discord_email },
-    annual: Boolean(member.bill_annually), discount: member.discount_type,
   });
   return redirect(result.url);
 }
@@ -66,7 +64,7 @@ async function callback(request, env) {
   }
   configured(env);
   const registered = await registerMember(env, user);
-  const result = await coordinated(env, registered.member_id, 'checkout', { user, annual: Boolean(pending.bill_annually), discount: pending.discount_type });
+  const result = await coordinated(env, registered.member_id, 'checkout', { user, annual: Boolean(pending.bill_annually) });
   return finishLogin(env, result.url, 'member', await memberToken(env, registered));
 }
 

@@ -28,7 +28,7 @@ async function list(request, env, csrf) {
   const current = Number(raw);
   const [count, members] = await env.DB.batch([
     env.DB.prepare('SELECT COUNT(*) AS total FROM members'),
-    env.DB.prepare(`SELECT discord_user_id, discord_username, discord_email, created, bill_annually, discount_type, discount_status,
+    env.DB.prepare(`SELECT discord_user_id, discord_username, discord_email, created, bill_annually, discount_type,
       name_override, billing_name, stripe_subscription_id, stripe_subscription_state, stripe_synced_at FROM members ORDER BY created DESC, discord_user_id DESC LIMIT ? OFFSET ?`).bind(PAGE_SIZE, (current - 1) * PAGE_SIZE),
   ]);
   const total = count.results[0].total, pages = Math.max(1, Math.ceil(total / PAGE_SIZE));

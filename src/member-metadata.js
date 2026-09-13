@@ -22,9 +22,8 @@ export function validateMetadata(input) {
   if (value.stripe_customer_id && !/^cus_[A-Za-z0-9]+$/.test(value.stripe_customer_id)) invalid('Enter a valid Stripe customer ID.');
   if (value.stripe_subscription_id && (!value.stripe_customer_id || !/^sub_[A-Za-z0-9]+$/.test(value.stripe_subscription_id))) invalid('A valid Stripe subscription ID requires a Stripe customer ID.');
   if (!['monthly', 'yearly'].includes(input.billing)) invalid('Choose monthly or yearly billing.');
-  if (!discounts.includes(input.discount_type) || !['', 'requested', 'approved', 'denied'].includes(input.discount_status)
-    || Boolean(input.discount_type) !== Boolean(input.discount_status)) invalid('Standard rate requires no discount status; a discount category requires requested, approved, or denied status.');
+  if (!discounts.includes(input.discount_type)) invalid('Choose standard rate or a valid discount category.');
   if (!/^(0|[1-9]\d{0,14})$/.test(input.metadata_version || '')) invalid('Invalid member version. Reload the member before saving.');
   return { ...value, bill_annually: input.billing === 'yearly' ? 1 : 0, discount_type: input.discount_type,
-    discount_status: input.discount_status, metadata_version: Number(input.metadata_version) };
+    metadata_version: Number(input.metadata_version) };
 }

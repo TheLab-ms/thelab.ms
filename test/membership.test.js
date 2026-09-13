@@ -47,7 +47,7 @@ const readMember = () => env.DB.prepare('SELECT * FROM members WHERE discord_use
 const memberStub = async () => env.MEMBERS.get(env.MEMBERS.idFromName((await readMember()).member_id));
 const checkout = async (input = {}) => {
   const member = await registerMember(env, user);
-  return coordinated(env, member.member_id, 'checkout', { user, annual: false, discount: '', ...input });
+  return coordinated(env, member.member_id, 'checkout', { user, annual: false, ...input });
 };
 const subscription = (status = 'active', subID = 'sub_member') => ({ id: subID, customer, status, created: now(), metadata: { thelab_discord_id: id } });
 
@@ -162,7 +162,7 @@ describe('JWT authentication', () => {
   });
 
   it.each(['/admin/members/333333333333333333', '/admin?page=2', '/payment/resume', '/payment/success?session_id=cs_member'])('enters OAuth directly and restores %s', async path => {
-    await seed({ bill_annually: 1, discount_type: 'student', discount_status: 'approved', discord_email: '' });
+    await seed({ bill_annually: 1, discount_type: 'student', discord_email: '' });
     const admin = path.startsWith('/admin');
     const response = await api(path);
     expect(response.status).toBe(303);
@@ -179,7 +179,7 @@ describe('JWT authentication', () => {
     expect(cookies).toContain('thelab_oauth=;');
     const token = cookies.match(new RegExp(`thelab_${admin ? 'admin' : 'member'}=([^;]+)`))[1];
     expect(await verifyToken(env, token, admin ? 'admin' : 'member')).toMatchObject({ sub: id });
-    expect(await readMember()).toMatchObject({ bill_annually: 1, discount_type: 'student', discount_status: 'approved' });
+    expect(await readMember()).toMatchObject({ bill_annually: 1, discount_type: 'student' });
     expect((await readMember()).discord_email).toBe(admin ? '' : user.email);
   });
 
@@ -192,21 +192,30 @@ describe('JWT authentication', () => {
 });
 
 describe('Discord signup', () => {
-  it('uses identify/email and binds signed pricing choices to the browser cookie', async () => {
+  it('binds billing to the browser cookie and ignores signup and callback discount inputs', async () => {
     const { target, state, cookie } = await start('?billing=yearly&discount=student');
     expect(target.origin).toBe('https://discord.com');
     expect(target.searchParams.get('scope')).toBe('identify email');
     expect(target.searchParams.get('redirect_uri')).toBe(`${env.SITE_URL}/login/discord/callback`);
     const claims = await verifyToken(env, state, 'oauth');
-    expect(claims).toMatchObject({ sub: await hash(cookie.split('=')[1]), purpose: 'signup', bill_annually: 1, discount_type: 'student', return_to: '/payment/resume' });
+    expect(claims).toMatchObject({ sub: await hash(cookie.split('=')[1]), purpose: 'signup', bill_annually: 1, return_to: '/payment/resume' });
+    expect(claims).not.toHaveProperty('discount_type');
     expect(claims.exp - claims.iat).toBe(600);
     expect((await api(`/login/discord/callback?code=hello&state=${state}`)).status).toBe(400);
     oauthMock();
+    mockPrice(true); mockCheckoutEmail();
+    mockStripe('/customers', { id: customer }, { method: 'POST' });
+    mockStripe('/checkout/sessions', options => {
+      const form = new URLSearchParams(options.body);
+      expect(form.get('line_items[0][price]')).toBe('price_yearly');
+      expect(form.has('discounts[0][coupon]')).toBe(false);
+      return { id: 'cs_signup', url: 'https://checkout.stripe.com/c/pay/signup' };
+    }, { method: 'POST' });
     const response = await api(`/login/discord/callback?code=hello&state=${state}&discount=`, { headers: { Cookie: cookie } });
     expect(response.status).toBe(303);
-    expect(response.headers.get('Location')).toBe(`${env.SITE_URL}/membership-pending`);
+    expect(response.headers.get('Location')).toBe('https://checkout.stripe.com/c/pay/signup');
     expect(response.headers.get('Set-Cookie')).toContain('HttpOnly; SameSite=Lax');
-    expect(await readMember()).toMatchObject({ bill_annually: 1, discount_type: 'student', discount_status: 'requested', stripe_customer_id: null });
+    expect(await readMember()).toMatchObject({ bill_annually: 1, discount_type: '', stripe_customer_id: customer });
     expect(response.headers.get('Set-Cookie')).toContain('thelab_oauth=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
     expect((await api(`/login/discord/callback?code=hello&state=${state}`, { headers: { Cookie: 'thelab_oauth=' } })).status).toBe(400);
     // A copied cookie/state pair remains valid, but Discord rejects a reused code.
@@ -245,7 +254,7 @@ describe('Discord signup', () => {
 
   it.each([
     { purpose: 'unknown' }, { purpose: null }, { bill_annually: '1' }, { bill_annually: 2 },
-    { discount_type: 'free' }, { discount_type: null }, { return_to: 'https://other.example' },
+    { return_to: 'https://other.example' },
     { return_to: null }, { purpose: 'admin', return_to: '/payment/resume' },
   ])('rejects invalid signed OAuth claims: %j', async invalid => {
     const { state, cookie } = await start();
@@ -303,13 +312,34 @@ describe('Discord signup', () => {
     expect(await readMember()).toMatchObject({ stripe_customer_id: customer, discord_email: user.email, billing_email: '' });
   });
 
-  it('resumes the saved approved selection instead of resetting it to full price', async () => {
-    await seed({ bill_annually: 1, discount_type: 'family', discount_status: 'approved' });
+  it.each(['signup', 'resume'])('uses the latest admin discount during %s despite user-supplied discount parameters', async flow => {
+    await seed({ discount_type: 'family', bill_annually: 1 });
+    const login = flow === 'signup' ? await start('?billing=yearly&discount=student') : null;
+    // An admin edit during OAuth must take effect at checkout.
+    await env.DB.prepare("UPDATE members SET discount_type = 'retired' WHERE discord_user_id = ?").bind(id).run();
+    if (login) oauthMock();
+    mockSubs(); mockPrice(true); mockCheckoutEmail();
+    mockStripe(/^\/v1\/coupons\?/, { data: [{ id: 'coupon_retired', valid: true, metadata: { discountTypes: 'retired' } }], has_more: false });
+    mockStripe('/checkout/sessions', options => {
+      const form = new URLSearchParams(options.body);
+      expect(form.get('discounts[0][coupon]')).toBe('coupon_retired');
+      expect(form.get('line_items[0][price]')).toBe('price_yearly');
+      return { id: 'cs_current', url: 'https://checkout.stripe.com/c/pay/current' };
+    }, { method: 'POST' });
+    const response = login
+      ? await api(`/login/discord/callback?state=${login.state}&code=test&discount=student`, { headers: { Cookie: login.cookie } })
+      : await api('/payment/resume?discount=student', { headers: { Cookie: await loginCookie() } });
+    expect(response.headers.get('Location')).toBe('https://checkout.stripe.com/c/pay/current');
+    expect(await readMember()).toMatchObject({ bill_annually: 1, discount_type: 'retired' });
+  });
+
+  it('resumes the saved selection instead of resetting it to full price', async () => {
+    await seed({ bill_annually: 1, discount_type: 'family' });
     mockSubs([subscription()]);
     mockStripe('/billing_portal/sessions', { url: 'https://billing.stripe.com/p/session/resume' }, { method: 'POST' });
     const response = await api('/payment/resume', { headers: { Cookie: await loginCookie() } });
     expect(response.headers.get('Location')).toBe('https://billing.stripe.com/p/session/resume');
-    expect(await readMember()).toMatchObject({ bill_annually: 1, discount_type: 'family', discount_status: 'approved' });
+    expect(await readMember()).toMatchObject({ bill_annually: 1, discount_type: 'family' });
   });
 });
 
@@ -319,7 +349,7 @@ describe('member administration', () => {
   const role = (roles = [env.DISCORD_ADMIN_ROLE_ID]) => mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}`, { roles });
   const fields = (extra = {}) => ({ discord_user_id: id, stripe_customer_id: customer, stripe_subscription_id: '', name_override: 'Maker Name',
     notes: 'Orientation complete', billing: 'yearly',
-    discount_type: 'student', discount_status: 'approved', metadata_version: '0', ...extra });
+    discount_type: 'student', metadata_version: '0', ...extra });
   async function authenticate() {
     token = await issueToken(env, id, 'admin');
     cookie = `thelab_admin=${token}`;
@@ -418,7 +448,7 @@ describe('member administration', () => {
       discord_username: 'forged', discord_email: 'forged@example.com', billing_name: 'forged', billing_email: 'forged@example.com' }));
     expect(result.status).toBe(303);
     expect(await readMember()).toMatchObject({ discord_username: user.username, discord_email: user.email, name_override: 'Maker Name', billing_name: '', billing_email: '',
-      bill_annually: 1, discount_type: 'student', discount_status: 'approved', metadata_version: 1,
+      bill_annually: 1, discount_type: 'student', metadata_version: 1,
       stripe_customer_id: customer, stripe_subscription_state: 'active', stripe_subscription_id: 'sub_member' });
     role();
     const view = await api(`/admin/members/${id}?saved=1`, { headers: { Cookie: cookie } });
@@ -428,6 +458,7 @@ describe('member administration', () => {
     expect(html).not.toContain('<script>');
     expect(html).not.toContain('custom_metadata');
     expect(html).not.toContain('contact_name');
+    expect(html).not.toContain('discount_status');
     for (const name of ['discord_username', 'discord_email', 'billing_name', 'billing_email']) {
       expect(html).toMatch(new RegExp(`<input id="${name}"[^>]+ readonly>`));
     }
@@ -449,7 +480,7 @@ describe('member administration', () => {
     expect((await save(fields(), { Origin: 'https://elsewhere.example' })).status).toBe(403);
     expect((await save({ ...fields(), csrf: 'wrong' })).status).toBe(403);
     expect((await save(fields(), { 'Content-Type': 'application/json' })).status).toBe(415);
-    for (const invalid of [{ discount_status: '' }, { billing: 'weekly' }, { discord_user_id: 'invalid' }, { stripe_customer_id: 'bad' },
+    for (const invalid of [{ discount_type: 'free' }, { billing: 'weekly' }, { discord_user_id: 'invalid' }, { stripe_customer_id: 'bad' },
       { stripe_subscription_id: 'bad' }, { stripe_customer_id: '', stripe_subscription_id: 'sub_member' }, { name_override: 'x'.repeat(161) }, { notes: 'x'.repeat(5001) }]) {
       role();
       expect((await save(fields(invalid))).status).toBe(400);
@@ -581,12 +612,12 @@ describe('member administration', () => {
     mockSubs();
     mockStripe(`/customers/${customer}`, {}, { method: 'POST' });
     mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, {}, 'DELETE', 204);
-    expect((await save(fields({ discord_user_id: replacement, billing: 'monthly', discount_type: '', discount_status: '',
+    expect((await save(fields({ discord_user_id: replacement, billing: 'monthly', discount_type: '',
       metadata_version: String(member.metadata_version) }))).status).toBe(303);
     mockSubs([{ ...subscription(), metadata: { thelab_member_id: member.member_id } }]);
     mockStripe('/billing_portal/sessions', { url: 'https://billing.stripe.com/p/session/transferred' }, { method: 'POST' });
     const result = await coordinated(env, member.member_id, 'checkout', {
-      user: { id: replacement, username: 'new-maker', email: 'new@example.com' }, annual: false, discount: '',
+      user: { id: replacement, username: 'new-maker', email: 'new@example.com' }, annual: false,
     });
     expect(result.url).toContain('billing.stripe.com');
     expect(await env.DB.prepare('SELECT discord_email, member_id FROM members WHERE discord_user_id = ?').bind(replacement).first())
@@ -623,13 +654,34 @@ describe('member administration', () => {
     await runInDurableObject(stub, async (_instance, state) => { expect(await state.storage.get('checkout')).toBeUndefined(); });
   });
 
+  it.each(['student', ''])('expires checkout when an admin changes only the discount to %j', async discount => {
+    await seed({ discount_type: discount ? '' : 'student' }); await authenticate();
+    mockSubs(); mockPrice(); mockCheckoutEmail();
+    if (!discount) mockStripe(/^\/v1\/coupons\?/, { data: [{ id: 'coupon_student', valid: true, metadata: { discountTypes: 'student' } }], has_more: false });
+    mockStripe('/checkout/sessions', { id: 'cs_before', url: 'https://checkout.stripe.com/c/pay/before' }, { method: 'POST' });
+    await checkout();
+    role();
+    mockStripe('/checkout/sessions/cs_before', { id: 'cs_before', status: 'open' });
+    mockStripe('/checkout/sessions/cs_before/expire', { status: 'expired' }, { method: 'POST' });
+    expect((await save(fields({ billing: 'monthly', discount_type: discount, metadata_version: String((await readMember()).metadata_version) }))).status).toBe(303);
+    expect((await readMember()).discount_type).toBe(discount);
+    mockSubs(); mockPrice(); mockCheckoutEmail();
+    if (discount) mockStripe(/^\/v1\/coupons\?/, { data: [{ id: 'coupon_student', valid: true, metadata: { discountTypes: 'student' } }], has_more: false });
+    mockStripe('/checkout/sessions', options => {
+      expect(new URLSearchParams(options.body).get('discounts[0][coupon]')).toBe(discount ? 'coupon_student' : null);
+      return { id: 'cs_after', url: 'https://checkout.stripe.com/c/pay/after' };
+    }, { method: 'POST' });
+    expect((await checkout()).url).toContain('/after');
+  });
+
   it('invalidates stale admin forms on member sign-in and preserves the name override', async () => {
     await seed({ name_override: 'Admin name', notes: 'Keep me' }); await authenticate();
-    mockSubs();
-    await checkout({ discount: 'student' });
+    mockSubs(); mockPrice(); mockCheckoutEmail();
+    mockStripe('/checkout/sessions', { id: 'cs_profile', url: 'https://checkout.stripe.com/c/pay/profile' }, { method: 'POST' });
+    await checkout();
     role();
     expect((await save()).status).toBe(409);
-    expect(await readMember()).toMatchObject({ name_override: 'Admin name', notes: 'Keep me', discount_status: 'requested' });
+    expect(await readMember()).toMatchObject({ name_override: 'Admin name', notes: 'Keep me', discount_type: '' });
   });
 
   it('serializes a login profile refresh with a competing stale admin save', async () => {
@@ -652,7 +704,7 @@ describe('member administration', () => {
     const replacement = '555555555555555555';
     await env.DB.prepare('UPDATE members SET discord_user_id = ?, auth_version = auth_version + 1 WHERE member_id = ?')
       .bind(replacement, member.member_id).run();
-    await expect(coordinated(env, member.member_id, operation, { user, annual: false, discount: '' }))
+    await expect(coordinated(env, member.member_id, operation, { user, annual: false }))
       .rejects.toMatchObject({ status: 409 });
     expect(globalThis.fetch).not.toHaveBeenCalled();
     expect(await env.DB.prepare('SELECT discord_user_id, metadata_version FROM members WHERE member_id = ?').bind(member.member_id).first())
@@ -669,7 +721,7 @@ describe('member administration', () => {
     expect((await save(fields({ metadata_version: String((await readMember()).metadata_version) }))).status).toBe(303);
     mockSubs().times(2);
     mockStripe('/checkout/sessions/cs_complete', { id: 'cs_complete', status: 'complete', subscription: 'sub_member' });
-    await expect(checkout({ annual: true, discount: 'student' })).rejects.toThrow('previous checkout is being processed');
+    await expect(checkout({ annual: true })).rejects.toThrow('previous checkout is being processed');
     expect((await readMember()).bill_annually).toBe(1);
   });
 
@@ -729,10 +781,10 @@ describe('billing safeguards', () => {
     await expect(checkout()).rejects.toThrow('price is not configured');
   });
 
-  it('uses Conway coupon metadata for manually approved annual discounts', async () => {
-    await seed({ discount_type: 'student', discount_status: 'approved' });
+  it.each([false, true])('automatically applies the admin discount for annual=%s', async annual => {
+    await seed({ discount_type: 'student' });
     mockSubs();
-    mockPrice(true);
+    mockPrice(annual);
     mockCheckoutEmail();
     mockStripe(/^\/v1\/coupons\?/, { data: [{ id: 'coupon_student', valid: true, metadata: { discountTypes: 'Military, STUDENT' } }], has_more: false });
     let form;
@@ -740,33 +792,41 @@ describe('billing safeguards', () => {
       form = new URLSearchParams(options.body);
       return { id: 'cs_discount', url: 'https://checkout.stripe.com/c/pay/discount' };
     });
-    expect((await checkout({ annual: true, discount: 'student' })).url).toContain('checkout.stripe.com');
+    expect((await checkout({ annual })).url).toContain('checkout.stripe.com');
     expect(form.get('discounts[0][coupon]')).toBe('coupon_student');
-    expect(form.get('line_items[0][price]')).toBe('price_yearly');
+    expect(form.get('line_items[0][price]')).toBe(annual ? 'price_yearly' : 'price_monthly');
+    expect(form.has('allow_promotion_codes')).toBe(false);
+    expect((await readMember()).discount_type).toBe('student');
   });
 
-  it('does not charge full price when an approved coupon is missing', async () => {
-    await seed({ discount_type: 'family', discount_status: 'approved' });
+  it('does not charge full price when an assigned coupon is missing', async () => {
+    await seed({ discount_type: 'family' });
     mockSubs(); mockPrice();
     mockStripe(/^\/v1\/coupons\?/, { data: [], has_more: false });
-    await expect(checkout({ discount: 'family' })).rejects.toThrow('no valid Stripe coupon');
+    await expect(checkout()).rejects.toThrow('no valid Stripe coupon');
   });
 
-  it('does not allow a new category to inherit an old discount approval', async () => {
-    await seed({ discount_type: 'student', discount_status: 'approved' });
-    mockSubs();
-    expect((await checkout({ discount: 'family' })).url).toContain('membership-pending');
-    expect(await readMember()).toMatchObject({ discount_type: 'family', discount_status: 'requested' });
-  });
-
-  it('preserves a declined request and permits an explicit standard-rate choice', async () => {
-    await seed({ discount_type: 'student', discount_status: 'denied' });
-    mockSubs();
-    await expect(checkout({ discount: 'student' })).rejects.toThrow('declined');
+  it.each(['', 'family', 'free'])('ignores user-supplied discount %j and preserves the admin category', async discount => {
+    await seed({ discount_type: 'student' });
     mockSubs(); mockPrice(); mockCheckoutEmail();
-    mockStripe('/checkout/sessions', { id: 'cs_standard', url: 'https://checkout.stripe.com/c/pay/standard' }, { method: 'POST' });
-    await checkout();
-    expect(await readMember()).toMatchObject({ discount_type: '', discount_status: '' });
+    mockStripe(/^\/v1\/coupons\?/, { data: [{ id: 'coupon_student', valid: true, metadata: { discountTypes: 'student' } }], has_more: false });
+    mockStripe('/checkout/sessions', options => {
+      expect(new URLSearchParams(options.body).get('discounts[0][coupon]')).toBe('coupon_student');
+      return { id: 'cs_assigned', url: 'https://checkout.stripe.com/c/pay/assigned' };
+    }, { method: 'POST' });
+    expect((await checkout({ discount })).url).toContain('checkout.stripe.com');
+    expect((await readMember()).discount_type).toBe('student');
+  });
+
+  it('cannot assign a discount to a standard-rate member through checkout input', async () => {
+    await seed();
+    mockSubs(); mockPrice(); mockCheckoutEmail();
+    mockStripe('/checkout/sessions', options => {
+      expect(new URLSearchParams(options.body).has('discounts[0][coupon]')).toBe(false);
+      return { id: 'cs_standard', url: 'https://checkout.stripe.com/c/pay/standard' };
+    }, { method: 'POST' });
+    await checkout({ discount: 'student', discount_type: 'student' });
+    expect((await readMember()).discount_type).toBe('');
   });
 
   it('serializes concurrent checkout requests and reuses the open session', async () => {
@@ -810,14 +870,16 @@ describe('billing safeguards', () => {
     await expect(checkout()).rejects.toThrow('needs review');
   });
 
-  it('expires a previous payment link before accepting a pending discount', async () => {
+  it('expires a previous payment link before changing billing frequency', async () => {
     await seed(); mockSubs(); mockPrice(); mockCheckoutEmail();
     mockStripe('/checkout/sessions', { id: 'cs_old', url: 'https://checkout.stripe.com/c/pay/old' }, { method: 'POST' });
     await checkout();
     mockSubs();
     mockStripe('/checkout/sessions/cs_old', { id: 'cs_old', status: 'open' });
     mockStripe('/checkout/sessions/cs_old/expire', { id: 'cs_old', status: 'expired' }, { method: 'POST' });
-    expect((await checkout({ discount: 'student' })).url).toContain('membership-pending');
+    mockPrice(true); mockCheckoutEmail();
+    mockStripe('/checkout/sessions', { id: 'cs_yearly', url: 'https://checkout.stripe.com/c/pay/yearly' }, { method: 'POST' });
+    expect((await checkout({ annual: true })).url).toContain('/yearly');
   });
 
   it('does not issue a second checkout if payment wins a race against session expiry', async () => {
@@ -1062,8 +1124,8 @@ describe('deployed asset routing', () => {
     expect((await SELF.fetch(`${env.SITE_URL}/admin.css`)).status).toBe(200);
   });
 
-  it('serves static welcome/pending pages and routes signup navigation through the Worker', async () => {
-    for (const path of ['/welcome', '/membership-pending']) {
+  it('serves the static welcome page and routes signup navigation through the Worker', async () => {
+    for (const path of ['/welcome']) {
       const response = await SELF.fetch(`${env.SITE_URL}${path}`);
       expect(response.status).toBe(200);
       expect(await response.text()).toContain('/membership.css');

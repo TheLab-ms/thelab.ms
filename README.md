@@ -6,7 +6,7 @@ Queue for Discord role reconciliation. There are **no scheduled triggers**.
 
 ## Flow
 
-1. Choose monthly/yearly and a rate on the landing page. `/signup` redirects to
+1. Choose monthly/yearly billing on the landing page. `/signup` redirects to
    Discord with `identify email` and browser-bound, expiring JWT state.
 2. `/login/discord/callback` requires a verified email and existing membership in
     TheLab's Discord guild. Accounts are linked by Discord ID, never
@@ -21,8 +21,8 @@ Queue for Discord role reconciliation. There are **no scheduled triggers**.
    Discord and clears the cookie on success or failure. State is stateless: a copied
    JWT and its original cookie remain valid until expiry; Discord authorization
    codes are single-use.
-3. Standard or approved-discount members go straight to Stripe Checkout. A
-   discount request goes to `/membership-pending` until leadership approves it.
+3. Members go straight to Stripe Checkout, which shows the final price with any
+   admin-assigned discount applied automatically. Members cannot select or change discounts.
    Existing subscriptions, including past-due ones, go to Stripe Billing Portal.
 4. `/payment/success` checks the signed-in user's Checkout ownership, completion,
    payment status, and subscription status against Stripe, then redirects to the
@@ -168,7 +168,7 @@ HttpOnly cookie on the edge host. Edge verifies every dashboard/image request.
 Automatic renewal rechecks D1; membership changes take effect within five minutes
 after Stripe webhook/queue reconciliation updates the database.
 
-## Member administration and discount approval
+## Member administration and discounts
 
 Set `DISCORD_ADMIN_ROLE_ID` in `wrangler.jsonc` (or `.dev.vars` locally) to the
 numeric Discord role ID that grants leadership/admin access. Open **`/admin`**
@@ -190,7 +190,7 @@ registration and sync timestamps, and last-synced subscription status, and edit:
   Stripe billing name → Discord username** (the first nonblank value).
 - Discord ID and Stripe customer/subscription IDs. The subscription must belong
   to the customer; accounts/customers already linked to another member are rejected.
-- Saved monthly/yearly billing cycle, discount category, and approval status.
+- Saved monthly/yearly billing cycle and assigned discount category.
 
 Discord username/email and Stripe billing name/email are read-only. Discord sign-in
 refreshes the Discord fields; Stripe reconciliation refreshes billing details from
@@ -208,17 +208,15 @@ Automatic subscription selection remains enabled: a manually entered subscriptio
 ID may be replaced by the next sync, which prefers active/trialing subscriptions,
 then ongoing subscriptions, then the most recently created canceled subscription.
 
-For a discount request, verify the member's numeric Discord ID and eligibility,
-then select **Approved** or **Denied** for the requested category and save. Use
-**None** with the standard rate. Family eligibility remains leadership's judgment.
-Requests do not send automated notifications, so check the list regularly.
+To assign a discount, verify the member's numeric Discord ID and eligibility,
+select the discount category, and save. Choose **Standard rate** to remove a
+discount. Family eligibility remains leadership's judgment.
 
-Tell the member to click **Check approval & continue** on the pending page or use
-`/payment/resume`. If needed it signs them in directly, then resumes their saved
-selection without another OAuth round-trip. Alternatively, send a signup URL preserving
-the saved selection, such as `/signup?billing=yearly&discount=student`. Choosing
-a different category creates a new request; choosing standard rate clears it.
-Denied requests remain denied when retried with the same category.
+Tell the member to use `/payment/resume`. If needed it signs them in directly,
+then resumes their saved billing cycle with the current admin-assigned discount.
+Alternatively, send `/signup?billing=yearly` to select yearly billing. Signup
+cannot clear or replace an assigned discount; user-supplied discount URL parameters
+are ignored. Stripe Checkout displays the final discounted total before payment.
 
 Pricing edits apply to future Checkout; manage existing prices and invoices in
 Stripe. Saving changed billing/discount metadata or identity mappings
@@ -329,10 +327,10 @@ npx wrangler deploy --dry-run
 ```
 
 Tests run in workerd with real local D1 and Durable Objects and mocked provider
-HTTP. They cover OAuth/browser state, approval and pricing rules, serialized
+HTTP. They cover OAuth/browser state, admin-assigned discounts and pricing rules, serialized
 checkout/idempotency, success verification, signed webhooks, queue failure/retry,
 duplicate delivery and current-state role reconciliation. Finish provider setup
-with a Stripe test-mode signup, cancellation, discount approval and Discord role
+with a Stripe test-mode signup, cancellation, admin-assigned discount and Discord role
 check before using live credentials.
 
 The `sharp` override keeps the test runtime's transitive image dependency on its

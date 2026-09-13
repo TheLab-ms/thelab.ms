@@ -12,7 +12,6 @@ CREATE TABLE members (
   created INTEGER NOT NULL DEFAULT (unixepoch()),
   bill_annually INTEGER NOT NULL DEFAULT 0 CHECK (bill_annually IN (0, 1)),
   discount_type TEXT NOT NULL DEFAULT '' CHECK (discount_type IN ('', 'military', 'retired', 'firstResponder', 'student', 'family')),
-  discount_status TEXT NOT NULL DEFAULT '' CHECK (discount_status IN ('', 'requested', 'approved', 'denied')),
   stripe_customer_id TEXT UNIQUE,
   stripe_subscription_id TEXT,
   stripe_subscription_state TEXT,
