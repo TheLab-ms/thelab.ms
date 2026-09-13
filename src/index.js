@@ -8,6 +8,7 @@ import { logError, requestContext } from './logging.js';
 import { printerAccess } from './printers.js';
 import { waiverRequest } from './waiver.js';
 import { wikiRequest } from './wiki.js';
+import { bindFob, cleanupFobClaims, kioskClaims, kioskPage } from './kiosk.js';
 export { Wiki } from './wiki-store.js';
 export { Membership } from './membership.js';
 export { EdgeSync } from './edge-sync.js';
@@ -28,10 +29,7 @@ function configured(env, admin = false) {
 async function signup(request, env, admin = false) {
   configured(env, admin);
   if (admin) adminConfigured(env);
-  const url = new URL(request.url);
-  const frequency = url.searchParams.get('billing') || 'monthly';
-  if (!['monthly', 'yearly'].includes(frequency) || url.searchParams.getAll('billing').length > 1) throw new HttpError(400, 'Invalid membership selection.');
-  return startLogin(request, env, admin ? 'admin' : 'signup', { annual: frequency === 'yearly' });
+  return startLogin(request, env, admin ? 'admin' : 'signup');
 }
 
 async function resume(request, env) {
@@ -73,7 +71,7 @@ async function callback(request, env) {
   }
   configured(env);
   const registered = await registerMember(env, user);
-  const result = await coordinated(env, registered.member_id, 'checkout', { user, annual: Boolean(pending.bill_annually) });
+  const result = await coordinated(env, registered.member_id, 'checkout', { user });
   return finishLogin(env, result.url, 'member', await memberToken(env, registered));
 }
 
@@ -129,12 +127,16 @@ const routes = new Map([
   ['/payment/success', ['GET', success]],
   ['/payment/resume', ['GET', resume]],
   ['/machines', ['GET', printerAccess]],
+  ['/kiosk', ['GET', kioskPage]],
+  ['/kiosk/claims', ['GET, POST', kioskClaims]],
+  ['/keyfob/bind', ['GET, POST', bindFob]],
   ['/webhooks/stripe', ['POST', webhook]],
   ['/admin/login', ['GET', (request, env) => signup(request, env, true)]],
 ]);
 
 export default {
   async scheduled(event, env) {
+    await cleanupFobClaims(env);
     const date = nightlyDate(event.scheduledTime);
     if (date && edgeEnabled(env)) await edgeCall(env, 'nightly', date);
   },
@@ -161,6 +163,7 @@ export default {
     } catch (error) {
       logError('request.failed', error, context, env);
       if (path === '/webhooks/stripe') return json({ error: 'Webhook could not be accepted.' }, error instanceof HttpError ? error.status : 500);
+      if (path === '/kiosk/claims') return json({ error: error instanceof HttpError ? error.message : 'Fob enrollment is temporarily unavailable. Please try again.' }, error instanceof HttpError ? error.status : 500);
       const response = errorPage(error);
       if (path === '/login/discord/callback') {
         // Clearing an OAuth cookie must still work when SITE_URL itself is invalid.

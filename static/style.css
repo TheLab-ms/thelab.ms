@@ -1186,6 +1186,10 @@ address {
     justify-content: center;
   }
 
+  .discord-card {
+    justify-content: flex-start;
+  }
+
   .address-banner-inner {
     flex-direction: row;
     gap: 3rem;

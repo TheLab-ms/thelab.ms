@@ -29,17 +29,17 @@ function human(result = {}, status = 200) {
   });
 }
 
-async function form(path = '/waiver', login = '') {
-  const response = await api(path, { headers: { Cookie: login } });
+async function form(path = '/waiver', login = '', bindings = env) {
+  const response = await api(path, { headers: { Cookie: login } }, bindings);
   expect(response.status).toBe(200);
   const html = await response.text();
   const fields = { csrf: html.match(/name="csrf" value="([^"]+)"/)[1], version: html.match(/name="version" value="([^"]+)"/)[1], revision: html.match(/name="revision" value="([^"]+)"/)[1],
     name: 'Public Maker', email: 'maker@example.com', agree0: 'on', agree1: 'on', 'cf-turnstile-response': 'human-token' };
   const cookie = [response.headers.get('Set-Cookie').split(';')[0], login].filter(Boolean).join('; ');
-  return { html, fields, cookie, path };
+  return { html, fields, cookie, path, bindings };
 }
 const submit = (f, fields = {}, headers = {}) => api(f.path, { method: 'POST', body: new URLSearchParams({ ...f.fields, ...fields }),
-  headers: { Cookie: f.cookie, Origin: env.SITE_URL, 'Content-Type': 'application/x-www-form-urlencoded', ...headers } });
+  headers: { Cookie: f.cookie, Origin: env.SITE_URL, 'Content-Type': 'application/x-www-form-urlencoded', ...headers } }, f.bindings);
 
 describe('public liability waivers', () => {
   it('serves the public route through the Worker asset binding', async () => {
@@ -58,7 +58,7 @@ describe('public liability waivers', () => {
     expect(await result.text()).toContain('&lt;Maker &amp; Friend&gt;');
     const [member] = (await members()).results, [signed] = (await waivers()).results;
     expect(member).toMatchObject({ discord_user_id: null, email: user.email, waiver_name: '<Maker & Friend>' });
-    expect(signed).toMatchObject({ member_id: member.member_id, name: '<Maker & Friend>', email: user.email, version: 1 });
+    expect(signed).toMatchObject({ member_id: member.member_id, name: '<Maker & Friend>', email: user.email, version: 2 });
     expect(JSON.parse(signed.agreements)).toEqual((await currentWaiver(env)).agreements);
     expect(signed.content).toBe((await currentWaiver()).content);
     expect(signed.created).toBeGreaterThan(0);
@@ -83,12 +83,27 @@ describe('public liability waivers', () => {
     expect((await members()).results).toHaveLength(0);
   });
 
-  it('fails closed on outages, missing configuration, and replayed Turnstile tokens', async () => {
+  it.each([
+    { TURNSTILE_SITE_KEY: '', TURNSTILE_SECRET_KEY: '' },
+    { TURNSTILE_SITE_KEY: '' }, { TURNSTILE_SECRET_KEY: '' },
+  ])('allows signing the actual waiver without complete Turnstile configuration: %j', async missing => {
+    const f = await form('/waiver', '', { ...env, ...missing });
+    expect(f.html).toContain('TheLab Liability Waiver');
+    expect(f.html).toContain('INCLUDING NEGLIGENCE AND GROSS NEGLIGENCE');
+    expect(f.html).toContain('all of my future participation in TheLab.');
+    expect(f.html).not.toContain('cf-turnstile');
+    expect(f.html).not.toContain('turnstile/v0/api.js');
+    expect((await submit(f, { agree1: '' })).status).toBe(400);
+    expect((await submit(f, { 'cf-turnstile-response': '' })).status).toBe(200);
+    expect((await waivers()).results).toHaveLength(1);
+    expect(http).not.toHaveBeenCalled();
+  });
+
+  it('fails closed on configured provider outages and replayed Turnstile tokens', async () => {
     const f = await form();
     human({}, 503);
     expect((await submit(f)).status).toBe(502);
     expect((await members()).results).toHaveLength(0);
-    expect((await api('/waiver', undefined, { ...env, TURNSTILE_SECRET_KEY: '' })).status).toBe(503);
     human();
     expect((await submit(f)).status).toBe(200);
     human({ success: false, 'error-codes': ['timeout-or-duplicate'] });
@@ -140,9 +155,10 @@ describe('public liability waivers', () => {
 });
 
 describe('signup waiver gate', () => {
-  it('gates checkout, saves annual billing, signs with a different email, and resumes to Stripe', async () => {
+  it('gates checkout, preserves admin-assigned annual billing, and resumes after signing with a different email', async () => {
     const member = await registerMember(env, user);
-    const result = await coordinated(env, member.member_id, 'checkout', { user, annual: true });
+    await env.DB.prepare('UPDATE members SET bill_annually = 1 WHERE member_id = ?').bind(member.member_id).run();
+    const result = await coordinated(env, member.member_id, 'checkout', { user, annual: false });
     expect(result.url).toBe(`${env.SITE_URL}/waiver?signup=1`);
     expect(http).not.toHaveBeenCalled();
     const login = `thelab_member=${await memberToken(env, member)}`;
@@ -183,7 +199,7 @@ describe('signup waiver gate', () => {
     expect(http).not.toHaveBeenCalled();
   });
 
-  it('redirects a first signup callback to the waiver with a member cookie and preserved selection', async () => {
+  it('redirects a first signup callback to the waiver with monthly billing despite a yearly signup parameter', async () => {
     const start = await api('/signup?billing=yearly');
     const state = new URL(start.headers.get('Location')).searchParams.get('state');
     http.mockImplementation(async url => {
@@ -195,7 +211,7 @@ describe('signup waiver gate', () => {
     const response = await api(`/login/discord/callback?code=test&state=${state}`, { headers: { Cookie: start.headers.get('Set-Cookie').split(';')[0] } });
     expect(response.headers.get('Location')).toBe(`${env.SITE_URL}/waiver?signup=1`);
     expect(response.headers.get('Set-Cookie')).toContain('thelab_member=');
-    expect((await members()).results[0].bill_annually).toBe(1);
+    expect((await members()).results[0].bill_annually).toBe(0);
     expect(http).toHaveBeenCalledTimes(3);
   });
 });
@@ -218,7 +234,7 @@ describe('waiver administration', () => {
     expect(list).toContain('Waiver signed');
     const detail = await (await api(`/admin/members/${member.member_id}`, { headers })).text();
     expect(detail).toContain('Signature #1');
-    expect(detail).toContain('sample liability waiver');
+    expect(detail).toContain('TheLab Liability Waiver');
     expect(detail).not.toContain('Deleted member');
     const save = await api(`/admin/members/${member.member_id}`, { method: 'POST', headers, body: new URLSearchParams({ csrf: headers.csrf,
       metadata_version: String(member.metadata_version), discord_user_id: '', stripe_customer_id: '', stripe_subscription_id: '',
@@ -227,7 +243,7 @@ describe('waiver administration', () => {
     expect((await members()).results[0]).toMatchObject({ name_override: 'Preferred', discount_type: 'student', discord_user_id: null });
     const history = await (await api(`/admin/members/${member.member_id}/events`, { headers })).text();
     expect(history).toContain('Waiver signed');
-    expect(history).toContain('Signature #1, waiver version 1');
+    expect(history).toContain('Signature #1, waiver version 2');
   });
 
   it('retains signed text independently of current source and has no publishing route', async () => {
@@ -241,6 +257,6 @@ describe('waiver administration', () => {
     const detail = await (await api(`/admin/members/${member.member_id}`, { headers })).text();
     expect(detail).toContain('Original terms');
     expect(detail).toContain('Original agreement');
-    expect(detail).toContain('sample liability waiver');
+    expect(detail).toContain('TheLab Liability Waiver');
   });
 });

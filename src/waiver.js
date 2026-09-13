@@ -25,11 +25,12 @@ export async function currentWaiver() {
   return { ...waiverContent, ...parseWaiver(waiverContent.content), revision: await hash(waiverContent.content) };
 }
 
-function configured(env) {
-  if (!env.TURNSTILE_SITE_KEY || !env.TURNSTILE_SECRET_KEY) throw new HttpError(503, 'Waiver signing is not configured. Please contact leadership.');
+function humanVerificationEnabled(env) {
+  return Boolean(env.TURNSTILE_SITE_KEY && env.TURNSTILE_SECRET_KEY);
 }
 
 async function verifyHuman(request, env, token) {
+  if (!humanVerificationEnabled(env)) return;
   if (!token || token.length > 2048) throw new HttpError(400, 'Please complete the human verification and try again.');
   const result = await provider('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -43,8 +44,8 @@ async function verifyHuman(request, env, token) {
 
 const text = waiver => `<h1>${e(waiver.title || 'Liability waiver')}</h1><p class="signup-help">Version ${waiver.version}</p>${waiver.paragraphs.map(p => `<p>${e(p)}</p>`).join('')}`;
 
-function publicPage(content, status = 200) {
-  return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Liability waiver | TheLab</title><link rel="icon" href="/assets/favicon.svg"><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/membership.css"><script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script></head><body class="membership-page"><main class="container membership-main"><a class="membership-brand" href="/">TheLab</a><section class="card waiver-page">${content}</section></main></body></html>`, {
+function publicPage(content, status = 200, verify = false) {
+  return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Liability waiver | TheLab</title><link rel="icon" href="/assets/favicon.svg"><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/membership.css">${verify ? '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>' : ''}</head><body class="membership-page"><main class="container membership-main"><a class="membership-brand" href="/">TheLab</a><section class="card waiver-page">${content}</section></main></body></html>`, {
     status, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
       'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; script-src https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; connect-src https://challenges.cloudflare.com; style-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'" },
   });
@@ -58,12 +59,11 @@ function signingForm(waiver, env, { signup, csrf, name = '', email = '', error =
     ${waiver.agreements.map((label, i) => `<label class="waiver-agreement"><input type="checkbox" name="agree${i}" required>${e(label)}</label>`).join('')}
     <label for="name">Legal name</label><input id="name" name="name" autocomplete="name" maxlength="160" value="${e(name)}" required>
     <label for="email">Email</label><input id="email" name="email" type="email" autocomplete="email" maxlength="254" value="${e(email)}" required>
-    <div class="cf-turnstile" data-sitekey="${e(env.TURNSTILE_SITE_KEY)}" data-action="waiver"></div>
-    <button class="btn btn-primary" type="submit">${signup ? 'Sign and continue' : 'Sign waiver'}</button></form>`, status);
+    ${humanVerificationEnabled(env) ? `<div class="cf-turnstile" data-sitekey="${e(env.TURNSTILE_SITE_KEY)}" data-action="waiver"></div>` : ''}
+    <button class="btn btn-primary" type="submit">${signup ? 'Sign and continue' : 'Sign waiver'}</button></form>`, status, humanVerificationEnabled(env));
 }
 
 export async function waiverRequest(request, env) {
-  configured(env);
   const url = new URL(request.url), signup = url.searchParams.get('signup') === '1';
   const member = signup ? await signedInMember(request, env) : null;
   if (signup && !member) {

@@ -5,6 +5,7 @@ import { grantsMembership, isOngoingSubscription, selectCurrentSubscription } fr
 import { memberName, validateMetadata } from './member-metadata.js';
 import { logError } from './logging.js';
 import { armEdge, kickEdge } from './edge-sync.js';
+import { linkFob } from './fob-claims.js';
 
 // Checkout, admin edits, and queue work share a stable membership instance.
 // A promise chain is needed because external fetches allow DO requests to interleave.
@@ -31,6 +32,7 @@ export class Membership extends DurableObject {
           case 'refreshIdentity': value = await this.refreshIdentity(member, input.user); break;
           case 'sync': await this.sync(member, input); break;
           case 'updateMetadata': await this.updateMetadata(member, input); break;
+          case 'linkFob': await linkFob(this.env, member, input); break;
           default: throw new HttpError(404, 'Unknown membership operation.');
         }
         return { ok: true, value };
@@ -74,7 +76,7 @@ export class Membership extends DurableObject {
       .filter(sub => sub.metadata?.thelab_member_id ? sub.metadata.thelab_member_id === member.member_id : sub.metadata?.thelab_discord_id === member.discord_user_id);
   }
 
-  async checkout(member, { user, annual = Boolean(member.bill_annually) }) {
+  async checkout(member, { user }) {
     const id = user.id;
     member = await this.refreshIdentity(member, user);
     if (member.stripe_customer_id) {
@@ -89,7 +91,6 @@ export class Membership extends DurableObject {
       }
     }
 
-    if (typeof annual !== 'boolean') throw new HttpError(400, 'Invalid membership selection.');
     // Resolve a previous ambiguous checkout using its ORIGINAL parameters before
     // expiring/replacing it. This also survives a crash before persisting its ID.
     let prior = await this.loadTrackedCheckout();
@@ -108,22 +109,13 @@ export class Membership extends DurableObject {
       }
     }
 
-    // A changed billing cycle must invalidate any old payment link.
-    const changed = Boolean(member.bill_annually) !== annual;
-    if (prior && changed) {
-      await this.expireTrackedCheckout(prior.session);
-      prior = null;
-    }
-    await this.env.DB.prepare('UPDATE members SET bill_annually = ?, metadata_version = metadata_version + 1 WHERE member_id = ?')
-      .bind(annual ? 1 : 0, member.member_id).run();
-
     // Enforce this inside the same lock as checkout, including direct resume calls.
     if (!await this.env.DB.prepare('SELECT id FROM waivers WHERE member_id = ? LIMIT 1').bind(member.member_id).first()) {
       return `${origin(this.env)}/waiver?signup=1`;
     }
 
-    // Discounts come only from the current admin-managed member record.
-    const { price, coupon } = await this.resolvePricing(annual, member.discount_type);
+    // Billing cycle and discounts come only from the current admin-managed record.
+    const { price, coupon } = await this.resolvePricing(Boolean(member.bill_annually), member.discount_type);
     member = await this.ensureCustomer(member);
 
     // Stripe locks an existing Customer's email in Checkout. Clear it so the

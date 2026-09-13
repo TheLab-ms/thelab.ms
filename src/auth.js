@@ -3,7 +3,7 @@ import { encodeBase64URL as encode, decodeBase64URL as decode, encodeJSON as jso
 import { memberListParams } from './admin-search.js';
 import { eventListParams } from './member-events.js';
 
-export const TOKEN_AGE = { member: 86400, admin: 8 * 3600, oauth: 600 };
+export const TOKEN_AGE = { member: 86400, admin: 8 * 3600, oauth: 600, fob: 300 };
 const encoder = new TextEncoder();
 
 function configured(env) {
@@ -30,7 +30,7 @@ export async function verifyToken(env, token, audience) {
     if (metadata.alg !== 'HS256' || metadata.typ !== 'JWT' || metadata.crit) return null;
     if (!await crypto.subtle.verify('HMAC', signingKey, decode(signature), encoder.encode(`${header}.${payload}`))) return null;
     const claims = JSON.parse(new TextDecoder().decode(decode(payload)));
-    if (claims.iss !== issuer || claims.aud !== audience || typeof claims.sub !== 'string' || !(audience === 'oauth' ? opaque : discordID).test(claims.sub)
+    if (claims.iss !== issuer || claims.aud !== audience || typeof claims.sub !== 'string' || !(['oauth', 'fob'].includes(audience) ? opaque : discordID).test(claims.sub)
       || !Number.isInteger(claims.iat) || !Number.isInteger(claims.exp) || claims.iat > now() || claims.exp <= now()
       || claims.exp <= claims.iat || claims.exp - claims.iat > TOKEN_AGE[audience]) return null;
     return claims;
@@ -76,6 +76,7 @@ export function loginDestination(value, purpose) {
   }
   if (purpose === 'member' && /^\/machines\?state=[a-f0-9]{64}$/.test(value)) return value;
   if (purpose === 'member' && value === '/waiver?signup=1') return value;
+  if (purpose === 'member' && value.length < 1100 && /^\/keyfob\/bind\?token=[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/.test(value)) return value;
   if (purpose === 'member' && (value === '/wiki/new' || /^\/wiki\/[a-z0-9]+(?:-[a-z0-9]+)*\/edit$/.test(value))) return value;
   return /^\/payment\/success\?session_id=cs_[A-Za-z0-9_]+$/.test(value) ? value : '/payment/resume';
 }
@@ -85,18 +86,17 @@ export async function verifyOAuthState(env, state, browser) {
   const claims = await verifyToken(env, state, 'oauth');
   // The subject binds this handshake to a nonce held only in the browser cookie.
   if (!claims || claims.sub !== await hash(browser) || !['signup', 'admin', 'member'].includes(claims.purpose)
-    || ![0, 1].includes(claims.bill_annually)
     || typeof claims.return_to !== 'string' || claims.return_to !== loginDestination(claims.return_to, claims.purpose)) return null;
   return claims;
 }
 
-export async function startLogin(request, env, purpose = 'signup', selection = {}) {
+export async function startLogin(request, env, purpose = 'signup') {
   configured(env);
   if (!env.DISCORD_CLIENT_ID || !env.DISCORD_CLIENT_SECRET) throw new HttpError(503, 'Discord sign-in is not configured yet. Please contact leadership.');
   const url = new URL(request.url), browser = randomToken();
   const destination = loginDestination(url.pathname + url.search, purpose);
   const state = await issueToken(env, await hash(browser), 'oauth', {
-    bill_annually: selection.annual ? 1 : 0, purpose, return_to: destination,
+    purpose, return_to: destination,
   });
   const target = new URL('https://discord.com/oauth2/authorize');
   target.search = new URLSearchParams({ client_id: env.DISCORD_CLIENT_ID, response_type: 'code', scope: 'identify email', redirect_uri: `${origin(env)}/login/discord/callback`, state }).toString();

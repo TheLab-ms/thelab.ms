@@ -7,7 +7,7 @@ swipes and reconciles door-access fobs.
 
 ## Flow
 
-1. Choose monthly/yearly billing on the landing page. `/signup` redirects to
+1. Click **Manage Billing** on the landing page. `/signup` redirects to
    Discord with `identify email` and browser-bound, expiring JWT state.
 2. `/login/discord/callback` requires a verified email and existing membership in
     TheLab's Discord guild. Existing accounts are resolved by Discord ID. A first
@@ -17,7 +17,7 @@ swipes and reconciles door-access fobs.
    valid for 24 hours for members. Discord returns an opaque access token, not an
    identity JWT; the browser stores only the app's JWT. No login sessions are stored
    in D1. OAuth state is signed with `AUTH_SECRET`, uses a separate `oauth` audience,
-   and expires after 10 minutes. It carries the login purpose, billing selection,
+   and expires after 10 minutes. It carries the login purpose,
    allowed return destination, and a hash of a random nonce in the HttpOnly
    `thelab_oauth` cookie. The callback verifies the JWT and cookie before contacting
    Discord and clears the cookie on success or failure. State is stateless: a copied
@@ -25,8 +25,8 @@ swipes and reconciles door-access fobs.
    codes are single-use.
 3. Members without a linked liability waiver go to `/waiver?signup=1` before
    Stripe Checkout. Signing continues through `/payment/resume`, preserving the
-   selected billing cycle. Checkout shows the final price with any
-   admin-assigned discount applied automatically. Members cannot select or change discounts.
+   admin-assigned billing cycle (monthly by default). Checkout shows the final price with any
+   admin-assigned discount applied automatically. Only admins can assign annual billing or discounts.
    Existing subscriptions, including past-due ones, go to Stripe Billing Portal.
 4. `/payment/success` checks the signed-in user's Checkout ownership, completion,
    payment status, and subscription status against Stripe, then redirects to the
@@ -101,12 +101,12 @@ Ambiguous matches require leadership assistance.
 During signup, **`/waiver?signup=1`** instead attaches to the authenticated member,
 even when the signer enters another name/email. Public `/waiver` remains usable
 for other people even in a browser with a member login. Expired signup sessions
-must sign in again and review the form. Both paths require all agreements and a
-successful server-side Turnstile verification before recording a signature.
+must sign in again and review the form. Both paths require all agreements and,
+when Turnstile is configured, successful server-side verification before recording a signature.
 
-The text and version live in **`src/waiver-content.js`**. It currently contains
-Conway's sample placeholder, as requested; replace it with TheLab's actual waiver
-before launch. Increment `version` when changing the text and deploy the Worker.
+The text and version live in **`src/waiver-content.js`**, with TheLab's actual waiver
+embedded from `https://members.thelab.ms/waiver`. Signing does not fetch remote text.
+Increment `version` when changing the text and deploy the Worker.
 The format supports `# Title`, blank-line-separated paragraphs, and required
 `- [ ] Agreement` checkboxes. Text is escaped and displayed literally. A content
 hash and version check reject forms opened before a text change, including changes
@@ -118,7 +118,8 @@ a member is deleted. Existing linked signatures remain sufficient for checkout
 after source updates. Admin member pages show waiver status and signature evidence;
 waiver-only members are searchable by name/email and use stable-ID admin URLs.
 
-Create a **Turnstile widget** in Cloudflare, allowing the hostname in `SITE_URL`.
+Turnstile is optional: signing works without its keys. To enable it, create a
+**Turnstile widget** in Cloudflare, allowing the hostname in `SITE_URL`.
 Set `TURNSTILE_SITE_KEY` in `wrangler.jsonc` and store the secret with:
 
 ```sh
@@ -126,7 +127,8 @@ npx wrangler secret put TURNSTILE_SECRET_KEY
 ```
 
 For local development, use a development widget/key pair with `localhost` allowed
-and set both keys in `.dev.vars`. Siteverify must return the configured hostname
+and set both keys in `.dev.vars`. Verification is enabled only when both keys are set.
+Siteverify must return the configured hostname
 and action `waiver`; verification failures and provider outages fail closed.
 Turnstile tokens are single-use, so retrying a submission requires a fresh challenge.
 
@@ -196,6 +198,43 @@ The existing `make dev` and `make deploy` commands still work. Assets are served
 directly; signup, waiver, callback, payment and webhook paths run through the Worker first.
 
 ## Door fobs and swipe synchronization
+
+### Fob linking kiosk
+
+Open **`/kiosk`** on the makerspace kiosk. A keyboard/HID reader can send a decimal
+fob ID followed by Enter or one second of inactivity; zero-padded IDs are accepted.
+The kiosk displays a QR code generated inside the Worker. Members scan it with
+their phone, sign in through Discord, and tap **Link fob**. The phone can use
+cellular data. An existing member record (including a waiver-only record claimable
+through verified Discord email) is required; enrollment does not start checkout.
+
+Linking replaces the signed-in member's previous fob automatically. A fob assigned
+to a different member requires leadership to reassign it. Linking records history,
+invalidates stale admin edit forms, and triggers immediate door synchronization.
+It does not change the payment/waiver requirements below.
+
+`KIOSK_HOSTNAME` defaults to **`space.thelab.ms`**. It must be a DNS-only hostname
+resolving to the makerspace's public egress address, not a Cloudflare-proxied web
+address. The Worker resolves A and AAAA records through Cloudflare DNS-over-HTTPS
+and compares them with Cloudflare's `CF-Connecting-IP` header. Successful answers
+are cached in each Worker isolate for at most 60 seconds, bounded by DNS TTLs.
+Missing client IPs, missing configuration, and failed DNS lookups deny kiosk access.
+The gate covers the kiosk page, code issuance, and completion polling.
+
+For local development, put **`KIOSK_SKIP_IP_CHECK=true`** in `.dev.vars` (shown in
+`.dev.vars.example`). Only the exact string `true` bypasses the network check, and
+only when `SITE_URL` has hostname `localhost` or `127.0.0.1`. Production origins
+always enforce the check. This flag does not bypass Discord or token validation.
+
+QR links contain five-minute signed JWTs using `AUTH_SECRET` with a separate `fob`
+audience. A D1 claim makes each code single-use; consumption and assignment commit
+atomically, including across simultaneous phone requests. A CSRF-protected POST
+performs linking. The kiosk resets after completion or expiry. Issuance is limited
+to 30 codes per minute, and expired claims are removed on new scans and scheduled
+runs. Apply `0002_fob_claims.sql` with `npm run db:local` locally or
+`npx wrangler d1 migrations apply thelab-membership --remote` before deploying.
+
+### Door access rules
 
 Admins assign one unique optional **Fob ID** on each member's edit form. IDs are
 decimal integers from 1 through 4294967295; blank removes the assignment. By default,
@@ -399,9 +438,10 @@ discount. Family eligibility remains leadership's judgment.
 
 Tell the member to use `/payment/resume`. If needed it signs them in directly,
 then resumes their saved billing cycle with the current admin-assigned discount.
-Alternatively, send `/signup?billing=yearly` to select yearly billing. Signup
-cannot clear or replace an assigned discount; user-supplied discount URL parameters
-are ignored. Stripe Checkout displays the final discounted total before payment.
+The **Manage Billing** button also uses the saved billing cycle and discount.
+Assign annual billing through the admin member page. Signup cannot change the
+billing cycle or discount; user-supplied billing and discount URL parameters are
+ignored. Stripe Checkout displays the final discounted total before payment.
 
 Pricing edits apply to future Checkout; manage existing prices and invoices in
 Stripe. Saving changed billing/discount metadata or identity mappings
@@ -504,6 +544,8 @@ mappings while subscriptions are in use.
 - `src/member-events.js` and `src/event-views.js`: member-history queries, filters,
   and rendering. The initial D1 migration owns automatic change capture.
 - `src/printers.js`: member authorization and the edge JWT handoff.
+- `src/kiosk.js`, `src/kiosk-network.js`, and `src/fob-claims.js`: on-site enrollment,
+  DNS/IP verification, signed single-use claims, and serialized member linking.
 - `src/wiki.js`, `src/wiki-store.js`, `src/wiki-markdown.js`, and `src/wiki-views.js`:
   public wiki routing/cache, R2 publication and cleanup coordination, safe Markdown,
   and page/editor views. `static/wiki-editor.js` implements the browser editor.
@@ -561,4 +603,5 @@ cache revision changes, safe rendering, upload bounds, shared references, abando
 image cleanup, and recovery after ambiguous writes or failed deletes.
 
 The `sharp` override keeps the test runtime's transitive image dependency on its
-patched release. The wiki uses `markdown-it` as a runtime dependency.
+patched release. Runtime dependencies include `markdown-it` for the wiki and
+`qrcode-generator` for local QR generation.

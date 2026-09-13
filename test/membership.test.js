@@ -50,7 +50,7 @@ const memberStub = async () => env.MEMBERS.get(env.MEMBERS.idFromName((await rea
 const checkout = async (input = {}) => {
   const member = await registerMember(env, user);
   await seedWaiver(member);
-  return coordinated(env, member.member_id, 'checkout', { user, annual: false, ...input });
+  return coordinated(env, member.member_id, 'checkout', { user, ...input });
 };
 async function seedWaiver(member = null) {
   member ||= await registerMember(env, user);
@@ -98,6 +98,15 @@ async function seed(extra = {}) {
 
 async function loginCookie() {
   return `thelab_member=${await memberToken(env, await readMember())}`;
+}
+
+async function assignAnnualBilling() {
+  const member = await readMember();
+  return coordinated(env, member.member_id, 'updateMetadata', { fields: {
+    discord_user_id: id, stripe_customer_id: customer, stripe_subscription_id: '',
+    name_override: member.name_override, notes: member.notes, billing: 'yearly',
+    discount_type: member.discount_type, metadata_version: String(member.metadata_version),
+  } });
 }
 
 async function start(query = '') {
@@ -202,31 +211,32 @@ describe('JWT authentication', () => {
 });
 
 describe('Discord signup', () => {
-  it('binds billing to the browser cookie and ignores signup and callback discount inputs', async () => {
+  it('binds login to the browser cookie and ignores signup and callback billing and discount inputs', async () => {
     await seedWaiver();
     const { target, state, cookie } = await start('?billing=yearly&discount=student');
     expect(target.origin).toBe('https://discord.com');
     expect(target.searchParams.get('scope')).toBe('identify email');
     expect(target.searchParams.get('redirect_uri')).toBe(`${env.SITE_URL}/login/discord/callback`);
     const claims = await verifyToken(env, state, 'oauth');
-    expect(claims).toMatchObject({ sub: await hash(cookie.split('=')[1]), purpose: 'signup', bill_annually: 1, return_to: '/payment/resume' });
+    expect(claims).toMatchObject({ sub: await hash(cookie.split('=')[1]), purpose: 'signup', return_to: '/payment/resume' });
+    expect(claims).not.toHaveProperty('bill_annually');
     expect(claims).not.toHaveProperty('discount_type');
     expect(claims.exp - claims.iat).toBe(600);
     expect((await api(`/login/discord/callback?code=hello&state=${state}`)).status).toBe(400);
     oauthMock();
-    mockPrice(true); mockCheckoutEmail();
+    mockPrice(); mockCheckoutEmail();
     mockStripe('/customers', { id: customer }, { method: 'POST' });
     mockStripe('/checkout/sessions', options => {
       const form = new URLSearchParams(options.body);
-      expect(form.get('line_items[0][price]')).toBe('price_yearly');
+      expect(form.get('line_items[0][price]')).toBe('price_monthly');
       expect(form.has('discounts[0][coupon]')).toBe(false);
       return { id: 'cs_signup', url: 'https://checkout.stripe.com/c/pay/signup' };
     }, { method: 'POST' });
-    const response = await api(`/login/discord/callback?code=hello&state=${state}&discount=`, { headers: { Cookie: cookie } });
+    const response = await api(`/login/discord/callback?code=hello&state=${state}&discount=&billing=yearly`, { headers: { Cookie: cookie } });
     expect(response.status).toBe(303);
     expect(response.headers.get('Location')).toBe('https://checkout.stripe.com/c/pay/signup');
     expect(response.headers.get('Set-Cookie')).toContain('HttpOnly; SameSite=Lax');
-    expect(await readMember()).toMatchObject({ bill_annually: 1, discount_type: '', stripe_customer_id: customer });
+    expect(await readMember()).toMatchObject({ bill_annually: 0, discount_type: '', stripe_customer_id: customer });
     expect(response.headers.get('Set-Cookie')).toContain('thelab_oauth=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
     expect((await api(`/login/discord/callback?code=hello&state=${state}`, { headers: { Cookie: 'thelab_oauth=' } })).status).toBe(400);
     // A copied cookie/state pair remains valid, but Discord rejects a reused code.
@@ -264,7 +274,7 @@ describe('Discord signup', () => {
   });
 
   it.each([
-    { purpose: 'unknown' }, { purpose: null }, { bill_annually: '1' }, { bill_annually: 2 },
+    { purpose: 'unknown' }, { purpose: null },
     { return_to: 'https://other.example' },
     { return_to: null }, { purpose: 'admin', return_to: '/payment/resume' },
   ])('rejects invalid signed OAuth claims: %j', async invalid => {
@@ -324,12 +334,12 @@ describe('Discord signup', () => {
     expect(await readMember()).toMatchObject({ stripe_customer_id: customer, discord_email: user.email, billing_email: '' });
   });
 
-  it.each(['signup', 'resume'])('uses the latest admin discount during %s despite user-supplied discount parameters', async flow => {
-    await seed({ discount_type: 'family', bill_annually: 1 });
+  it.each(['signup', 'resume'])('uses the latest admin billing cycle and discount during %s despite user-supplied parameters', async flow => {
+    await seed({ discount_type: 'family', bill_annually: 0 });
     await seedWaiver();
-    const login = flow === 'signup' ? await start('?billing=yearly&discount=student') : null;
+    const login = flow === 'signup' ? await start('?billing=monthly&discount=student') : null;
     // An admin edit during OAuth must take effect at checkout.
-    await env.DB.prepare("UPDATE members SET discount_type = 'retired' WHERE discord_user_id = ?").bind(id).run();
+    await env.DB.prepare("UPDATE members SET bill_annually = 1, discount_type = 'retired' WHERE discord_user_id = ?").bind(id).run();
     if (login) oauthMock();
     mockSubs(); mockPrice(true); mockCheckoutEmail();
     mockStripe(/^\/v1\/coupons\?/, { data: [{ id: 'coupon_retired', valid: true, metadata: { discountTypes: 'retired' } }], has_more: false });
@@ -340,8 +350,8 @@ describe('Discord signup', () => {
       return { id: 'cs_current', url: 'https://checkout.stripe.com/c/pay/current' };
     }, { method: 'POST' });
     const response = login
-      ? await api(`/login/discord/callback?state=${login.state}&code=test&discount=student`, { headers: { Cookie: login.cookie } })
-      : await api('/payment/resume?discount=student', { headers: { Cookie: await loginCookie() } });
+      ? await api(`/login/discord/callback?state=${login.state}&code=test&discount=student&billing=monthly`, { headers: { Cookie: login.cookie } })
+      : await api('/payment/resume?discount=student&billing=monthly', { headers: { Cookie: await loginCookie() } });
     expect(response.headers.get('Location')).toBe('https://checkout.stripe.com/c/pay/current');
     expect(await readMember()).toMatchObject({ bill_annually: 1, discount_type: 'retired' });
   });
@@ -1041,7 +1051,7 @@ describe('billing safeguards', () => {
   });
 
   it.each([false, true])('automatically applies the admin discount for annual=%s', async annual => {
-    await seed({ discount_type: 'student' });
+    await seed({ discount_type: 'student', bill_annually: annual ? 1 : 0 });
     mockSubs();
     mockPrice(annual);
     mockCheckoutEmail();
@@ -1051,11 +1061,11 @@ describe('billing safeguards', () => {
       form = new URLSearchParams(options.body);
       return { id: 'cs_discount', url: 'https://checkout.stripe.com/c/pay/discount' };
     });
-    expect((await checkout({ annual })).url).toContain('checkout.stripe.com');
+    expect((await checkout({ annual: !annual })).url).toContain('checkout.stripe.com');
     expect(form.get('discounts[0][coupon]')).toBe('coupon_student');
     expect(form.get('line_items[0][price]')).toBe(annual ? 'price_yearly' : 'price_monthly');
     expect(form.has('allow_promotion_codes')).toBe(false);
-    expect((await readMember()).discount_type).toBe('student');
+    expect(await readMember()).toMatchObject({ discount_type: 'student', bill_annually: annual ? 1 : 0 });
   });
 
   it('does not charge full price when an assigned coupon is missing', async () => {
@@ -1129,27 +1139,26 @@ describe('billing safeguards', () => {
     await expect(checkout()).rejects.toThrow('needs review');
   });
 
-  it('expires a previous payment link before changing billing frequency', async () => {
+  it('expires a previous payment link before an admin changes billing frequency', async () => {
     await seed(); mockSubs(); mockPrice(); mockCheckoutEmail();
     mockStripe('/checkout/sessions', { id: 'cs_old', url: 'https://checkout.stripe.com/c/pay/old' }, { method: 'POST' });
     await checkout();
-    mockSubs();
     mockStripe('/checkout/sessions/cs_old', { id: 'cs_old', status: 'open' });
     mockStripe('/checkout/sessions/cs_old/expire', { id: 'cs_old', status: 'expired' }, { method: 'POST' });
-    mockPrice(true); mockCheckoutEmail();
+    await assignAnnualBilling();
+    mockSubs(); mockPrice(true); mockCheckoutEmail();
     mockStripe('/checkout/sessions', { id: 'cs_yearly', url: 'https://checkout.stripe.com/c/pay/yearly' }, { method: 'POST' });
-    expect((await checkout({ annual: true })).url).toContain('/yearly');
+    expect((await checkout()).url).toContain('/yearly');
   });
 
   it('does not issue a second checkout if payment wins a race against session expiry', async () => {
     await seed(); mockSubs(); mockPrice(); mockCheckoutEmail();
     mockStripe('/checkout/sessions', { id: 'cs_race', url: 'https://checkout.stripe.com/c/pay/race' }, { method: 'POST' });
     await checkout();
-    mockSubs();
     mockStripe('/checkout/sessions/cs_race', { id: 'cs_race', status: 'open' });
     mockStripe('/checkout/sessions/cs_race/expire', {}, { method: 'POST', status: 400 });
     mockStripe('/checkout/sessions/cs_race', { id: 'cs_race', status: 'complete', subscription: 'sub_member' });
-    await expect(checkout({ annual: true })).rejects.toThrow('HTTP 400');
+    await expect(assignAnnualBilling()).rejects.toThrow('HTTP 400');
     expect(await readMember()).toMatchObject({ bill_annually: 0 });
   });
 
