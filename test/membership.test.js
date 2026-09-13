@@ -65,6 +65,13 @@ function mockBilling(name = 'Billing Maker', email = 'billing@example.com') {
   return mockStripe(`/customers/${customer}`, { id: customer, name, email });
 }
 
+function mockCheckoutEmail() {
+  return mockStripe(`/customers/${customer}`, options => {
+    expect(new URLSearchParams(options.body).get('email')).toBe('');
+    return { id: customer, email: null };
+  }, { method: 'POST' });
+}
+
 function mockPrice(annual = false) {
   return mockStripe(/^\/v1\/prices\?/, { data: [{ id: annual ? 'price_yearly' : 'price_monthly', product: 'prod_membership', type: 'recurring', recurring: { interval: annual ? 'year' : 'month', interval_count: 1 } }], has_more: false });
 }
@@ -268,6 +275,7 @@ describe('Discord signup', () => {
     const { state, cookie } = await start();
     oauthMock();
     mockPrice();
+    mockCheckoutEmail();
     let customerForm, checkoutForm;
     fetchMock.get('https://api.stripe.com').intercept({ path: '/v1/customers', method: 'POST' }).reply(200, options => {
       customerForm = new URLSearchParams(options.body);
@@ -281,12 +289,14 @@ describe('Discord signup', () => {
     expect(response.status).toBe(303);
     expect(response.headers.get('Location')).toBe('https://checkout.stripe.com/c/pay/test');
     expect(customerForm.get('metadata[thelab_discord_id]')).toBe(id);
+    expect(customerForm.has('email')).toBe(false);
+    expect(checkoutForm.has('customer_email')).toBe(false);
     expect(checkoutForm.get('subscription_data[metadata][thelab_discord_id]')).toBe(id);
     expect(checkoutForm.get('mode')).toBe('subscription');
     expect(checkoutForm.get('customer_update[name]')).toBe('auto');
     expect(checkoutForm.get('line_items[0][price]')).toBe('price_monthly');
     expect(checkoutForm.get('success_url')).toContain('/payment/success?session_id={CHECKOUT_SESSION_ID}');
-    expect(await readMember()).toMatchObject({ stripe_customer_id: customer });
+    expect(await readMember()).toMatchObject({ stripe_customer_id: customer, discord_email: user.email, billing_email: '' });
   });
 
   it('resumes the saved approved selection instead of resetting it to full price', async () => {
@@ -555,7 +565,7 @@ describe('member administration', () => {
   it('expires open checkout for an identity-only edit and restores the new Discord email at sign-in', async () => {
     const replacement = '555555555555555555';
     await seed(); await authenticate();
-    mockSubs(); mockPrice();
+    mockSubs(); mockPrice(); mockCheckoutEmail();
     mockStripe('/checkout/sessions', { id: 'cs_transfer', url: 'https://checkout.stripe.com/c/pay/transfer' }, { method: 'POST' });
     await checkout();
     const member = await readMember();
@@ -591,7 +601,7 @@ describe('member administration', () => {
 
   it('expires outstanding checkout before changing billing and preserves metadata on Stripe failure', async () => {
     await seed(); await authenticate();
-    mockSubs(); mockPrice();
+    mockSubs(); mockPrice(); mockCheckoutEmail();
     mockStripe('/checkout/sessions', { id: 'cs_admin', url: 'https://checkout.stripe.com/c/pay/admin' }, { method: 'POST' });
     await checkout();
     const version = String((await readMember()).metadata_version);
@@ -620,7 +630,7 @@ describe('member administration', () => {
 
   it('leaves completed subscriptions and checkout completion safeguards intact', async () => {
     await seed(); await authenticate();
-    mockSubs(); mockPrice();
+    mockSubs(); mockPrice(); mockCheckoutEmail();
     mockStripe('/checkout/sessions', { id: 'cs_complete', url: 'https://checkout.stripe.com/c/pay/complete' }, { method: 'POST' });
     await checkout();
     role();
@@ -653,6 +663,35 @@ describe('member administration', () => {
 });
 
 describe('billing safeguards', () => {
+  it('lets a returning customer choose a billing email independently of Discord', async () => {
+    await seed({ billing_email: user.email });
+    mockSubs(); mockPrice(); mockCheckoutEmail();
+    mockStripe('/checkout/sessions', options => {
+      const form = new URLSearchParams(options.body);
+      expect(form.get('customer')).toBe(customer);
+      expect(form.has('customer_email')).toBe(false);
+      return { id: 'cs_email', url: 'https://checkout.stripe.com/c/pay/email' };
+    }, { method: 'POST' });
+    expect((await checkout()).url).toContain('checkout.stripe.com');
+
+    mockBilling('Billing Maker', 'preferred@example.com');
+    mockSubs([subscription()]);
+    mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, {}, 'PUT', 204);
+    await processMessage({ customer_id: customer }, env);
+    expect(await readMember()).toMatchObject({ discord_email: user.email, billing_email: 'preferred@example.com' });
+  });
+
+  it('does not open checkout if clearing the locked email fails', async () => {
+    await seed({ billing_email: user.email });
+    mockSubs(); mockPrice();
+    mockStripe(`/customers/${customer}`, {}, { method: 'POST', status: 500 });
+    await expect(checkout()).rejects.toThrow('HTTP 500');
+    const stub = await memberStub();
+    await runInDurableObject(stub, async (_instance, state) => {
+      expect(await state.storage.get('checkout')).toBeUndefined();
+    });
+  });
+
   it('blocks checkout when the configured recurring price is missing', async () => {
     await seed(); mockSubs();
     mockStripe(/^\/v1\/prices\?/, { data: [], has_more: false });
@@ -663,6 +702,7 @@ describe('billing safeguards', () => {
     await seed({ discount_type: 'student', discount_status: 'approved' });
     mockSubs();
     mockPrice(true);
+    mockCheckoutEmail();
     mockStripe(/^\/v1\/coupons\?/, { data: [{ id: 'coupon_student', valid: true, metadata: { discountTypes: 'Military, STUDENT' } }], has_more: false });
     let form;
     fetchMock.get('https://api.stripe.com').intercept({ path: '/v1/checkout/sessions', method: 'POST' }).reply(200, options => {
@@ -692,7 +732,7 @@ describe('billing safeguards', () => {
     await seed({ discount_type: 'student', discount_status: 'denied' });
     mockSubs();
     await expect(checkout({ discount: 'student' })).rejects.toThrow('declined');
-    mockSubs(); mockPrice();
+    mockSubs(); mockPrice(); mockCheckoutEmail();
     mockStripe('/checkout/sessions', { id: 'cs_standard', url: 'https://checkout.stripe.com/c/pay/standard' }, { method: 'POST' });
     await checkout();
     expect(await readMember()).toMatchObject({ discount_type: '', discount_status: '' });
@@ -701,6 +741,7 @@ describe('billing safeguards', () => {
   it('serializes concurrent checkout requests and reuses the open session', async () => {
     await seed();
     mockSubs().times(2); mockPrice().times(2);
+    mockCheckoutEmail().times(2);
     mockStripe('/checkout/sessions', { id: 'cs_one', url: 'https://checkout.stripe.com/c/pay/one' }, { method: 'POST' });
     mockStripe('/checkout/sessions/cs_one', { id: 'cs_one', status: 'open', url: 'https://checkout.stripe.com/c/pay/one' });
     const results = await Promise.all([checkout(), checkout()]);
@@ -710,6 +751,7 @@ describe('billing safeguards', () => {
   it('retries an ambiguous Stripe write with the original idempotency key', async () => {
     await seed();
     mockSubs(); mockPrice();
+    mockCheckoutEmail().times(2);
     let firstKey, retryKey;
     fetchMock.get('https://api.stripe.com').intercept({ path: '/v1/checkout/sessions', method: 'POST' }).reply(500, options => {
       firstKey = new Headers(options.headers).get('Idempotency-Key');
@@ -738,7 +780,7 @@ describe('billing safeguards', () => {
   });
 
   it('expires a previous payment link before accepting a pending discount', async () => {
-    await seed(); mockSubs(); mockPrice();
+    await seed(); mockSubs(); mockPrice(); mockCheckoutEmail();
     mockStripe('/checkout/sessions', { id: 'cs_old', url: 'https://checkout.stripe.com/c/pay/old' }, { method: 'POST' });
     await checkout();
     mockSubs();
@@ -748,7 +790,7 @@ describe('billing safeguards', () => {
   });
 
   it('does not issue a second checkout if payment wins a race against session expiry', async () => {
-    await seed(); mockSubs(); mockPrice();
+    await seed(); mockSubs(); mockPrice(); mockCheckoutEmail();
     mockStripe('/checkout/sessions', { id: 'cs_race', url: 'https://checkout.stripe.com/c/pay/race' }, { method: 'POST' });
     await checkout();
     mockSubs();
@@ -766,7 +808,7 @@ describe('billing safeguards', () => {
   });
 
   it('allows rejoining after a completed checkout subscription was canceled', async () => {
-    await seed(); mockSubs(); mockPrice();
+    await seed(); mockSubs(); mockPrice(); mockCheckoutEmail().times(2);
     mockStripe('/checkout/sessions', { id: 'cs_old', url: 'https://checkout.stripe.com/c/pay/old' }, { method: 'POST' });
     await checkout();
     mockSubs([subscription('canceled')]).times(2);

@@ -134,7 +134,6 @@ export class Membership extends DurableObject {
     if (!member.stripe_customer_id) {
       const previous = await this.ctx.storage.get('customer');
       const customer = await this.write('customer', '/customers', previous?.form || {
-        email: member.discord_email,
         name: memberName(member),
         'metadata[thelab_discord_id]': id,
         'metadata[thelab_member_id]': member.member_id,
@@ -144,6 +143,10 @@ export class Membership extends DurableObject {
         .bind(customer.id, customer.name || '', customer.email || '', id).run();
       member = await this.member(id);
     }
+
+    // Stripe locks an existing Customer's email in Checkout. Clear it so the
+    // member can choose their billing email; Checkout saves their entry back.
+    await stripe(this.env, `/customers/${member.stripe_customer_id}`, { email: '' });
 
     const form = {
       mode: 'subscription',
