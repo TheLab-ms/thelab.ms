@@ -15,6 +15,7 @@
 			"/signup",
 			"/login/*",
 			"/payment/*",
+			"/printers",
 			"/webhooks/*"
 		]
 	},
@@ -60,6 +61,7 @@
 	},
 	"vars": {
 		"SITE_URL": "https://thelab.ms",
+		"PRINTER_EDGE_URL": "",
 		"DISCORD_GUILD_ID": "690314626289631294",
 		"DISCORD_ROLE_ID": "1252789548073619458",
 		"DISCORD_ADMIN_ROLE_ID": "",

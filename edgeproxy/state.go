@@ -31,6 +31,7 @@ type edge struct {
 	csrf       string
 	printers   printerSet
 	signingKey ed25519.PrivateKey
+	memberAuth *printerAuth
 }
 
 const schema = `

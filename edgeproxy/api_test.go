@@ -88,7 +88,7 @@ func TestAPIValidationAndRoutes(t *testing.T) {
 		{"PUT", "/api/goal", `{"version":1,"fobs":[1]}`, 204},
 		{"GET", "/api/swipes", "", 200},
 		{"POST", "/api/swipes/ack", `{"ids":[]}`, 404},
-		{"GET", "/api/printers", "", 200},
+		{"GET", "/api/printers", "", 404},
 		{"GET", "/api/printers/missing/snapshot.jpg", "", 404},
 	} {
 		if w := request(cloud, route.method, route.path, route.body); w.Code != 401 {

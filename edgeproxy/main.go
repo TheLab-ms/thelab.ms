@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -31,6 +32,10 @@ func run() error {
 		return err
 	}
 	defer e.close()
+	e.memberAuth, err = loadPrinterAuth(os.Getenv("CONWAYEDGE_MEMBER_ISSUER"), os.Getenv("CONWAYEDGE_PUBLIC_URL"), os.Getenv("CONWAYEDGE_MEMBER_PUBLIC_KEY"))
+	if err != nil {
+		return err
+	}
 	e.signingKey, err = loadSigningSeed(os.Getenv("CONWAYEDGE_SIGNING_SEED"))
 	if err != nil {
 		return err
@@ -95,10 +100,20 @@ func (e *edge) routes() (http.Handler, http.Handler) {
 	})
 	tunnel.HandleFunc("PUT /api/goal", e.goal)
 	tunnel.HandleFunc("GET /api/swipes", e.getSwipes)
-	tunnel.HandleFunc("GET /api/printers", e.printers.status)
-	tunnel.HandleFunc("GET /api/printers/{serial}/snapshot.jpg", e.printers.snapshot)
+	member := e.printerRoutes()
 	return lan, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
+		if r.URL.Path == "/printers" || strings.HasPrefix(r.URL.Path, "/printers/") {
+			w.Header().Set("Referrer-Policy", "no-referrer")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+			if e.memberAuth == nil {
+				http.Error(w, "printer member access is not configured", 503)
+				return
+			}
+			member.ServeHTTP(w, r)
+			return
+		}
 		if !cloudflareMTLSVerified(r.Header) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return

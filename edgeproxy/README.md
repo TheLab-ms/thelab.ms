@@ -13,7 +13,7 @@ go build .
 
 Defaults: `-lan :8080`, `-tunnel 127.0.0.1:8081`, `-data data`. Run one instance per data directory on a local filesystem, as an unprivileged user. New directories use mode 0700 and the database uses 0600. Protect existing directories equivalently: the database contains printer access codes.
 
-Point controllers at the LAN listener. Its configuration page at `/` is unauthenticated and trusts the LAN; saves require the page's CSRF token. Point cloudflared **only** at the tunnel listener, which must bind loopback because it trusts certificate-status headers from local cloudflared. No API token, admin password, or Cloudflare API credentials are required by edge.
+Point controllers at the LAN listener. Its configuration page at `/` is unauthenticated and trusts the LAN; saves require the page's CSRF token. Point cloudflared **only** at the tunnel listener, which must bind loopback because it trusts certificate-status headers from local cloudflared. Machine APIs require mTLS; member printer routes validate Worker-issued JWTs using a public key.
 
 ### Switching from file-backed edge
 
@@ -27,12 +27,13 @@ Controller firmware keeps its existing protocol and optional signing identity. B
 | --- | --- | --- |
 | Tunnel | `PUT /api/goal` | `{"version":123,"fobs":[7,42]}`; 204 after persistence, 409 for older/conflicting versions. |
 | Tunnel | `GET /api/swipes` | JSON array of all events retained from the last seven days; does not consume them. No pagination parameters. |
-| Tunnel | `GET /api/printers` | JSON array of current printer status, without credentials or IP addresses. |
-| Tunnel | `GET /api/printers/{serial}/snapshot.jpg` | One current JPEG; 404 unknown printer, 502 camera unavailable. |
+| Tunnel | `GET /printers` | Active-member dashboard; status and images refresh every five seconds. |
+| Tunnel | `GET /printers/content` | Protected HTML printer cards used by the dashboard refresh. |
+| Tunnel | `GET /printers/images/{serial}.jpg` | Protected current JPEG; 404 unknown printer, 502 camera unavailable. |
 | LAN | `POST /api/fobs` | Controller swipe array in; authorized ID array or 304 out. |
 | LAN | `GET /`, `POST /` | Printer configuration form. |
 
-Cloud responses have `Cache-Control: no-store`. JSON mutations have a 16 KiB body limit and reject unknown fields and trailing values. Validation errors return 400. Storage failures return 500; no goal returns 503. Retry failed requests. The old `POST /api/goal`, `/api/goal/versioned`, `/api/swipes/ack`, and `/machines/stream/{serial}` APIs are removed.
+Cloud responses have `Cache-Control: no-store`. JSON mutations have a 16 KiB body limit and reject unknown fields and trailing values. Validation errors return 400. Storage failures return 500; no goal returns 503. Retry failed requests. The old `POST /api/goal`, `/api/goal/versioned`, `/api/swipes/ack`, `/api/printers`, `/api/printers/{serial}/snapshot.jpg`, and `/machines/stream/{serial}` APIs are removed.
 
 ### Access goal
 
@@ -99,32 +100,65 @@ There is no in-memory goal/queue mirror, atomic-file replacement code, or separa
 ## Cloudflare API Shield mTLS setup
 
 1. Create a client certificate under **SSL/TLS → Client Certificates**, retain its private key for the calling client, and enable mTLS for the tunnel's public hostname (for example, `edge.example.com`).
-2. Deploy an API Shield/WAF custom rule with action **Block** for the entire hostname, including snapshots. Restrict access to the intended client certificate(s), for example:
+2. Deploy an API Shield/WAF custom rule with action **Block** for the hostname **except `/printers` and `/printers/*`**, which use member JWTs. Restrict machine access to the intended client certificate(s), for example:
 
    ```txt
-   (http.host eq "edge.example.com" and
+    (http.host eq "edge.example.com" and
+      not (http.request.uri.path eq "/printers" or starts_with(http.request.uri.path, "/printers/")) and
      (not cf.tls_client_auth.cert_verified or
       cf.tls_client_auth.cert_revoked or
       not (cf.tls_client_auth.cert_fingerprint_sha256 in {"<CLIENT_CERT_SHA256>"})))
    ```
 
    Replace the placeholder with the certificate's fingerprint in Cloudflare's field format. During rotation, allow both fingerprints, migrate callers, then remove/revoke the old certificate. This rule provides client authorization; edge accepts any verified, non-revoked certificate forwarded by Cloudflare.
-3. Enable the **Add TLS client auth headers** managed transform under **Rules → Settings → Managed Transforms**. Cloudflare must overwrite client-supplied values on every request. Edge requires exactly `Cf-Cert-Presented: true`, `Cf-Cert-Verified: true`, and `Cf-Cert-Revoked: false`. Missing, malformed, duplicate, unverified, or revoked status is rejected with 401. Bearer tokens are not accepted.
+3. Enable the **Add TLS client auth headers** managed transform under **Rules → Settings → Managed Transforms**. Cloudflare must overwrite client-supplied values on every request. Machine APIs require exactly `Cf-Cert-Presented: true`, `Cf-Cert-Verified: true`, and `Cf-Cert-Revoked: false`. Missing, malformed, duplicate, unverified, or revoked status is rejected with 401. Member JWTs do not grant machine API access, and mTLS does not grant printer access.
 4. Route only the protected hostname to `http://127.0.0.1:8081`, followed by a catch-all `http_status:404` ingress rule. The flow is **client certificate → Cloudflare API Shield → tunnel → local HTTP origin**. Edge trusts the local host/cloudflared; these headers are trusted-proxy assertions.
 
-**Worker transport limitation:** Cloudflare documents that [Worker mTLS certificate bindings cannot call Cloudflare-proxied services](https://developers.cloudflare.com/workers/runtime-apis/bindings/mtls/) (they return 520). A tunnel hostname is Cloudflare-proxied. A Worker coordinator therefore needs a transport capable of presenting the certificate to API Shield, such as a separately hosted mTLS-capable relay. That transport is outside this module. A Worker proxying browser requests must authenticate and authorize its own callers.
+**Worker transport limitation for machine APIs:** Cloudflare documents that [Worker mTLS certificate bindings cannot call Cloudflare-proxied services](https://developers.cloudflare.com/workers/runtime-apis/bindings/mtls/) (they return 520). A tunnel hostname is Cloudflare-proxied. A Worker coordinator therefore needs a transport capable of presenting the certificate to API Shield, such as a separately hosted mTLS-capable relay. That transport is outside this module. The printer dashboard uses direct browser requests with JWT cookies and does not need this relay.
 
 References: [API Shield mTLS configuration](https://developers.cloudflare.com/api-shield/security/mtls/configure/), [TLS client auth managed headers](https://developers.cloudflare.com/rules/transform/managed-transforms/reference/#add-tls-client-auth-headers).
 
 ## Printers
 
+### Member access setup
+
+Generate a dedicated Ed25519 key pair on a trusted machine:
+
+```sh
+openssl genpkey -algorithm ED25519 -out printer-private.pem
+openssl pkey -in printer-private.pem -outform DER | openssl base64 -A
+openssl pkey -in printer-private.pem -pubout -outform DER | openssl base64 -A
+```
+
+The first base64 value is the PKCS#8 private key: store it as the Worker's `PRINTER_JWT_PRIVATE_KEY` secret (`npx wrangler secret put PRINTER_JWT_PRIVATE_KEY` from the repository root). The second is the SPKI public key, for edgeproxy. Keep the private key in secure storage and out of the edge host/repository.
+
+Set the Worker's `PRINTER_EDGE_URL` to the HTTPS edge origin (for example `https://edge.example.com`) in `wrangler.jsonc`. Set these edge environment variables and restart:
+
+```sh
+export CONWAYEDGE_MEMBER_ISSUER=https://thelab.ms
+export CONWAYEDGE_PUBLIC_URL=https://edge.example.com
+export CONWAYEDGE_MEMBER_PUBLIC_KEY='<base64 SPKI public key>'
+```
+
+Origins must match the Worker `SITE_URL` and `PRINTER_EDGE_URL` exactly, with no trailing slash. Use HTTPS; the browser session requires Secure cookies. Leaving all three edge settings unset disables member routes with 503; partial/invalid settings prevent startup. Updating the public key invalidates previously issued printer sessions.
+
+Members can open `https://edge.example.com/printers` directly or follow `/printers` on the main site. Edge creates a ten-minute random HttpOnly nonce cookie and redirects to the Worker's `/printers?state=…`. The Worker uses existing Discord sign-in and reads the authenticated member's current D1 record. Only `active` or `trialing` subscription states grant access. It signs a five-minute EdDSA JWT with `active_member: true`, `scope: "printers:read"`, Discord subject, issuer, edge-origin audience, timestamps, and nonce.
+
+The Worker redirects to the fixed `/printers/callback` with the JWT in a URL fragment. The callback clears the fragment immediately and POSTs it to `/printers/session`; edge validates the signature, claims, same-origin request, and browser nonce before setting a Secure, HttpOnly, SameSite=Lax, host-only `__Host-thelab_printers` cookie and clearing the nonce. Tokens are never put in query strings. The callback, login, session, and JavaScript routes are public handoff resources; dashboard HTML, refresh content, and images require a valid member JWT on every request. The LAN listener does not expose these routes.
+
+Thirty seconds before expiry, the dashboard makes a top-level round-trip through the Worker to recheck membership and renew the session. This works with third-party cookies blocked. An expired main-site session requires Discord sign-in again. Revocation takes effect within five minutes **after D1 reflects the change**; the existing Stripe webhook/queue sync supplies that status. The edge does not query Stripe or D1. A copied JWT remains valid until expiry.
+
+Apply the WAF path exception described above before opening the dashboard. Do not configure Cloudflare to cache member responses or require browser client certificates on printer routes.
+
+### Printer configuration and display
+
 Open `http://<LAN-address>:8080/`. Add each printer's name, literal IP address, access code, and unique serial number, then select **Save changes**. Add and Remove edit only the draft until saved. Validation errors preserve entered values. Remove every entry and save to clear the configuration. The form works without JavaScript and supports up to 32 printers. Access codes are masked inputs but present in the page. Changed/removed printers have their MQTT connections and cameras stopped; unchanged printers stay connected.
 
-Enable Bambu LAN access. MQTT uses TLS on port 8883 with `bblp` and the access code; certificate verification is disabled for Bambu's self-signed certificates, so the printer network must be trusted. Status is requested every five seconds and partial reports are merged. Fields are `serial_number`, `name`, `gcode_file`, `subtask_name`, `gcode_state`, `print_error_code` (printer-supplied string/number or null), `remaining_print_time` (minutes), `print_percent_done`, `updated_at` (Unix seconds, initially 0), and `error`. Disconnected/stale status is retained with an error; consumers should also check `updated_at`.
+Enable Bambu LAN access. MQTT uses TLS on port 8883 with `bblp` and the access code; certificate verification is disabled for Bambu's self-signed certificates, so the printer network must be trusted. Status is requested every five seconds and partial reports are merged. The dashboard displays friendly status labels, remaining minutes/hours, last-report time, and a still image. Reports over 15 seconds old or connection errors show status unavailable and suppress the old time estimate. Before the first report it shows a waiting state. Empty printer configurations and unavailable cameras have explicit messages. Names are HTML-escaped; LAN addresses and access codes are never rendered in the member page.
 
 Cameras use the RTSPS endpoint on port 322, `/streaming/live/1`. Models with a different camera protocol are unsupported. Each printer starts a local FFmpeg loop, transcoding to 15 fps MJPEG and retaining only the latest complete JPEG in memory, even with no viewers. Failed or stalled processes retry after five seconds; 20 seconds without a complete frame terminates a stalled camera. Frames are capped at 8 MiB and discarded when the process stops.
 
-Snapshot requests return one JPEG with `Content-Length` and `Cache-Control: no-store`; clients request again to refresh. Before the first frame, during reconnects, or when the latest frame is at least 20 seconds old, requests immediately return 502. Image writes have five-second deadlines. Credentials are hidden from HTTP errors/logs but present in FFmpeg process arguments. No printer-control, enrollment, or dashboard endpoints are included.
+Snapshot requests return one JPEG with `Content-Length` and `Cache-Control: no-store`. The dashboard fetches refreshed HTML cards and reloads still images every five seconds without reloading the whole page. Before the first frame, during reconnects, or when the latest frame is at least 20 seconds old, image requests immediately return 502. Image writes have five-second deadlines. Failed refreshes show a connection warning and hide old images while retrying. Credentials are hidden from HTTP errors/logs but present in FFmpeg process arguments. No printer-control endpoints are included.
 
 ## Verify
 
@@ -132,6 +166,7 @@ Snapshot requests return one JPEG with `Content-Length` and `Cache-Control: no-s
 go test -race ./...
 go vet ./...
 go build .
+node --test dashboard_test.mjs
 ```
 
 Tests cover version ordering/restarts, atomic batch rollback, storage errors, concurrent ingestion/fetches, complete history reads, seven-day expiry, SQLite store upgrades, printer configuration reloads, listener/auth isolation, exact controller signing, and simulated camera processes. No FFmpeg, printers, Cloudflare, or root Conway module is required. This nested module is tested separately from Conway's root Go module.

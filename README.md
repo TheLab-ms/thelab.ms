@@ -54,7 +54,7 @@ npm run dev
 Create an ignored `.dev.vars` using `.dev.vars.example`. Set `AUTH_SECRET` to a
 random secret of at least 32 bytes (generate
 one with `openssl rand -hex 32`). Use the same secret across Worker instances;
-rotating it invalidates all outstanding JWTs. Use Discord development
+rotating it invalidates main-site login and OAuth JWTs. Printer JWTs use a separate Ed25519 key. Use Discord development
 credentials and a Stripe test-mode key. Register the exact Discord redirect
 `http://localhost:8787/login/discord/callback`. Open `http://localhost:8787`, matching
 `SITE_URL` exactly. Local Wrangler provides D1, Durable Objects and Queue emulation.
@@ -67,6 +67,20 @@ stripe listen --forward-to localhost:8787/webhooks/stripe
 
 Use the printed signing secret for local `STRIPE_WEBHOOK_SECRET`. Local queue
 consumers call real Discord/Stripe unless running the automated tests.
+
+## Hero image assets
+
+The landing page uses pre-rendered WebP/JPEG variants with responsive `srcset`
+selection. After replacing `static/assets/streetview.jpg`, regenerate them with:
+
+```sh
+npm run images:hero
+```
+
+Commit the generated `static/assets/streetview-{width}.{webp,jpg}` files. They are
+served directly as static assets, with no image processing needed at runtime.
+The widths in the generator and the landing page's `srcset` lists must match;
+the `sizes` values assume the original photo's 4:3 aspect ratio.
 
 ## Provider configuration
 
@@ -132,6 +146,27 @@ npm run deploy
 
 The existing `make dev` and `make deploy` commands still work. Assets are served
 directly; signup, callback, payment and webhook paths run through the Worker first.
+
+## Member printer dashboard
+
+The standalone [`edgeproxy`](edgeproxy/README.md) serves a member-facing dashboard at
+`https://<edge-host>/printers` with printer status, remaining print time, and still
+images refreshing every five seconds. Main-site `/printers` is a shortcut into its
+sign-in flow. The browser talks directly to edgeproxy for page and image requests.
+
+Set `PRINTER_EDGE_URL` to the HTTPS edge origin in `wrangler.jsonc`, and store the
+dedicated base64 PKCS#8 Ed25519 private key with
+`npx wrangler secret put PRINTER_JWT_PRIVATE_KEY`. Configure the corresponding
+public key, issuer, and public origin on edgeproxy. See the edge README for key
+generation and Cloudflare WAF path exceptions.
+
+The Worker reuses Discord/member login and grants printer JWTs only when the
+authenticated member's current D1 subscription state is `active` or `trialing`.
+Printer JWTs have a five-minute lifetime, an edge-specific audience, and an
+active-member/read-scope claim. A nonce-bound browser handoff establishes an
+HttpOnly cookie on the edge host. Edge verifies every dashboard/image request.
+Automatic renewal rechecks D1; membership changes take effect within five minutes
+after Stripe webhook/queue reconciliation updates the database.
 
 ## Member administration and discount approval
 

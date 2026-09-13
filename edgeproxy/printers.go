@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"os/exec"
-	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -89,7 +88,7 @@ func (s *printerSet) replace(configs []printerConfig) {
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		p := &printer{config: config, ctx: ctx, cancel: cancel, data: printerStatus{
-			SerialNumber: serial, Name: config.Name, Error: "waiting for printer status",
+			SerialNumber: serial, Name: config.Name, Error: "waiting for printer status", RemainingPrintTime: -1,
 		}}
 		s.printers[serial] = p
 		p.wg.Add(2)
@@ -99,20 +98,6 @@ func (s *printerSet) replace(configs []printerConfig) {
 }
 
 func (s *printerSet) close() { s.replace(nil) }
-
-func (s *printerSet) status(w http.ResponseWriter, r *http.Request) {
-	rows := []printerStatus{}
-	s.mu.RLock()
-	for _, p := range s.printers {
-		p.mu.Lock()
-		rows = append(rows, p.data)
-		p.mu.Unlock()
-	}
-	s.mu.RUnlock()
-	sort.Slice(rows, func(i, j int) bool { return rows[i].SerialNumber < rows[j].SerialNumber })
-	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, rows)
-}
 
 func (p *printer) report(payload []byte) {
 	var message struct {

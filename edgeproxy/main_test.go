@@ -69,7 +69,7 @@ func TestCloudflareMTLSAuth(t *testing.T) {
 	}
 	// Header names are case-insensitive on the wire. Authorization is no longer
 	// involved in authentication when the mTLS assertions are valid.
-	w := request(cloud, "GET", "/api/printers", "",
+	w := request(cloud, "GET", "/api/swipes", "",
 		"cf-cert-presented", "true", "cf-cert-verified", "true", "cf-cert-revoked", "false",
 		"Authorization", "Bearer obsolete")
 	if w.Code != http.StatusOK {

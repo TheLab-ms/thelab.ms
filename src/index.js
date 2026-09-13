@@ -3,6 +3,7 @@ import { loginDestination, memberToken, signedInMember, startLogin, TOKEN_AGE, v
 import { coordinated } from './membership.js';
 import { adminConfigured, adminRequest, finishAdminLogin } from './admin.js';
 import { logError, requestContext } from './logging.js';
+import { printerAccess } from './printers.js';
 export { Membership } from './membership.js';
 
 const events = new Set([
@@ -135,6 +136,7 @@ export default {
       ['/login/discord/callback', ['GET', callback]],
       ['/payment/success', ['GET', success]],
       ['/payment/resume', ['GET', resume]],
+      ['/printers', ['GET', printerAccess]],
       ['/webhooks/stripe', ['POST', webhook]],
       ['/admin/login', ['GET', (request, env) => signup(request, env, true)]],
     ]);

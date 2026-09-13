@@ -51,6 +51,7 @@ export function memberToken(env, member) {
 // Only known GET destinations can survive the OAuth round-trip.
 export function loginDestination(value, purpose) {
   if (purpose === 'admin') return /^\/admin\/?(?:\?page=[1-9]\d{0,7})?$/.test(value) || /^\/admin\/members\/[1-9][0-9]{16,19}$/.test(value) ? value : '/admin';
+  if (purpose === 'member' && /^\/printers\?state=[a-f0-9]{64}$/.test(value)) return value;
   return /^\/payment\/success\?session_id=cs_[A-Za-z0-9_]+$/.test(value) ? value : '/payment/resume';
 }
 
