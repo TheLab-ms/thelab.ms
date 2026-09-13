@@ -2,6 +2,7 @@ import { HttpError } from './http.js';
 
 export const eventTypes = {
   MemberRegistered: 'Member registered',
+  WaiverSigned: 'Waiver signed',
   DiscordAccountChanged: 'Discord account changed',
   DiscordUsernameChanged: 'Discord username changed',
   DiscordEmailChanged: 'Discord email changed',
@@ -38,7 +39,7 @@ export async function queryEvents(env, { memberID, type = '', current = 1, limit
   const where = clauses.length ? ` WHERE ${clauses.join(' AND ')}` : '';
   const [count, rows] = await env.DB.batch([
     env.DB.prepare(`SELECT COUNT(*) AS total FROM member_events e${where}`).bind(...values),
-    env.DB.prepare(`SELECT e.*, m.discord_user_id, m.discord_username, m.billing_name, m.name_override
+    env.DB.prepare(`SELECT e.*, m.discord_user_id, m.discord_username, m.billing_name, m.name_override, m.email, m.waiver_name
       FROM member_events e LEFT JOIN members m ON m.member_id = e.member_id${where}
       ORDER BY e.created DESC, e.id DESC LIMIT ? OFFSET ?`).bind(...values, limit, (current - 1) * limit),
   ]);

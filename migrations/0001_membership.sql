@@ -1,8 +1,10 @@
 CREATE TABLE members (
   member_id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
-  discord_user_id TEXT NOT NULL UNIQUE,
-  discord_username TEXT NOT NULL,
-  discord_email TEXT NOT NULL,
+  discord_user_id TEXT UNIQUE,
+  discord_username TEXT NOT NULL DEFAULT '',
+  discord_email TEXT NOT NULL DEFAULT '',
+  email TEXT UNIQUE CHECK (email IS NULL OR (email = lower(trim(email)) AND length(email) > 0)),
+  waiver_name TEXT NOT NULL DEFAULT '',
   billing_name TEXT NOT NULL DEFAULT '',
   billing_email TEXT NOT NULL DEFAULT '',
   name_override TEXT NOT NULL DEFAULT '',
@@ -20,6 +22,21 @@ CREATE TABLE members (
 ) STRICT;
 CREATE INDEX members_created ON members(created DESC, discord_user_id DESC);
 
+CREATE TABLE waivers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  member_id TEXT REFERENCES members(member_id) ON DELETE SET NULL,
+  version INTEGER NOT NULL,
+  content TEXT NOT NULL,
+  created INTEGER NOT NULL DEFAULT (unixepoch()),
+  name TEXT NOT NULL,
+  email TEXT NOT NULL,
+  agreements TEXT NOT NULL CHECK (json_valid(agreements))
+) STRICT;
+CREATE INDEX waivers_member ON waivers(member_id, id DESC);
+-- Signature evidence, including the exact source text, is append-only.
+CREATE TRIGGER waiver_evidence_immutable BEFORE UPDATE OF version, content, created, name, email, agreements ON waivers BEGIN SELECT RAISE(ABORT, 'Waiver evidence is immutable'); END;
+CREATE TRIGGER waiver_retained BEFORE DELETE ON waivers BEGIN SELECT RAISE(ABORT, 'Waiver evidence is retained'); END;
+
 -- History is written in the same transaction as the member change, including
 -- changes made by sign-in and Stripe reconciliation. Retain it indefinitely.
 CREATE TABLE member_events (
@@ -36,6 +53,14 @@ CREATE INDEX member_events_type_created ON member_events(event_type, created DES
 CREATE TRIGGER member_registered AFTER INSERT ON members
 BEGIN
   INSERT INTO member_events (member_id, event_type) VALUES (NEW.member_id, 'MemberRegistered');
+END;
+
+CREATE TRIGGER waiver_signed AFTER INSERT ON waivers
+BEGIN
+  UPDATE members SET waiver_name = CASE WHEN waiver_name = '' THEN NEW.name ELSE waiver_name END,
+    metadata_version = metadata_version + 1 WHERE member_id = NEW.member_id;
+  INSERT INTO member_events (member_id, event_type, details)
+    VALUES (NEW.member_id, 'WaiverSigned', json_object('waiver_id', NEW.id, 'version', NEW.version));
 END;
 
 -- IS NOT compares NULLs safely. Version/sync timestamp updates and repeated

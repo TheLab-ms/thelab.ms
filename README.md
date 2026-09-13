@@ -9,8 +9,9 @@ Queue for Discord role reconciliation. There are **no scheduled triggers**.
 1. Choose monthly/yearly billing on the landing page. `/signup` redirects to
    Discord with `identify email` and browser-bound, expiring JWT state.
 2. `/login/discord/callback` requires a verified email and existing membership in
-    TheLab's Discord guild. Accounts are linked by Discord ID, never
-   matched to a Stripe customer by email. OAuth tokens are not retained.
+    TheLab's Discord guild. Existing accounts are resolved by Discord ID. A first
+   login claims an unlinked waiver-only member with the same normalized, verified
+   email. Stripe customers are never matched by email. OAuth tokens are not retained.
    The app issues signed JWTs in HttpOnly, SameSite=Lax cookies (Secure on HTTPS),
    valid for 24 hours for members. Discord returns an opaque access token, not an
    identity JWT; the browser stores only the app's JWT. No login sessions are stored
@@ -21,7 +22,9 @@ Queue for Discord role reconciliation. There are **no scheduled triggers**.
    Discord and clears the cookie on success or failure. State is stateless: a copied
    JWT and its original cookie remain valid until expiry; Discord authorization
    codes are single-use.
-3. Members go straight to Stripe Checkout, which shows the final price with any
+3. Members without a linked liability waiver go to `/waiver?signup=1` before
+   Stripe Checkout. Signing continues through `/payment/resume`, preserving the
+   selected billing cycle. Checkout shows the final price with any
    admin-assigned discount applied automatically. Members cannot select or change discounts.
    Existing subscriptions, including past-due ones, go to Stripe Billing Portal.
 4. `/payment/success` checks the signed-in user's Checkout ownership, completion,
@@ -84,6 +87,48 @@ the `sizes` values assume the original photo's 4:3 aspect ratio.
 
 ## Provider configuration
 
+### Liability waiver and Cloudflare Turnstile
+
+Anyone can sign at **`/waiver`** without Discord authentication. Public signing
+uses the entered name/email, associates by normalized email, and creates a
+waiver-only member when needed. A first Discord member login or signup claims
+that member using Discord's verified email; an email already linked to another
+Discord account cannot transfer its membership. Email matching uses trimmed,
+lowercase addresses, without provider-specific dot or plus-address rewriting.
+Ambiguous matches require leadership assistance.
+
+During signup, **`/waiver?signup=1`** instead attaches to the authenticated member,
+even when the signer enters another name/email. Public `/waiver` remains usable
+for other people even in a browser with a member login. Expired signup sessions
+must sign in again and review the form. Both paths require all agreements and a
+successful server-side Turnstile verification before recording a signature.
+
+The text and version live in **`src/waiver-content.js`**. It currently contains
+Conway's sample placeholder, as requested; replace it with TheLab's actual waiver
+before launch. Increment `version` when changing the text and deploy the Worker.
+The format supports `# Title`, blank-line-separated paragraphs, and required
+`- [ ] Agreement` checkboxes. Text is escaped and displayed literally. A content
+hash and version check reject forms opened before a text change, including changes
+where the version was accidentally left unchanged.
+
+Every signature retains its exact text, version, agreements, entered name/email,
+timestamp, and stable member link in D1. Evidence is immutable and retained when
+a member is deleted. Existing linked signatures remain sufficient for checkout
+after source updates. Admin member pages show waiver status and signature evidence;
+waiver-only members are searchable by name/email and use stable-ID admin URLs.
+
+Create a **Turnstile widget** in Cloudflare, allowing the hostname in `SITE_URL`.
+Set `TURNSTILE_SITE_KEY` in `wrangler.jsonc` and store the secret with:
+
+```sh
+npx wrangler secret put TURNSTILE_SECRET_KEY
+```
+
+For local development, use a development widget/key pair with `localhost` allowed
+and set both keys in `.dev.vars`. Siteverify must return the configured hostname
+and action `waiver`; verification failures and provider outages fail closed.
+Turnstile tokens are single-use, so retrying a submission requires a fresh challenge.
+
 ### Discord
 
 Register `https://thelab.ms/login/discord/callback` in the OAuth application.
@@ -139,13 +184,14 @@ npx wrangler secret put DISCORD_BOT_TOKEN
 npx wrangler secret put AUTH_SECRET
 npx wrangler secret put STRIPE_SECRET_KEY
 npx wrangler secret put STRIPE_WEBHOOK_SECRET
+npx wrangler secret put TURNSTILE_SECRET_KEY
 npx wrangler d1 migrations apply thelab-membership --remote
 npx wrangler deploy --dry-run
 npm run deploy
 ```
 
 The existing `make dev` and `make deploy` commands still work. Assets are served
-directly; signup, callback, payment and webhook paths run through the Worker first.
+directly; signup, waiver, callback, payment and webhook paths run through the Worker first.
 
 ## Member machines dashboard
 
@@ -186,8 +232,8 @@ The list includes all members registered in this app, including pending and
 inactive members, in pages of 25 ordered newest first. Open a member to view IDs,
 registration and sync timestamps, and last-synced subscription status, and edit:
 
-- Name override and internal notes. Member names always use **name override →
-  Stripe billing name → Discord username** (the first nonblank value).
+- Name override and internal notes. Member names use **name override →
+  Stripe billing name → Discord username → waiver name → member email**.
 - Discord ID and Stripe customer/subscription IDs. The subscription must belong
   to the customer; accounts/customers already linked to another member are rejected.
 - Saved monthly/yearly billing cycle and assigned discount category.
@@ -248,6 +294,7 @@ SQLite triggers in the initial migration record registration and actual changes 
 - Internal notes (an update marker only, without copying note contents).
 - Saved billing cycle and discount category.
 - Stripe customer/subscription links and the stored subscription status.
+- Signed liability waivers (signature ID and version).
 
 Changed values are stored as structured before/after details. History is written
 atomically with each database change, including admin edits, Discord sign-in
@@ -318,6 +365,8 @@ mappings while subscriptions are in use.
 - `src/member-events.js` and `src/event-views.js`: member-history queries, filters,
   and rendering. The initial D1 migration owns automatic change capture.
 - `src/printers.js`: member authorization and the edge JWT handoff.
+- `src/waiver.js` and `src/waiver-content.js`: public signing, Turnstile verification,
+  source-controlled waiver text, and read-only admin signature evidence.
 - `src/http.js` and `src/logging.js`: HTTP utilities and redacted diagnostics.
 
 Discord and Stripe IDs are resolved at request/queue boundaries. Internal member

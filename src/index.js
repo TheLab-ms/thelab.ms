@@ -6,6 +6,7 @@ import { coordinated, registerMember } from './membership.js';
 import { adminConfigured, adminRequest, finishAdminLogin } from './admin.js';
 import { logError, requestContext } from './logging.js';
 import { printerAccess } from './printers.js';
+import { waiverRequest } from './waiver.js';
 export { Membership } from './membership.js';
 
 const events = new Set([
@@ -58,7 +59,11 @@ async function callback(request, env) {
   if (pending.purpose === 'admin') return finishAdminLogin(env, user, guildMember, pending.return_to);
   if (pending.purpose === 'member') {
     let member = await env.DB.prepare('SELECT * FROM members WHERE discord_user_id = ?').bind(user.id).first();
-    if (!member) throw new HttpError(404, 'No membership found for this Discord account. Please choose a membership to sign up.');
+    if (!member) {
+      const pendingMember = await env.DB.prepare('SELECT member_id FROM members WHERE email = ? AND discord_user_id IS NULL').bind(user.email.trim().toLowerCase()).first();
+      if (!pendingMember) throw new HttpError(404, 'No membership found for this Discord account. Please choose a membership to sign up.');
+      member = await registerMember(env, user);
+    }
     member = await coordinated(env, member.member_id, 'refreshIdentity', { user });
     return finishLogin(env, `${origin(env)}${loginDestination(pending.return_to, 'member')}`, 'member', await memberToken(env, member));
   }
@@ -115,6 +120,7 @@ export async function processMessage(body, env) {
 
 const routes = new Map([
   ['/signup', ['GET', signup]],
+  ['/waiver', ['GET, POST', waiverRequest]],
   ['/login/discord/callback', ['GET', callback]],
   ['/payment/success', ['GET', success]],
   ['/payment/resume', ['GET', resume]],
@@ -136,7 +142,7 @@ export default {
         if (response.status >= 400) logError('assets.failed', new HttpError(response.status, 'Asset request failed.'), context, env);
         return response;
       }
-      if (route && request.method !== route[0]) {
+      if (route && !route[0].split(', ').includes(request.method)) {
         logError('request.rejected', new HttpError(405, 'Method not allowed.'), context, env);
         return new Response('Method not allowed', { status: 405, headers: { Allow: route[0], 'Cache-Control': 'no-store' } });
       }

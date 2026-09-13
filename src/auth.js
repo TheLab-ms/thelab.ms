@@ -58,8 +58,8 @@ export function finishLogin(env, destination, audience, token) {
 // Only known GET destinations can survive the OAuth round-trip.
 export function loginDestination(value, purpose) {
   if (purpose === 'admin') {
-    if (/^\/admin\/members\/[1-9][0-9]{16,19}$/.test(value)) return value;
-    if (/^\/admin(?:\/members\/[1-9][0-9]{16,19})?\/events(?:\?[^#]*)?$/.test(value)) {
+    if (/^\/admin\/members\/(?:[1-9][0-9]{16,19}|[a-f0-9]{32})$/.test(value)) return value;
+    if (/^\/admin(?:\/members\/(?:[1-9][0-9]{16,19}|[a-f0-9]{32}))?\/events(?:\?[^#]*)?$/.test(value)) {
       try {
         eventListParams(new URLSearchParams(value.split('?')[1]));
         return value;
@@ -75,6 +75,7 @@ export function loginDestination(value, purpose) {
     return '/admin';
   }
   if (purpose === 'member' && /^\/machines\?state=[a-f0-9]{64}$/.test(value)) return value;
+  if (purpose === 'member' && value === '/waiver?signup=1') return value;
   return /^\/payment\/success\?session_id=cs_[A-Za-z0-9_]+$/.test(value) ? value : '/payment/resume';
 }
 

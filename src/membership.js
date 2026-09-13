@@ -116,6 +116,11 @@ export class Membership extends DurableObject {
     await this.env.DB.prepare('UPDATE members SET bill_annually = ?, metadata_version = metadata_version + 1 WHERE member_id = ?')
       .bind(annual ? 1 : 0, member.member_id).run();
 
+    // Enforce this inside the same lock as checkout, including direct resume calls.
+    if (!await this.env.DB.prepare('SELECT id FROM waivers WHERE member_id = ? LIMIT 1').bind(member.member_id).first()) {
+      return `${origin(this.env)}/waiver?signup=1`;
+    }
+
     // Discounts come only from the current admin-managed member record.
     const { price, coupon } = await this.resolvePricing(annual, member.discount_type);
     member = await this.ensureCustomer(member);
@@ -201,6 +206,7 @@ export class Membership extends DurableObject {
   async updateMetadata(member, { fields }) {
     const value = validateMetadata(fields);
     const id = member.discord_user_id;
+    if (id && !value.discord_user_id) throw new HttpError(400, 'An existing Discord association must be transferred to a valid account, not cleared.');
     if (member.metadata_version !== value.metadata_version) throw new HttpError(409, 'This member was changed after you opened the form. Reload the member and reapply your edits.');
     const discordChanged = member.discord_user_id !== value.discord_user_id;
     const customerChanged = member.stripe_customer_id !== value.stripe_customer_id;
@@ -212,7 +218,7 @@ export class Membership extends DurableObject {
       const duplicate = await this.env.DB.prepare(`SELECT member_id FROM members WHERE member_id != ?
         AND (discord_user_id = ? OR stripe_customer_id = ?)`).bind(member.member_id, value.discord_user_id, value.stripe_customer_id).first();
       if (duplicate) throw new HttpError(409, 'That Discord account or Stripe customer already belongs to another membership.');
-      if (discordChanged) {
+      if (discordChanged && value.discord_user_id) {
         const account = await discord(this.env, `/guilds/${this.env.DISCORD_GUILD_ID}/members/${value.discord_user_id}`);
         if (account.user?.id !== value.discord_user_id || !account.user.username || account.user.bot) throw new HttpError(400, 'Choose a valid Discord member account.');
         username = account.user.username;
@@ -260,7 +266,7 @@ export class Membership extends DurableObject {
         `${editKey}-${sub.id}`);
       if (value.stripe_customer_id) await stripe(this.env, `/customers/${value.stripe_customer_id}`, metadata,
         `${editKey}-${value.stripe_customer_id}`);
-      if (discordChanged || customerChanged) {
+      if (id && (discordChanged || customerChanged)) {
         try { await discord(this.env, `/guilds/${this.env.DISCORD_GUILD_ID}/members/${id}/roles/${this.env.DISCORD_ROLE_ID}`, 'DELETE'); }
         catch (error) { if (error.providerStatus !== 404) throw error; }
       }
@@ -302,6 +308,7 @@ export class Membership extends DurableObject {
       .bind(current?.id || null, current?.status || null, now(), billing.name || '', billing.email || '', member.member_id).run();
 
     const path = `/guilds/${this.env.DISCORD_GUILD_ID}/members/${id}/roles/${this.env.DISCORD_ROLE_ID}`;
+    if (!id) return;
     // Repeating PUT/DELETE is safe if the process crashes after Discord succeeds.
     // Retry even if the saved Stripe state matches: a previous Discord call may have failed.
     // Failed removals/additions remain unacknowledged and are retried by the queue.
@@ -311,9 +318,22 @@ export class Membership extends DurableObject {
 }
 
 export async function registerMember(env, user) {
-  await env.DB.prepare(`INSERT INTO members (discord_user_id, discord_username, discord_email) VALUES (?, ?, ?)
-    ON CONFLICT(discord_user_id) DO NOTHING`).bind(user.id, user.username, user.email.toLowerCase()).run();
-  return env.DB.prepare('SELECT * FROM members WHERE discord_user_id = ?').bind(user.id).first();
+  const email = user.email.trim().toLowerCase();
+  // One D1 transaction claims a pre-signup member or registers a new one. Never
+  // transfer a linked identity by email, or let concurrent logins create duplicates.
+  await env.DB.batch([
+    env.DB.prepare(`UPDATE members SET discord_user_id = ?, discord_username = ?, discord_email = ?,
+      auth_version = auth_version + 1, metadata_version = metadata_version + 1
+      WHERE email = ? AND discord_user_id IS NULL
+      AND NOT EXISTS (SELECT 1 FROM members WHERE discord_user_id = ?)`)
+      .bind(user.id, user.username, email, email, user.id),
+    env.DB.prepare(`INSERT INTO members (discord_user_id, discord_username, discord_email, email)
+      SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM members WHERE discord_user_id = ?)
+      ON CONFLICT DO NOTHING`).bind(user.id, user.username, email, email, user.id),
+  ]);
+  const member = await env.DB.prepare('SELECT * FROM members WHERE discord_user_id = ?').bind(user.id).first();
+  if (!member) throw new HttpError(409, 'This email is already linked to another Discord account. Please contact leadership.');
+  return member;
 }
 
 export async function coordinated(env, memberID, operation, input = {}) {

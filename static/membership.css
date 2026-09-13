@@ -110,6 +110,14 @@
 
 .membership-page .footer { text-align: center; padding: 2rem var(--container-pad); }
 
+.waiver-page { padding: clamp(1.5rem, 5vw, 3rem); }
+.waiver-page p { margin: 1rem 0; }
+.waiver-form { display: grid; gap: 1rem; margin-top: 2rem; }
+.waiver-form > input { width: 100%; padding: .8rem; font: inherit; color: var(--color-text); background: var(--color-surface); border: 1px solid var(--color-border-light); border-radius: var(--radius-md); }
+.waiver-agreement { display: flex; align-items: flex-start; gap: .75rem; }
+.waiver-agreement input { margin-top: .35rem; width: 1.25rem; height: 1.25rem; flex-shrink: 0; }
+.waiver-error { border-left: 3px solid var(--color-accent); padding: 1rem; }
+
 @media (max-width: 480px) {
   .membership-actions { flex-direction: column; }
   .membership-actions .btn { white-space: normal; padding: 0.875rem 1rem; }

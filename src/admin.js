@@ -7,7 +7,8 @@ import { editor, memberList, page } from './admin-views.js';
 import { memberListParams, memberListURL } from './admin-search.js';
 import { eventListParams, eventListURL, queryEvents } from './member-events.js';
 import { eventList } from './event-views.js';
-import { memberName } from './member-metadata.js';
+import { memberName, memberPath } from './member-metadata.js';
+import { memberWaivers } from './waiver.js';
 
 const PAGE_SIZE = 25;
 
@@ -27,13 +28,14 @@ export async function finishAdminLogin(env, user, guildMember, destination) {
 
 async function list(request, env, csrf) {
   const { current, query } = memberListParams(new URL(request.url).searchParams);
-  const columns = ['discord_user_id', 'discord_username', 'discord_email', 'billing_name', 'billing_email', 'name_override'];
+  const columns = ['discord_user_id', 'discord_username', 'discord_email', 'billing_name', 'billing_email', 'name_override', 'email', 'waiver_name'];
   const filter = query ? ` WHERE ${columns.map(column => `${column} LIKE ? ESCAPE '\\'`).join(' OR ')}` : '';
   const values = query ? columns.map(() => `%${query.replace(/[\\%_]/g, '\\$&')}%`) : [];
   const [count, members] = await env.DB.batch([
     env.DB.prepare(`SELECT COUNT(*) AS total FROM members${filter}`).bind(...values),
-    env.DB.prepare(`SELECT discord_user_id, discord_username, discord_email, created, bill_annually, discount_type,
-      name_override, billing_name, stripe_subscription_id, stripe_subscription_state, stripe_synced_at FROM members${filter} ORDER BY created DESC, discord_user_id DESC LIMIT ? OFFSET ?`).bind(...values, PAGE_SIZE, (current - 1) * PAGE_SIZE),
+    env.DB.prepare(`SELECT member_id, email, waiver_name, discord_user_id, discord_username, discord_email, created, bill_annually, discount_type,
+      EXISTS(SELECT 1 FROM waivers WHERE waivers.member_id = members.member_id) AS waiver_signed,
+      name_override, billing_name, stripe_subscription_id, stripe_subscription_state, stripe_synced_at FROM members${filter} ORDER BY created DESC, discord_user_id DESC, member_id DESC LIMIT ? OFFSET ?`).bind(...values, PAGE_SIZE, (current - 1) * PAGE_SIZE),
   ]);
   const total = count.results[0].total, pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   if (current > pages) return redirect(memberListURL(pages, query));
@@ -58,7 +60,7 @@ async function history(request, env, csrf, member) {
 
 export async function adminRequest(request, env, context = requestContext(request)) {
   const url = new URL(request.url), path = url.pathname;
-  const match = path.match(/^\/admin\/members\/([1-9][0-9]{16,19})(\/events)?$/);
+  const match = path.match(/^\/admin\/members\/([1-9][0-9]{16,19}|[a-f0-9]{32})(\/events)?$/);
   const methods = path === '/admin' || path === '/admin/' || path === '/admin/events' || match?.[2] ? ['GET'] : path === '/admin/logout' ? ['POST'] : match ? ['GET', 'POST'] : [];
   if (!methods.length) {
     logError('admin.rejected', new HttpError(404, 'Admin page not found.'), context, env);
@@ -90,7 +92,7 @@ export async function adminRequest(request, env, context = requestContext(reques
     requireRole(env, guildMember);
     if (path === '/admin/events') return await history(request, env, csrf);
     if (!match) return await list(request, env, csrf);
-    const member = await env.DB.prepare('SELECT * FROM members WHERE discord_user_id = ?').bind(match[1]).first();
+    const member = await env.DB.prepare(`SELECT * FROM members WHERE ${match[1].length === 32 ? 'member_id' : 'discord_user_id'} = ?`).bind(match[1]).first();
     if (!member) throw new HttpError(404, 'Member not found.');
     if (match[2]) return await history(request, env, csrf, member);
     if (fields) {
@@ -98,12 +100,12 @@ export async function adminRequest(request, env, context = requestContext(reques
       catch (error) {
         logError('admin.save_failed', error, context, env);
         const { events } = await queryEvents(env, { memberID: member.member_id, limit: 10 });
-        return editor(member, fields, csrf, env, error instanceof HttpError ? error.message : 'Saving failed. Please try again.', error instanceof HttpError ? error.status : 500, events);
+        return editor(member, fields, csrf, env, error instanceof HttpError ? error.message : 'Saving failed. Please try again.', error instanceof HttpError ? error.status : 500, events, await memberWaivers(env, member));
       }
-      return redirect(`/admin/members/${fields.discord_user_id.trim()}?saved=1`);
+      return redirect(`${memberPath({ ...member, discord_user_id: fields.discord_user_id.trim() })}?saved=1`);
     }
     const { events } = await queryEvents(env, { memberID: member.member_id, limit: 10 });
-    return editor(member, null, csrf, env, url.searchParams.get('saved') === '1' ? 'Member metadata saved.' : '', 200, events);
+    return editor(member, null, csrf, env, url.searchParams.get('saved') === '1' ? 'Member metadata saved.' : '', 200, events, await memberWaivers(env, member));
   } catch (error) {
     logError('admin.failed', error, context, env);
     return page('Admin access', `<p role="alert">${e(error instanceof HttpError ? error.message : 'Admin is temporarily unavailable. Please try again.')}</p><p><a href="/admin">Return to members</a> · <a href="/admin/login">Sign in again</a></p>`, csrf, error instanceof HttpError ? error.status : 500);

@@ -1,6 +1,6 @@
 import { escapeHTML as e } from './http.js';
 import { discounts, grantsMembership } from './membership-policy.js';
-import { memberName } from './member-metadata.js';
+import { memberName, memberPath } from './member-metadata.js';
 import { MAX_SEARCH_LENGTH, memberListURL } from './admin-search.js';
 import { recentHistory } from './event-views.js';
 
@@ -41,7 +41,7 @@ function subscriptionLink(member, env) {
 }
 
 export function memberList(members, { total, current, pages, query = '' }, env, csrf) {
-	const rows = members.map(m => `<tr><th scope="row"><a class="admin-member-name" href="/admin/members/${e(m.discord_user_id)}">${e(memberName(m))}</a><small>${e(m.discord_email || 'No Discord email')}</small><small class="admin-id">Discord ID: ${e(m.discord_user_id)}</small></th><td>${statusBadge(m)}<small>Synced: ${timestamp(m.stripe_synced_at, true)}</small><small>${subscriptionLink(m, env)}</small></td><td>${m.bill_annually ? 'Yearly' : 'Monthly'}<small>${e(labelDiscount(m.discount_type))}</small></td><td>${timestamp(m.created, true)}</td></tr>`).join('');
+	const rows = members.map(m => `<tr><th scope="row"><a class="admin-member-name" href="${e(memberPath(m))}">${e(memberName(m))}</a><small>${e(m.discord_email || m.email || 'No email')}</small><small class="admin-id">Discord ID: ${e(m.discord_user_id || 'Not linked')}</small><small>${m.waiver_signed ? 'Waiver signed' : 'No linked waiver'}</small></th><td>${statusBadge(m)}<small>Synced: ${timestamp(m.stripe_synced_at, true)}</small><small>${subscriptionLink(m, env)}</small></td><td>${m.bill_annually ? 'Yearly' : 'Monthly'}<small>${e(labelDiscount(m.discount_type))}</small></td><td>${timestamp(m.created, true)}</td></tr>`).join('');
 	const empty = query ? 'No members match your search.' : 'No members have registered yet.';
 	return page('Registered members', `<form method="get" action="/admin" role="search" class="admin-form admin-search">
     <label for="member-search">Search members</label>
@@ -57,16 +57,17 @@ function select(name, label, value, choices) {
 	return `<div class="admin-field"><label for="${name}">${e(label)}</label><select id="${name}" name="${name}">${choices.map(([key, text]) => `<option value="${e(key)}"${key === value ? ' selected' : ''}>${e(text)}</option>`).join('')}</select></div>`;
 }
 
-export function editor(member, fields, csrf, env, message = '', status = 200, events = []) {
+export function editor(member, fields, csrf, env, message = '', status = 200, events = [], waivers = '') {
 	const f = fields || { ...member, billing: member.bill_annually ? 'yearly' : 'monthly' };
 	const account = [
+		['Member email', member.email], ['Waiver name', member.waiver_name],
 		['Discord username', member.discord_username], ['Discord email', member.discord_email],
 		['Billing name (Stripe)', member.billing_name], ['Billing email (Stripe)', member.billing_email],
 	];
 	const dates = [['Registered', member.created], ['Stripe last synced', member.stripe_synced_at], ['Discord last synced', member.discord_last_synced]];
 	return page(`Edit ${memberName(member)}`, `<p class="admin-back"><a href="/admin">← All members</a></p>${message ? `<p class="admin-notice${status >= 400 ? ' admin-notice--error' : ''}" role="${status >= 400 ? 'alert' : 'status'}">${e(message)}</p>` : ''}
     <section class="admin-member-summary" aria-label="Subscription summary"><div class="admin-summary-line">${statusBadge(member)}${subscriptionLink(member, env)}</div><p class="admin-help">Stored subscription state. Active and trialing qualify for membership; Stripe changes appear after sync.</p></section>
-    <div class="admin-editor-layout"><form method="post" action="/admin/members/${e(member.discord_user_id)}" class="admin-form admin-editor">
+    <div class="admin-editor-layout"><form method="post" action="${e(memberPath(member))}" class="admin-form admin-editor">
     <input type="hidden" name="csrf" value="${e(csrf)}"><input type="hidden" name="metadata_version" value="${e(f.metadata_version)}">
     <section class="admin-section" aria-labelledby="member-settings"><h2 id="member-settings">Member settings</h2>
     ${input('name_override', 'Name override', f.name_override, 160, 'Leave blank to use the Stripe billing name, then Discord username.')}
@@ -76,9 +77,9 @@ export function editor(member, fields, csrf, env, message = '', status = 200, ev
     </div><p class="admin-help">Discounts apply automatically and can only be changed by admins. Choose “Standard rate” to remove a discount. Send the member to <a href="/payment/resume">/payment/resume</a> to continue checkout.</p>
     </fieldset><div class="admin-field"><label for="notes">Internal notes</label><textarea id="notes" name="notes" maxlength="5000" rows="4">${e(f.notes ?? '')}</textarea></div>
     </section><details class="admin-section admin-linked-accounts"${status >= 400 ? ' open' : ''}><summary>Linked accounts <span>Edit Discord and Stripe IDs</span></summary><div class="admin-linked-fields">
-    ${input('discord_user_id', 'Discord ID', f.discord_user_id, 20, 'Changing this ID transfers membership to that Discord account. Its email appears after it signs in.', true)}
+    ${input('discord_user_id', 'Discord ID', f.discord_user_id, 20, 'Changing this ID transfers membership to that Discord account. Its email appears after it signs in. Waiver-only members can leave it blank.', Boolean(member.discord_user_id))}
     ${input('stripe_customer_id', 'Stripe customer ID', f.stripe_customer_id, 255)}
     ${input('stripe_subscription_id', 'Stripe subscription ID', f.stripe_subscription_id, 255, 'Must belong to the customer above. Stripe sync selects the current membership subscription and may replace this ID.')}
-    </div></details><div class="admin-actions"><button class="btn btn-primary" type="submit">Save changes</button><a href="/admin/members/${e(member.discord_user_id)}">Reload member</a></div></form>
-    <aside class="admin-section admin-account" aria-labelledby="account-details"><h2 id="account-details">Account details</h2><p class="admin-help">Read-only · Updated from Discord sign-in and Stripe sync.</p><dl class="admin-account-fields">${account.map(([label, value]) => `<div><dt>${e(label)}</dt><dd>${e(value || '—')}</dd></div>`).join('')}</dl><dl class="admin-account-dates">${dates.map(([label, value]) => `<div><dt>${e(label)}</dt><dd>${timestamp(value)}</dd></div>`).join('')}</dl></aside></div>${recentHistory(member, events)}`, csrf, status);
+    </div></details><div class="admin-actions"><button class="btn btn-primary" type="submit">Save changes</button><a href="${e(memberPath(member))}">Reload member</a></div></form>
+    <aside class="admin-section admin-account" aria-labelledby="account-details"><h2 id="account-details">Account details</h2><p class="admin-help">Read-only · Updated from Discord sign-in and Stripe sync.</p><dl class="admin-account-fields">${account.map(([label, value]) => `<div><dt>${e(label)}</dt><dd>${e(value || '—')}</dd></div>`).join('')}</dl><dl class="admin-account-dates">${dates.map(([label, value]) => `<div><dt>${e(label)}</dt><dd>${timestamp(value)}</dd></div>`).join('')}</dl></aside></div>${waivers}${recentHistory(member, events)}`, csrf, status);
 }

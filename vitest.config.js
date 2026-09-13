@@ -18,6 +18,8 @@ export default defineConfig(async () => ({
         DISCORD_ADMIN_ROLE_ID: '444444444444444444',
         STRIPE_SECRET_KEY: 'sk_test_fake',
         STRIPE_WEBHOOK_SECRET: 'whsec_fake',
+        TURNSTILE_SITE_KEY: 'test-site-key',
+        TURNSTILE_SECRET_KEY: 'test-turnstile-secret',
         TEST_MIGRATIONS: await readD1Migrations('./migrations'),
       },
     },

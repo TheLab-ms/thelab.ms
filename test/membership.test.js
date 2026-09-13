@@ -7,6 +7,7 @@ import { hash, now } from '../src/http.js';
 import { provider } from '../src/providers.js';
 import { issueToken, loginDestination, memberToken, verifyToken } from '../src/auth.js';
 import { queryEvents } from '../src/member-events.js';
+import { currentWaiver } from '../src/waiver.js';
 
 // Global fetch spies also apply inside the bound Durable Object in this runtime.
 // Every unexpected provider request fails; no tests can reach live services.
@@ -48,8 +49,16 @@ const readMember = () => env.DB.prepare('SELECT * FROM members WHERE discord_use
 const memberStub = async () => env.MEMBERS.get(env.MEMBERS.idFromName((await readMember()).member_id));
 const checkout = async (input = {}) => {
   const member = await registerMember(env, user);
+  await seedWaiver(member);
   return coordinated(env, member.member_id, 'checkout', { user, annual: false, ...input });
 };
+async function seedWaiver(member = null) {
+  member ||= await registerMember(env, user);
+  const waiver = await currentWaiver();
+  await env.DB.prepare(`INSERT INTO waivers (member_id, version, content, name, email, agreements)
+    SELECT ?, ?, ?, 'Test Maker', ?, ? WHERE NOT EXISTS (SELECT 1 FROM waivers WHERE member_id = ?)`)
+    .bind(member.member_id, waiver.version, waiver.content, user.email, JSON.stringify(waiver.agreements), member.member_id).run();
+}
 const subscription = (status = 'active', subID = 'sub_member') => ({ id: subID, customer, status, created: now(), metadata: { thelab_discord_id: id } });
 
 function mockStripe(path, data, options = {}) {
@@ -194,6 +203,7 @@ describe('JWT authentication', () => {
 
 describe('Discord signup', () => {
   it('binds billing to the browser cookie and ignores signup and callback discount inputs', async () => {
+    await seedWaiver();
     const { target, state, cookie } = await start('?billing=yearly&discount=student');
     expect(target.origin).toBe('https://discord.com');
     expect(target.searchParams.get('scope')).toBe('identify email');
@@ -285,7 +295,8 @@ describe('Discord signup', () => {
     expect(await readMember()).toBeNull();
   });
 
-  it('redirects a standard signup directly to Stripe and persists stable ownership', async () => {
+  it('redirects a waiver-signed signup directly to Stripe and persists stable ownership', async () => {
+    await seedWaiver();
     const { state, cookie } = await start();
     oauthMock();
     mockPrice();
@@ -315,6 +326,7 @@ describe('Discord signup', () => {
 
   it.each(['signup', 'resume'])('uses the latest admin discount during %s despite user-supplied discount parameters', async flow => {
     await seed({ discount_type: 'family', bill_annually: 1 });
+    await seedWaiver();
     const login = flow === 'signup' ? await start('?billing=yearly&discount=student') : null;
     // An admin edit during OAuth must take effect at checkout.
     await env.DB.prepare("UPDATE members SET discount_type = 'retired' WHERE discord_user_id = ?").bind(id).run();
