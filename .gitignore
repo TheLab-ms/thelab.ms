@@ -4,3 +4,10 @@ _site
 .jekyll-cache
 .jekyll-metadata
 vendor/bundle
+.wrangler
+.dev.vars
+
+.dev.vars*
+!.dev.vars.example
+.env*
+!.env.example
