@@ -1,0 +1,20 @@
+{
+  "name": "thelab-membership",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.12.0" },
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest run",
+    "db:local": "wrangler d1 migrations apply thelab-membership --local"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.22.0",
+    "vitest": "~4.1.0",
+    "wrangler": "^4.130.0"
+  },
+  "overrides": {
+    "sharp": "^0.35.4"
+  }
+}

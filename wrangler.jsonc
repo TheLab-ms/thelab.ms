@@ -1,11 +1,65 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "thelab-ms",
+	"main": "src/index.js",
 	"compatibility_date": "2026-09-11",
 	"observability": {
 		"enabled": true
 	},
 	"assets": {
-		"directory": "static"
+		"directory": "static",
+		"binding": "ASSETS",
+		"run_worker_first": [
+			"/signup",
+			"/login/*",
+			"/payment/*",
+			"/webhooks/*"
+		]
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "thelab-membership",
+			"migrations_dir": "migrations"
+		}
+	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "MEMBERS",
+				"class_name": "Membership"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": [
+				"Membership"
+			]
+		}
+	],
+	"queues": {
+		"producers": [
+			{
+				"binding": "MEMBERSHIP_QUEUE",
+				"queue": "thelab-membership"
+			}
+		],
+		"consumers": [
+			{
+				"queue": "thelab-membership",
+				"max_batch_size": 10,
+				"max_batch_timeout": 5,
+				"max_retries": 20,
+				"dead_letter_queue": "thelab-membership-failed"
+			}
+		]
+	},
+	"vars": {
+		"SITE_URL": "https://thelab.ms",
+		"DISCORD_GUILD_ID": "690314626289631294",
+		"DISCORD_ROLE_ID": "1252789548073619458",
+		"DISCORD_CLIENT_ID": "1121532987486523503"
 	}
 }

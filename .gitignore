@@ -5,6 +5,7 @@ _site
 .jekyll-metadata
 vendor/bundle
 .wrangler
+node_modules/
 .dev.vars
 
 .dev.vars*
