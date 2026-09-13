@@ -17,6 +17,8 @@
 			"/login/*",
 			"/payment/*",
 			"/machines",
+			"/wiki",
+			"/wiki/*",
 			"/webhooks/*"
 		]
 	},
@@ -27,6 +29,7 @@
 			"migrations_dir": "migrations"
 		}
 	],
+	"r2_buckets": [{ "binding": "WIKI_BUCKET", "bucket_name": "thelab-wiki" }],
 	"durable_objects": {
 		"bindings": [
 			{
@@ -36,6 +39,10 @@
 			{
 				"name": "EDGE_SYNC",
 				"class_name": "EdgeSync"
+			},
+			{
+				"name": "WIKI",
+				"class_name": "Wiki"
 			}
 		]
 	},
@@ -45,7 +52,8 @@
 			"new_sqlite_classes": [
 				"Membership", "EdgeSync"
 			]
-		}
+		},
+		{ "tag": "v2-wiki", "new_sqlite_classes": ["Wiki"] }
 	],
 	"triggers": { "crons": ["0 6,7 * * *"] },
 	"queues": {

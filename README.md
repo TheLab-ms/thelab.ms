@@ -61,7 +61,7 @@ one with `openssl rand -hex 32`). Use the same secret across Worker instances;
 rotating it invalidates main-site login and OAuth JWTs. Printer JWTs use a separate Ed25519 key. Use Discord development
 credentials and a Stripe test-mode key. Register the exact Discord redirect
 `http://localhost:8787/login/discord/callback`. Open `http://localhost:8787`, matching
-`SITE_URL` exactly. Local Wrangler provides D1, Durable Objects and Queue emulation.
+`SITE_URL` exactly. Local Wrangler provides D1, R2, Durable Objects and Queue emulation.
 
 For local Stripe webhook delivery:
 
@@ -167,6 +167,7 @@ Provision resources once:
 
 ```sh
 npx wrangler d1 create thelab-membership
+npx wrangler r2 bucket create thelab-wiki
 npx wrangler queues create thelab-membership-failed --message-retention-period-secs 1209600
 npx wrangler queues create thelab-membership --message-retention-period-secs 1209600
 ```
@@ -267,6 +268,68 @@ Leaving `EDGE_URL` empty disables integration. Fob assignments can still be edit
 but no goals are delivered. For this undeployed app, all new D1 schema and both
 Durable Object classes are in the initial migrations. Recreate old disposable local
 state and run `npm run db:local`; no upgrade migration is provided.
+
+## Community wiki
+
+**`/wiki`** is a public page index. Anyone can read pages and uploaded images;
+members use **New page** or **Edit page** to enter the existing Discord sign-in
+flow. The home page navigation and welcome page link to the wiki.
+
+Editing follows the shared door membership rule **without requiring a fob**:
+non-billable members qualify directly; otherwise a linked signed waiver and either
+legacy billing or an exactly `active` Stripe subscription are required. `trialing`
+alone does not qualify. Editor, preview, save, delete, and upload requests check
+current membership and session identity; writes also require the editor's CSRF
+token and matching origin. Public reads do not query D1 or personalize responses.
+
+The editor offers a Markdown textarea, formatting buttons, server-rendered preview,
+and image upload/insertion at the cursor. Pages have an immutable lowercase,
+hyphenated address and editable title. Link to pages with
+`[Guide](/wiki/guide)`. Headings, lists, tables, blockquotes, and fenced code blocks
+are supported. Raw HTML is escaped, unsafe links are rejected by `markdown-it`,
+and images must be wiki uploads. Markdown is limited to 128 KiB; image uploads
+support JPEG, PNG, WebP, and GIF with signature checks and a 5 MiB limit.
+
+### Storage and deployment
+
+Provision `thelab-wiki` using the R2 command in the deployment section above.
+`wrangler.jsonc` binds it as `WIKI_BUCKET` and adds the singleton `Wiki` Durable
+Object as `WIKI`, with migration `v2-wiki`. Keep the bucket private: images are
+served through the Worker. No additional secrets or D1 migrations are needed.
+
+Markdown is stored in immutable R2 blobs at `pages/<slug>/<revision>.md` and images
+at `images/<id>`. Durable Object SQLite holds only page metadata, revision pointers,
+image references, and cleanup jobs. Preserve **both R2 and Durable Object storage**
+across deploys. Writes, reference updates, and cleanup share a serialized lane.
+Publication atomically updates metadata after R2 accepts the Markdown blob;
+interrupted or ambiguous uploads have pre-registered cleanup jobs. Competing edits
+return HTTP 409 and preserve the draft in the browser. Copy the draft, reload the
+editor, and merge against the latest version. This is a simple wiki without a
+revision-history UI; obsolete Markdown blobs are automatically removed after a
+24-hour grace period.
+
+### Caching and image cleanup
+
+Public HTML, the index, and images use Cloudflare's Cache API. Every read first
+looks up authoritative metadata in the Durable Object and selects a cache key
+containing the current revision and renderer version. A successful write changes
+the page/index revision, so subsequent reads in **all Cloudflare locations** bypass
+old entries immediately. Old entries expire after 24 hours. This avoids the
+local-only behavior of `cache.delete()` and requires no global-purge API token.
+Cache hits skip R2 retrieval and Markdown rendering. Browser responses require
+revalidation and outer CDN caching is disabled so every read checks current
+metadata. Editor and mutation responses are `no-store`. Bump `CACHE_VERSION` in
+`src/wiki.js` when changing published HTML or Markdown rendering.
+
+Image references are derived from the same parsed Markdown used for display,
+including reference-style images and direct image links across all pages. Removing
+the final reference starts a 24-hour grace period; saving another reference cancels
+deletion. Abandoned uploads expire 24 hours after upload. A durable alarm checks
+hourly, deletes expired unreferenced images in bounded batches, and retries storage
+failures. Actual removal occurs on the next cleanup run after the grace period.
+The Worker checks image availability before consulting its cache, so deleted
+images cannot be fetched from stale cached entries. Upload the image again if it
+expires while an unsaved draft remains open.
 
 ## Member machines dashboard
 
@@ -441,6 +504,9 @@ mappings while subscriptions are in use.
 - `src/member-events.js` and `src/event-views.js`: member-history queries, filters,
   and rendering. The initial D1 migration owns automatic change capture.
 - `src/printers.js`: member authorization and the edge JWT handoff.
+- `src/wiki.js`, `src/wiki-store.js`, `src/wiki-markdown.js`, and `src/wiki-views.js`:
+  public wiki routing/cache, R2 publication and cleanup coordination, safe Markdown,
+  and page/editor views. `static/wiki-editor.js` implements the browser editor.
 - `src/waiver.js` and `src/waiver-content.js`: public signing, Turnstile verification,
   source-controlled waiver text, and read-only admin signature evidence.
 - `src/http.js` and `src/logging.js`: HTTP utilities and redacted diagnostics.
@@ -490,5 +556,9 @@ duplicate delivery and current-state role reconciliation. Finish provider setup
 with a Stripe test-mode signup, cancellation, admin-assigned discount and Discord role
 check before using live credentials.
 
+Wiki tests use local R2 and a real Durable Object to verify permissions, conflicts,
+cache revision changes, safe rendering, upload bounds, shared references, abandoned
+image cleanup, and recovery after ambiguous writes or failed deletes.
+
 The `sharp` override keeps the test runtime's transitive image dependency on its
-patched release; the membership Worker itself has no third-party runtime packages.
+patched release. The wiki uses `markdown-it` as a runtime dependency.

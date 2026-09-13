@@ -58,9 +58,13 @@ export function errorPage(error) {
 }
 
 export async function boundedText(message, limit = 1024 * 1024) {
+  return new TextDecoder('utf-8', { fatal: true }).decode(await boundedBytes(message, limit));
+}
+
+export async function boundedBytes(message, limit = 1024 * 1024) {
   if (Number(message.headers.get('Content-Length')) > limit) throw new HttpError(413, 'Request too large.');
   const reader = message.body?.getReader();
-  if (!reader) return '';
+  if (!reader) return new Uint8Array();
   const chunks = [];
   let size = 0;
   try {
@@ -80,5 +84,5 @@ export async function boundedText(message, limit = 1024 * 1024) {
   const bytes = new Uint8Array(size);
   let offset = 0;
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
-  return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  return bytes;
 }
