@@ -197,13 +197,19 @@ directly; signup, waiver, callback, payment and webhook paths run through the Wo
 ## Door fobs and swipe synchronization
 
 Admins assign one unique optional **Fob ID** on each member's edit form. IDs are
-decimal integers from 1 through 4294967295; blank removes the assignment. A fob
-is authorized only when **Stripe status is exactly `active` AND the member has
-a linked signed waiver**. `trialing` does not qualify for door access. Waiver
+decimal integers from 1 through 4294967295; blank removes the assignment. By default,
+a fob is authorized when **Stripe status is exactly `active` AND the member has
+a linked signed waiver**. Two admin-managed checkboxes override these requirements:
+
+- **Non-billable:** activates the assigned fob regardless of payment or waiver status.
+- **Legacy billing:** activates the assigned fob with a linked signed waiver, regardless of Stripe status.
+
+Both default to unchecked. Non-billable takes precedence if both are checked.
+An assigned fob is always required. Otherwise, `trialing` does not qualify for door access. Waiver
 eligibility uses the same linked-signature rule as checkout, not a separate admin
 checkbox. Discord/printer membership eligibility is separate.
 
-Fob changes, Stripe reconciliation, and waiver signatures trigger immediate
+Fob and access-override changes, Stripe reconciliation, and waiver signatures trigger immediate
 reconciliation. A singleton `EdgeSync` Durable Object serializes fob snapshots
 and versions, reads current D1 eligibility, and sends additions/removals with
 `PATCH /api/goal`. Initial synchronization and full resync use `PUT /api/goal`.
@@ -306,6 +312,7 @@ registration and sync timestamps, and last-synced subscription status, and edit:
 - Discord ID and Stripe customer/subscription IDs. The subscription must belong
   to the customer; accounts/customers already linked to another member are rejected.
 - Saved monthly/yearly billing cycle and assigned discount category.
+- Fob ID, non-billable status, and legacy billing status for door access.
 
 Discord username/email and Stripe billing name/email are read-only. Discord sign-in
 refreshes the Discord fields; Stripe reconciliation refreshes billing details from

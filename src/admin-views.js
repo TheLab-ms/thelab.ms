@@ -41,7 +41,7 @@ function subscriptionLink(member, env) {
 }
 
 export function memberList(members, { total, current, pages, query = '' }, env, csrf) {
-	const rows = members.map(m => `<tr><th scope="row"><a class="admin-member-name" href="${e(memberPath(m))}">${e(memberName(m))}</a><small>${e(m.discord_email || m.email || 'No email')}</small><small class="admin-id">Discord ID: ${e(m.discord_user_id || 'Not linked')}</small><small>${m.waiver_signed ? 'Waiver signed' : 'No linked waiver'}</small></th><td>${statusBadge(m)}<small>Synced: ${timestamp(m.stripe_synced_at, true)}</small><small>${subscriptionLink(m, env)}</small></td><td>${m.bill_annually ? 'Yearly' : 'Monthly'}<small>${e(labelDiscount(m.discount_type))}</small></td><td>${timestamp(m.created, true)}</td></tr>`).join('');
+	const rows = members.map(m => `<tr><th scope="row"><a class="admin-member-name" href="${e(memberPath(m))}">${e(memberName(m))}</a><small>${e(m.discord_email || m.email || 'No email')}</small><small class="admin-id">Discord ID: ${e(m.discord_user_id || 'Not linked')}</small><small>${m.waiver_signed ? 'Waiver signed' : 'No linked waiver'}</small>${m.non_billable ? '<small>Non-billable</small>' : ''}${m.legacy_billing ? '<small>Legacy billing</small>' : ''}</th><td>${statusBadge(m)}<small>Synced: ${timestamp(m.stripe_synced_at, true)}</small><small>${subscriptionLink(m, env)}</small></td><td>${m.bill_annually ? 'Yearly' : 'Monthly'}<small>${e(labelDiscount(m.discount_type))}</small></td><td>${timestamp(m.created, true)}</td></tr>`).join('');
 	const empty = query ? 'No members match your search.' : 'No members have registered yet.';
 	return page('Registered members', `${env.EDGE_URL ? `<section class="admin-section"><h2>Door access</h2><p><a href="/admin/events?event_type=FobSwipe">View fresh fob swipes</a></p><form method="post" action="/admin/edge/resync"><input type="hidden" name="csrf" value="${e(csrf)}"><button class="btn btn-outline" type="submit">Full resync</button></form><p class="admin-help">Replaces the authorized fob set and backs up swipe history.</p></section>` : ''}<form method="get" action="/admin" role="search" class="admin-form admin-search">
     <label for="member-search">Search members</label>
@@ -55,6 +55,10 @@ function input(name, label, value, max, help = '', required = false) {
 
 function select(name, label, value, choices) {
 	return `<div class="admin-field"><label for="${name}">${e(label)}</label><select id="${name}" name="${name}">${choices.map(([key, text]) => `<option value="${e(key)}"${key === value ? ' selected' : ''}>${e(text)}</option>`).join('')}</select></div>`;
+}
+
+function checkbox(name, label, value, help) {
+	return `<div class="admin-field"><label class="admin-checkbox" for="${name}"><input id="${name}" name="${name}" type="checkbox"${value === 1 || value === 'on' ? ' checked' : ''} aria-describedby="${name}-help">${e(label)}</label><p class="admin-help" id="${name}-help">${e(help)}</p></div>`;
 }
 
 export function editor(member, fields, csrf, env, message = '', status = 200, events = [], waivers = '') {
@@ -71,7 +75,10 @@ export function editor(member, fields, csrf, env, message = '', status = 200, ev
     <input type="hidden" name="csrf" value="${e(csrf)}"><input type="hidden" name="metadata_version" value="${e(f.metadata_version)}">
     <section class="admin-section" aria-labelledby="member-settings"><h2 id="member-settings">Member settings</h2>
     ${input('name_override', 'Name override', f.name_override, 160, 'Leave blank to use the Stripe billing name, then Discord username.')}
-    ${input('fob_id', 'Fob ID', f.fob_id, 10, 'One unique ID from 1 through 4294967295. Leave blank to remove. Door access requires an active Stripe subscription and a linked signed waiver; trialing does not qualify.')}
+    <div class="admin-field" aria-label="Saved fob status"><span class="admin-status admin-status--${member.fob_enabled ? 'active' : 'inactive'}">Fob ${member.fob_enabled ? 'enabled' : 'disabled'}</span><p class="admin-help">${member.fob_id ? `Fob ID ${e(member.fob_id)}. ` : 'No fob assigned. '}Based on saved member settings and linked waivers. Door changes take effect after synchronization.</p></div>
+    ${input('fob_id', 'Fob ID', f.fob_id, 10, 'One unique ID from 1 through 4294967295. Leave blank to remove. By default, door access requires an active Stripe subscription and a linked signed waiver; trialing does not qualify.')}
+    ${checkbox('non_billable', 'Non-billable', f.non_billable, 'Activates the assigned fob regardless of payment or waiver status. Takes precedence over legacy billing.')}
+    ${checkbox('legacy_billing', 'Legacy billing', f.legacy_billing, 'Activates the assigned fob with a linked signed waiver, regardless of Stripe status.')}
     <fieldset class="admin-billing"><legend>Billing preferences</legend><p class="admin-help">For future checkout only. Manage existing subscriptions and invoices in Stripe. Changing these preferences expires open checkout links.</p><div class="admin-field-grid">
     ${select('billing', 'Saved billing cycle', f.billing, [['monthly', 'Monthly'], ['yearly', 'Yearly']])}
     ${select('discount_type', 'Discount category', f.discount_type, discounts.map(key => [key, labelDiscount(key)]))}

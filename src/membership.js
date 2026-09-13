@@ -284,11 +284,12 @@ export class Membership extends DurableObject {
     let result;
     try { result = await this.env.DB.prepare(`UPDATE members SET discord_user_id = ?, discord_username = ?, discord_email = ?,
       billing_name = ?, billing_email = ?, name_override = ?, notes = ?, bill_annually = ?, discount_type = ?,
-      stripe_customer_id = ?, stripe_subscription_id = ?, fob_id = ?,
+      stripe_customer_id = ?, stripe_subscription_id = ?, fob_id = ?, non_billable = ?, legacy_billing = ?,
       stripe_subscription_state = ?, stripe_synced_at = ?, discord_last_synced = ?,
       auth_version = auth_version + ?, metadata_version = metadata_version + 1 WHERE member_id = ? AND metadata_version = ? RETURNING member_id`)
       .bind(value.discord_user_id, username, email, billingName, billingEmail, value.name_override, value.notes,
         value.bill_annually, value.discount_type, value.stripe_customer_id, value.stripe_subscription_id, value.fob_id,
+        value.non_billable, value.legacy_billing,
         identityChanged ? selected?.status || null : member.stripe_subscription_state,
         identityChanged ? null : member.stripe_synced_at, identityChanged ? null : member.discord_last_synced, discordChanged ? 1 : 0, member.member_id, value.metadata_version).first();
     } catch (error) {

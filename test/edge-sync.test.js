@@ -58,6 +58,110 @@ it('requires active AND a signed waiver; pushes diffs for changes and empty revo
   await expect(env.DB.prepare('UPDATE members SET fob_id = 9 WHERE member_id = ?').bind(active.member_id).run()).rejects.toThrow();
 });
 
+it('shows the same admin fob status as edge eligibility across Stripe states, waivers, and overrides', async () => {
+  const expected = [], members = [];
+  let fob = 100;
+  for (const status of [null, 'active', 'trialing', 'past_due', 'canceled']) {
+    for (const signed of [false, true]) {
+      for (const [nonBillable, legacyBilling] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
+        const m = await member(fob++, status, signed);
+        members.push(m);
+        await env.DB.prepare('UPDATE members SET non_billable = ?, legacy_billing = ? WHERE member_id = ?')
+          .bind(nonBillable, legacyBilling, m.member_id).run();
+        if (nonBillable || (signed && (legacyBilling || status === 'active'))) expected.push(m.fob_id);
+      }
+    }
+  }
+  const unassigned = await member(null, null, false);
+  members.push(unassigned);
+  await env.DB.prepare('UPDATE members SET non_billable = 1, legacy_billing = 1 WHERE member_id = ?').bind(unassigned.member_id).run();
+  await edgeCall(configured, 'full');
+  expect(goal.fobs).toEqual(expected);
+  const token = await issueToken(env, '333333333333333333', 'admin');
+  for (const m of members) {
+    const response = await worker.fetch(new Request(`${env.SITE_URL}/admin/members/${m.member_id}`, {
+      headers: { Cookie: `thelab_admin=${token}` },
+    }), configured);
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    const enabled = goal.fobs.includes(m.fob_id);
+    expect(html).toContain(`admin-status--${enabled ? 'active' : 'inactive'}">Fob ${enabled ? 'enabled' : 'disabled'}</span>`);
+    if (!m.fob_id) expect(html).toContain('No fob assigned.');
+  }
+});
+
+it('saves access checkboxes, records history, and immediately adds or removes fobs', async () => {
+  const m = await member(7, null, false);
+  const read = () => env.DB.prepare('SELECT * FROM members WHERE member_id = ?').bind(m.member_id).first();
+  await runInDurableObject(env.MEMBERS.get(env.MEMBERS.idFromName(m.member_id)), instance => {
+    instance.env = { ...instance.env, ...configured };
+  });
+  const token = await issueToken(env, '333333333333333333', 'admin');
+  const cookie = `thelab_admin=${token}`;
+  const path = `${env.SITE_URL}/admin/members/${m.member_id}`;
+  const get = async (url = path) => (await worker.fetch(new Request(url, { headers: { Cookie: cookie } }), configured)).text();
+  const save = async (extra = {}) => worker.fetch(new Request(path, {
+    method: 'POST', headers: { Cookie: cookie, Origin: env.SITE_URL, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ csrf: await hash(`admin-csrf:${token}`), metadata_version: String((await read()).metadata_version),
+      discord_user_id: '', stripe_customer_id: '', stripe_subscription_id: '', name_override: '', notes: '',
+      billing: 'monthly', discount_type: '', fob_id: '7', ...extra }),
+  }), configured);
+  const checked = name => new RegExp(`name="${name}" type="checkbox" checked`);
+  expect(await read()).toMatchObject({ non_billable: 0, legacy_billing: 0 });
+  expect(await get()).not.toMatch(checked('non_billable'));
+  await edgeCall(configured, 'changes');
+  expect(goal.fobs).toEqual([]);
+
+  expect((await save({ non_billable: 'on', legacy_billing: 'on' })).status).toBe(303);
+  expect(goal.fobs).toEqual([7]);
+  expect(writes.at(-1)).toMatchObject({ method: 'PATCH', add: [7], remove: [] });
+  expect(await read()).toMatchObject({ non_billable: 1, legacy_billing: 1 });
+  const html = await get();
+  expect(html).toContain('>Fob enabled</span>');
+  expect(html).toMatch(checked('non_billable'));
+  expect(html).toMatch(checked('legacy_billing'));
+  expect(html).toContain('Disabled → Enabled');
+  const list = await get(`${env.SITE_URL}/admin`);
+  expect(list).toContain('<small>Non-billable</small>');
+  expect(list).toContain('<small>Legacy billing</small>');
+
+  const stale = await save({ metadata_version: '0', legacy_billing: 'on' });
+  expect(stale.status).toBe(409);
+  const staleHTML = await stale.text();
+  expect(staleHTML).toContain('>Fob enabled</span>');
+  expect(staleHTML).not.toMatch(checked('non_billable'));
+  expect(staleHTML).toMatch(checked('legacy_billing'));
+  expect(goal.fobs).toEqual([7]);
+  for (const key of ['non_billable', 'legacy_billing']) {
+    expect((await save({ [key]: 'false' })).status).toBe(400);
+  }
+  expect(await read()).toMatchObject({ non_billable: 1, legacy_billing: 1 });
+
+  expect((await save({ legacy_billing: 'on' })).status).toBe(303);
+  expect(await get()).toContain('>Fob disabled</span>');
+  expect(writes.at(-1)).toMatchObject({ method: 'PATCH', add: [], remove: [7] });
+  expect(goal.fobs).toEqual([]);
+  await env.DB.prepare(`INSERT INTO waivers(member_id, version, content, name, email, agreements)
+    VALUES (?, 1, 'Terms', 'Maker', 'maker@example.com', '[]')`).bind(m.member_id).run();
+  await edgeCall(configured, 'changes');
+  expect(goal.fobs).toEqual([7]);
+  expect(await get()).toContain('>Fob enabled</span>');
+  expect((await save()).status).toBe(303);
+  expect(goal.fobs).toEqual([]);
+  expect(await read()).toMatchObject({ non_billable: 0, legacy_billing: 0 });
+  const revision = await env.DB.prepare('SELECT revision FROM edge_changes').first();
+  expect((await save()).status).toBe(303);
+  expect(await env.DB.prepare('SELECT revision FROM edge_changes').first()).toEqual(revision);
+  const { results } = await env.DB.prepare(`SELECT event_type, details FROM member_events
+    WHERE event_type IN ('NonBillableChanged', 'LegacyBillingChanged') ORDER BY id`).all();
+  expect(results).toEqual([
+    { event_type: 'NonBillableChanged', details: '{"from":0,"to":1}' },
+    { event_type: 'LegacyBillingChanged', details: '{"from":0,"to":1}' },
+    { event_type: 'NonBillableChanged', details: '{"from":1,"to":0}' },
+    { event_type: 'LegacyBillingChanged', details: '{"from":1,"to":0}' },
+  ]);
+});
+
 it('recovers ambiguous delivery from edge state and keeps later revisions pending', async () => {
   const m = await member();
   await edgeCall(configured, 'changes');

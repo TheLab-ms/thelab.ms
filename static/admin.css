@@ -59,6 +59,8 @@
 .admin-field { margin-top: 1rem; }
 .admin-form input, .admin-form select, .admin-form textarea { width: 100%; min-height: 44px; padding: 0.65rem 0.75rem; background: var(--color-bg); color: var(--color-text); border: 1px solid var(--color-border-light); border-radius: var(--radius-sm); font: inherit; color-scheme: dark; }
 .admin-form input::placeholder { color: var(--color-text-muted); opacity: 1; }
+.admin-form .admin-checkbox { display: flex; align-items: center; gap: 0.6rem; min-height: 44px; cursor: pointer; }
+.admin-checkbox input { width: 1.1rem; height: 1.1rem; min-height: 0; padding: 0; flex: 0 0 auto; accent-color: var(--color-accent); }
 .admin-form textarea { display: block; resize: vertical; }
 .admin-billing { min-width: 0; margin-top: 1.5rem; padding: 0; border: 0; }
 .admin-billing legend { font-size: 0.95rem; font-weight: 600; color: var(--color-heading); }

@@ -10,6 +10,8 @@ CREATE TABLE members (
   name_override TEXT NOT NULL DEFAULT '',
   notes TEXT NOT NULL DEFAULT '',
   fob_id INTEGER UNIQUE CHECK (fob_id BETWEEN 1 AND 4294967295),
+  non_billable INTEGER NOT NULL DEFAULT 0 CHECK (non_billable IN (0, 1)),
+  legacy_billing INTEGER NOT NULL DEFAULT 0 CHECK (legacy_billing IN (0, 1)),
   metadata_version INTEGER NOT NULL DEFAULT 0,
   auth_version INTEGER NOT NULL DEFAULT 0,
   created INTEGER NOT NULL DEFAULT (unixepoch()),
@@ -45,8 +47,9 @@ CREATE TRIGGER edge_member_insert AFTER INSERT ON members BEGIN
   UPDATE edge_changes SET revision = revision + 1;
   INSERT INTO fob_assignments(fob, member_id) SELECT NEW.fob_id, NEW.member_id WHERE NEW.fob_id IS NOT NULL;
 END;
-CREATE TRIGGER edge_member_change AFTER UPDATE OF fob_id, stripe_subscription_state ON members
+CREATE TRIGGER edge_member_change AFTER UPDATE OF fob_id, stripe_subscription_state, non_billable, legacy_billing ON members
 WHEN OLD.fob_id IS NOT NEW.fob_id OR OLD.stripe_subscription_state IS NOT NEW.stripe_subscription_state
+  OR OLD.non_billable IS NOT NEW.non_billable OR OLD.legacy_billing IS NOT NEW.legacy_billing
 BEGIN UPDATE edge_changes SET revision = revision + 1; END;
 CREATE TRIGGER edge_member_delete BEFORE DELETE ON members BEGIN
   UPDATE edge_changes SET revision = revision + 1;
@@ -115,8 +118,14 @@ END;
 CREATE TRIGGER member_changed AFTER UPDATE OF
   discord_user_id, discord_username, discord_email, billing_name, billing_email,
   name_override, notes, bill_annually, discount_type, stripe_customer_id,
-  stripe_subscription_id, stripe_subscription_state ON members
+  stripe_subscription_id, stripe_subscription_state, non_billable, legacy_billing ON members
 BEGIN
+  INSERT INTO member_events (member_id, event_type, details)
+  SELECT NEW.member_id, 'NonBillableChanged', json_object('from', OLD.non_billable, 'to', NEW.non_billable)
+    WHERE OLD.non_billable IS NOT NEW.non_billable;
+  INSERT INTO member_events (member_id, event_type, details)
+  SELECT NEW.member_id, 'LegacyBillingChanged', json_object('from', OLD.legacy_billing, 'to', NEW.legacy_billing)
+    WHERE OLD.legacy_billing IS NOT NEW.legacy_billing;
   INSERT INTO member_events (member_id, event_type, details)
   SELECT NEW.member_id, 'DiscordAccountChanged', json_object('from', OLD.discord_user_id, 'to', NEW.discord_user_id)
     WHERE OLD.discord_user_id IS NOT NEW.discord_user_id;

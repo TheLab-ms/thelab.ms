@@ -19,6 +19,10 @@ export function validateMetadata(input) {
     name_override: text('name_override', 160),
     notes: text('notes', 5000),
   };
+  for (const key of ['non_billable', 'legacy_billing']) {
+    if (Object.hasOwn(input, key) && input[key] !== 'on') invalid(`Invalid ${key.replaceAll('_', ' ')} selection.`);
+    value[key] = input[key] === 'on' ? 1 : 0;
+  }
   if (Object.hasOwn(input, 'fob_id')) {
     const fob = text('fob_id', 10);
     if (fob && (!/^[1-9]\d{0,9}$/.test(fob) || Number(fob) > 4294967295)) invalid('Enter a fob ID from 1 through 4294967295, or leave blank.');

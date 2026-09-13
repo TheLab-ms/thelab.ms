@@ -1,2 +1,5 @@
 /conwayedge
 /data/
+/.build-cache/
+/dist/
+/__pycache__/

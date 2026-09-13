@@ -11,6 +11,7 @@ function eventDetails(event) {
   const value = item => {
     if (item === null) return 'Not set';
     if (event.event_type === 'BillingCycleChanged') return item ? 'Yearly' : 'Monthly';
+    if (['NonBillableChanged', 'LegacyBillingChanged'].includes(event.event_type)) return item ? 'Enabled' : 'Disabled';
     if (event.event_type === 'DiscountTypeModified' && item === '') return 'Standard rate';
     return item === '' ? '(blank)' : String(item);
   };

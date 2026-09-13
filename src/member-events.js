@@ -2,6 +2,8 @@ import { HttpError } from './http.js';
 
 export const eventTypes = {
   FobChanged: 'Fob assignment changed',
+  NonBillableChanged: 'Non-billable changed',
+  LegacyBillingChanged: 'Legacy billing changed',
   FobSwipe: 'Fob swipe',
   MemberRegistered: 'Member registered',
   WaiverSigned: 'Waiver signed',

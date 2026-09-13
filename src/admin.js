@@ -10,6 +10,7 @@ import { eventList } from './event-views.js';
 import { memberName, memberPath } from './member-metadata.js';
 import { memberWaivers } from './waiver.js';
 import { edgeCall, edgeEnabled } from './edge-sync.js';
+import { fobEnabledSQL } from './fob-access.js';
 
 const PAGE_SIZE = 25;
 
@@ -34,7 +35,7 @@ async function list(request, env, csrf) {
   const values = query ? columns.map(() => `%${query.replace(/[\\%_]/g, '\\$&')}%`) : [];
   const [count, members] = await env.DB.batch([
     env.DB.prepare(`SELECT COUNT(*) AS total FROM members${filter}`).bind(...values),
-    env.DB.prepare(`SELECT member_id, email, waiver_name, discord_user_id, discord_username, discord_email, created, bill_annually, discount_type,
+    env.DB.prepare(`SELECT member_id, email, waiver_name, discord_user_id, discord_username, discord_email, created, bill_annually, discount_type, non_billable, legacy_billing,
       EXISTS(SELECT 1 FROM waivers WHERE waivers.member_id = members.member_id) AS waiver_signed,
       name_override, billing_name, stripe_subscription_id, stripe_subscription_state, stripe_synced_at FROM members${filter} ORDER BY created DESC, discord_user_id DESC, member_id DESC LIMIT ? OFFSET ?`).bind(...values, PAGE_SIZE, (current - 1) * PAGE_SIZE),
   ]);
@@ -98,7 +99,8 @@ export async function adminRequest(request, env, context = requestContext(reques
     }
     if (path === '/admin/events') return await history(request, env, csrf);
     if (!match) return await list(request, env, csrf);
-    const member = await env.DB.prepare(`SELECT * FROM members WHERE ${match[1].length === 32 ? 'member_id' : 'discord_user_id'} = ?`).bind(match[1]).first();
+    const member = await env.DB.prepare(`SELECT *, COALESCE(${fobEnabledSQL}, 0) AS fob_enabled
+      FROM members WHERE ${match[1].length === 32 ? 'member_id' : 'discord_user_id'} = ?`).bind(match[1]).first();
     if (!member) throw new HttpError(404, 'Member not found.');
     if (match[2]) return await history(request, env, csrf, member);
     if (fields) {

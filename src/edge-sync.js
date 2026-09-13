@@ -1,6 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { boundedText, HttpError } from './http.js';
 import { logError } from './logging.js';
+import { fobEnabledSQL } from './fob-access.js';
 
 export const edgeEnabled = env => Boolean(env.EDGE_URL);
 const stub = env => env.EDGE_SYNC.get(env.EDGE_SYNC.idFromName('edge'));
@@ -106,8 +107,7 @@ export class EdgeSync extends DurableObject {
     // delivery retain a newer revision and cannot be accidentally acknowledged.
     const [revisionRows, rows] = await this.env.DB.batch([
       this.env.DB.prepare('SELECT revision FROM edge_changes WHERE id = 1'),
-      this.env.DB.prepare(`SELECT fob_id FROM members WHERE fob_id IS NOT NULL AND stripe_subscription_state = 'active'
-        AND EXISTS (SELECT 1 FROM waivers WHERE waivers.member_id = members.member_id) ORDER BY fob_id LIMIT 513`),
+      this.env.DB.prepare(`SELECT fob_id FROM members WHERE ${fobEnabledSQL} ORDER BY fob_id LIMIT 513`),
     ]);
     const fobs = rows.results.map(row => row.fob_id);
     if (fobs.length > 512) throw new Error('Authorized fob set exceeds edge capacity (512).');
