@@ -275,13 +275,13 @@ export class Membership extends DurableObject {
     return url.href;
   }
 
-  async sync({ discord_user_id: id, member_id: memberID, customer_id: customer, event_id: event }) {
+  async sync({ discord_user_id: id, member_id: memberID, customer_id: customer }) {
     const member = memberID ? await this.env.DB.prepare('SELECT * FROM members WHERE member_id = ?').bind(memberID).first() : await this.member(id);
     if (!member) return;
     id = member.discord_user_id;
     if (memberID) customer = member.stripe_customer_id;
     if (member.stripe_customer_id !== customer) throw new HttpError(409, 'Billing identity changed.');
-    if (event && await this.env.DB.prepare('SELECT id FROM stripe_events WHERE id = ?').bind(event).first()) return;
+    // Every delivery reconciles current Stripe state, including delayed webhooks.
     const billing = customer ? await stripe(this.env, `/customers/${customer}`) : {};
     const subscriptions = await this.subscriptions(member);
     const paid = subscriptions.some(healthy);
@@ -294,11 +294,10 @@ export class Membership extends DurableObject {
 
     const path = `/guilds/${this.env.DISCORD_GUILD_ID}/members/${id}/roles/${this.env.DISCORD_ROLE_ID}`;
     // Repeating PUT/DELETE is safe if the process crashes after Discord succeeds.
+    // Retry even if the saved Stripe state matches: a previous Discord call may have failed.
     // Failed removals/additions remain unacknowledged and are retried by the queue.
     await discord(this.env, path, paid ? 'PUT' : 'DELETE');
-    const statements = [this.env.DB.prepare('UPDATE members SET discord_last_synced = ? WHERE discord_user_id = ?').bind(now(), id)];
-    if (event) statements.push(this.env.DB.prepare('INSERT INTO stripe_events (id, customer_id, processed) VALUES (?, ?, ?) ON CONFLICT(id) DO NOTHING').bind(event, customer, now()));
-    await this.env.DB.batch(statements);
+    await this.env.DB.prepare('UPDATE members SET discord_last_synced = ? WHERE discord_user_id = ?').bind(now(), id).run();
   }
 }
 

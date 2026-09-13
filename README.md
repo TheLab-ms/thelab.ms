@@ -27,7 +27,7 @@ Queue for Discord role reconciliation. There are **no scheduled triggers**.
 4. `/payment/success` checks the signed-in user's Checkout ownership, completion,
    payment status, and subscription status against Stripe, then redirects to the
    static `/welcome` page. The welcome page itself is public and grants no access.
-5. Verified Stripe webhooks enqueue customer/event IDs. The consumer fetches
+5. Verified Stripe webhooks enqueue customer IDs. The consumer fetches
    **current** Stripe subscriptions, then adds/removes the Discord member role.
    `active` and `trialing` grant membership, matching Conway. Scheduled cancellation
    retains the role until the subscription actually lapses. `past_due`, `unpaid`,
@@ -194,8 +194,9 @@ Concurrent profile/billing edits are rejected with a reload message so stale
 forms cannot silently overwrite newer changes. Subscription status and sync
 timestamps are read-only; role eligibility is always reconciled against Stripe.
 
-The initial migration includes the admin schema and omits the former `oauth_states`
-table; no upgrade migration is needed for this undeployed app.
+The initial migration includes the admin schema and stores the latest Stripe state
+in `members`, with no OAuth state or Stripe event tables. No upgrade migration is
+needed for this undeployed app.
 For a local database created with the old schema,
 recreate the disposable local D1 database and run `npm run db:local` before use.
 
@@ -204,8 +205,10 @@ recreate the disposable local D1 database and run `npm run db:local` before use.
 The webhook only acknowledges Stripe after `MEMBERSHIP_QUEUE.send()` succeeds.
 No database receipt is written before enqueueing, so a failed send remains
 retryable by Stripe. Queue jobs serialize with checkout per stable membership ID, retrieve
-current Stripe state, and use idempotent Discord PUT/DELETE operations. Event IDs
-are marked processed **after** Discord succeeds, allowing crash-safe redelivery.
+current Stripe state, and use idempotent Discord PUT/DELETE operations. Duplicate
+deliveries repeat reconciliation safely; no event IDs are stored. Jobs are
+acknowledged **after** Discord succeeds, even if the saved Stripe state already
+matches, so failed role updates are retried.
 Unrelated Stripe customers and subscriptions without this app's metadata are ignored,
 unless explicitly linked by an admin.
 
@@ -219,11 +222,10 @@ Cloudflare Queues' message pull/ack and push APIs (or dashboard controls):
 2. Push the same JSON body to `thelab-membership` and verify acceptance.
 3. Acknowledge the original dead-letter message only after the push succeeds.
 
-Messages contain `{ "customer_id": "cus_...", "event_id": "evt_..." }`. For an
-explicit current-state resync, push `{ "customer_id": "cus_..." }` to the main
-queue (without `event_id`). This also repairs roles after a member leaves/rejoins
-Discord or a role is changed manually. With no cron or Discord gateway listener,
-those Discord-only changes need a manual resync or the next Stripe event.
+Messages contain `{ "customer_id": "cus_..." }`. For an explicit current-state
+resync, push the same body to the main queue. This also repairs roles after a member
+leaves/rejoins Discord or a role is changed manually. With no cron or Discord gateway
+listener, those Discord-only changes need a manual resync or the next Stripe event.
 
 Admin identity edits enqueue `{ "member_id": "<stable internal ID>" }`, which
 resolves the current customer and Discord account inside the membership lock.
@@ -272,7 +274,7 @@ npx wrangler deploy --dry-run
 Tests run in workerd with real local D1 and Durable Objects and mocked provider
 HTTP. They cover OAuth/browser state, approval and pricing rules, serialized
 checkout/idempotency, success verification, signed webhooks, queue failure/retry,
-event deduplication and current-state role reconciliation. Finish provider setup
+duplicate delivery and current-state role reconciliation. Finish provider setup
 with a Stripe test-mode signup, cancellation, discount approval and Discord role
 check before using live credentials.
 

@@ -803,7 +803,7 @@ describe('webhooks and queued Discord reconciliation', () => {
     const response = await api('/webhooks/stripe', await signedEvent('customer.updated', 'evt_customer', { id: customer, name: 'Billing Name' }),
       { ...env, MEMBERSHIP_QUEUE: { send } });
     expect(response.status).toBe(204);
-    expect(send).toHaveBeenCalledWith({ customer_id: customer, event_id: 'evt_customer' });
+    expect(send).toHaveBeenCalledWith({ customer_id: customer });
   });
 
   it('rejects a tampered signed event and ignores valid unrelated event types', async () => {
@@ -832,21 +832,27 @@ describe('webhooks and queued Discord reconciliation', () => {
       error: { message: 'queue unavailable' } });
     expect((await api('/webhooks/stripe', await signedEvent(), bindings)).status).toBe(204);
     expect(send).toHaveBeenCalledTimes(2);
-    expect(send).toHaveBeenLastCalledWith({ event_id: 'evt_update', customer_id: customer });
+    expect(send).toHaveBeenLastCalledWith({ customer_id: customer });
   });
 
-  it('deduplicates successful events but fetches current state for delayed cancellation events', async () => {
+  it('reconciles current state for delayed cancellation events and duplicate deliveries', async () => {
     await seed();
-    mockBilling();
-    mockSubs([subscription('active', 'sub_replacement'), subscription('canceled', 'sub_old')]);
-    mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, {}, 'PUT', 204);
-    await processMessage({ customer_id: customer, event_id: 'evt_oldCancellation' }, env);
+    const send = vi.fn().mockResolvedValue(undefined);
+    const response = await api('/webhooks/stripe', await signedEvent('customer.subscription.deleted', 'evt_oldCancellation', subscription('canceled', 'sub_old')),
+      { ...env, MEMBERSHIP_QUEUE: { send } });
+    expect(response.status).toBe(204);
+    const message = send.mock.calls[0][0];
+    mockBilling().times(2);
+    mockSubs([subscription('active', 'sub_replacement'), subscription('canceled', 'sub_old')]).times(2);
+    mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, {}, 'PUT', 204).times(2);
+    await processMessage(message, env);
     expect(await readMember()).toMatchObject({ stripe_subscription_id: 'sub_replacement', stripe_subscription_state: 'active' });
-    await processMessage({ customer_id: customer, event_id: 'evt_oldCancellation' }, env);
+    await processMessage(message, env);
+    expect(await readMember()).toMatchObject({ stripe_subscription_id: 'sub_replacement', stripe_subscription_state: 'active' });
     mockBilling('Updated billing name', 'updated@example.com');
     mockSubs([subscription('canceled', 'sub_replacement')]);
     mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, {}, 'DELETE', 204);
-    await processMessage({ customer_id: customer, event_id: 'evt_finalCancellation' }, env);
+    await processMessage(message, env);
     expect(await readMember()).toMatchObject({ stripe_subscription_state: 'canceled', billing_name: 'Updated billing name', billing_email: 'updated@example.com' });
   });
 
@@ -861,13 +867,13 @@ describe('webhooks and queued Discord reconciliation', () => {
     await processMessage({ customer_id: customer }, env);
   });
 
-  it('retries Discord rate limits without marking the event processed', async () => {
+  it('retries Discord rate limits even when the Stripe state is already saved', async () => {
     const log = vi.spyOn(console, 'error').mockImplementation(() => {});
     await seed();
     mockBilling().times(2);
     mockSubs([subscription()]);
     mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, { retry_after: 120 }, 'PUT', 429);
-    const message = { id: 'queue-message', body: { customer_id: customer, event_id: 'evt_retry' }, attempts: 1, ack: vi.fn(), retry: vi.fn() };
+    const message = { id: 'queue-message', body: { customer_id: customer }, attempts: 1, ack: vi.fn(), retry: vi.fn() };
     await worker.queue({ messages: [message] }, env);
     expect(message.ack).not.toHaveBeenCalled();
     expect(message.retry).toHaveBeenCalledWith({ delaySeconds: 120 });
@@ -876,16 +882,16 @@ describe('webhooks and queued Discord reconciliation', () => {
     expect(providerError).toMatchObject({ service: 'Discord', failure: 'http', provider_status: 429, retry_after: 120 });
     expect(entries.find(entry => entry.event === 'queue.failed')).toMatchObject({ message_id: 'queue-message',
       attempt: 1, retry_delay_seconds: 120, error_id: providerError.error_id });
-    expect(await env.DB.prepare('SELECT id FROM stripe_events WHERE id = ?').bind('evt_retry').first()).toBeNull();
+    expect(await readMember()).toMatchObject({ stripe_subscription_state: 'active', stripe_synced_at: expect.any(Number), discord_last_synced: null });
     mockSubs([subscription()]);
     mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, {}, 'PUT', 204);
     await worker.queue({ messages: [{ ...message, attempts: 2 }] }, env);
     expect(message.ack).toHaveBeenCalledOnce();
-    expect(await env.DB.prepare('SELECT id FROM stripe_events WHERE id = ?').bind('evt_retry').first()).not.toBeNull();
+    expect(await readMember()).toMatchObject({ stripe_subscription_state: 'active', discord_last_synced: expect.any(Number) });
   });
 
   it('ignores unrelated customers and unrelated subscriptions on a mapped customer', async () => {
-    await processMessage({ customer_id: 'cus_unrelated', event_id: 'evt_other' }, env);
+    await processMessage({ customer_id: 'cus_unrelated' }, env);
     await seed();
     mockBilling();
     mockSubs([{ ...subscription(), metadata: {} }]);

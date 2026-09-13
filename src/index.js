@@ -109,21 +109,21 @@ async function webhook(request, env) {
   const object = event.data.object;
   const customer = event.type === 'customer.updated' ? object.id : typeof object.customer === 'string' ? object.customer : object.customer?.id;
   if (!/^cus_[A-Za-z0-9]+$/.test(customer || '')) throw new HttpError(400, 'Stripe event has no customer.');
-  // No pre-enqueue deduplication: a failed send must be retried by Stripe.
-  await env.MEMBERSHIP_QUEUE.send({ event_id: event.id, customer_id: customer });
+  // Acknowledge only after enqueueing so Stripe retries failed sends.
+  await env.MEMBERSHIP_QUEUE.send({ customer_id: customer });
   return new Response(null, { status: 204 });
 }
 
 export async function processMessage(body, env) {
-  if (body?.member_id && /^[a-f0-9]{32}$/.test(body.member_id) && !body.customer_id && !body.event_id) {
+  if (body?.member_id && /^[a-f0-9]{32}$/.test(body.member_id) && !body.customer_id) {
     await coordinated(env, null, '/sync', { member_id: body.member_id });
     return;
   }
-  if (!body || !/^cus_[A-Za-z0-9]+$/.test(body.customer_id || '') || (body.event_id !== undefined && !/^evt_[A-Za-z0-9_]+$/.test(body.event_id))) throw new HttpError(400, 'Invalid queue message.');
+  if (!body || !/^cus_[A-Za-z0-9]+$/.test(body.customer_id || '')) throw new HttpError(400, 'Invalid queue message.');
   const member = await env.DB.prepare('SELECT discord_user_id FROM members WHERE stripe_customer_id = ?').bind(body.customer_id).first();
   // Other Stripe customers (e.g. donations or Conway) are outside this app.
   if (!member) return;
-  await coordinated(env, member.discord_user_id, '/sync', { ...body, discord_user_id: member.discord_user_id });
+  await coordinated(env, member.discord_user_id, '/sync', { customer_id: body.customer_id, discord_user_id: member.discord_user_id });
 }
 
 export default {

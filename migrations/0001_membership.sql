@@ -20,9 +20,3 @@ CREATE TABLE members (
   discord_last_synced INTEGER
 ) STRICT;
 CREATE INDEX members_created ON members(created DESC, discord_user_id DESC);
-
-CREATE TABLE stripe_events (
-  id TEXT PRIMARY KEY,
-  customer_id TEXT NOT NULL,
-  processed INTEGER NOT NULL
-) STRICT;
