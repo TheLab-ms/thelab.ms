@@ -32,52 +32,6 @@ beforeEach(async () => {
 });
 afterEach(() => vi.restoreAllMocks());
 
-it('imports original files and pages with authenticated, idempotent, create-only writes', async () => {
-  const secret = 'migration-test-secret';
-  const bindings = { ...env, WIKI_IMPORT_TOKEN: secret };
-  await runInDurableObject(stub(), instance => { instance.env = { ...instance.env, WIKI_IMPORT_TOKEN: secret }; });
-  const imported = (path, body, headers = {}, auth = secret) => request(`/wiki/import/${path}`, {
-    method: 'POST', body, headers: { Authorization: `Bearer ${auth}`, ...headers },
-  }, bindings);
-  expect((await request('/wiki/import/page', { method: 'POST' })).status).toBe(404);
-  expect((await imported('page', '{}', {}, 'wrong')).status).toBe(403);
-  await expect(wikiCall(env, 'importPage', { token: 'wrong' })).rejects.toThrow('Invalid wiki import token');
-  const bytes = new TextEncoder().encode('%PDF-1.4\noriginal manual');
-  const id = await hash('%PDF-1.4\noriginal manual');
-  expect((await imported('file', bytes, { 'X-Content-SHA256': 'a'.repeat(64) })).status).toBe(400);
-  const headers = { 'X-Content-SHA256': id, 'Content-Type': 'application/pdf' };
-  expect(await (await imported('file', bytes, headers)).json()).toMatchObject({ id, skipped: false });
-  expect(await (await imported('file', bytes, headers)).json()).toMatchObject({ id, skipped: true });
-  const url = `/wiki/files/${id}/manual.pdf`;
-  const page = { slug: 'imported-guide', title: 'Imported guide', markdown: `# Safety {#safety_first}\n\n[Manual](${url})`, updated: '2025-01-01T00:00:00Z' };
-  const saveImport = input => imported('page', JSON.stringify(input), { 'Content-Type': 'application/json' });
-  expect(await (await saveImport(page)).json()).toMatchObject({ skipped: false });
-  expect(await (await saveImport(page)).json()).toMatchObject({ skipped: true });
-  expect((await saveImport({ ...page, markdown: 'Overwrite' })).status).toBe(409);
-  expect((await wikiCall(env, 'page', { slug: page.slug })).updated).toBe('2025-01-01T00:00:00.000Z');
-  expect(await (await request('/wiki/imported-guide')).text()).toContain('<h1 id="safety_first">Safety</h1>');
-  const file = await request(url);
-  expect(file.headers.get('Content-Disposition')).toBe('attachment; filename="manual.pdf"');
-  expect(file.headers.get('Content-Security-Policy')).toContain('sandbox');
-  expect(new Uint8Array(await file.arrayBuffer())).toEqual(bytes);
-  expect((await request(url, { method: 'HEAD' })).status).toBe(200);
-  expect((await save('missing-file', `[missing](/wiki/files/${'b'.repeat(64)}/missing.pdf)`)).status).toBe(400);
-  await expire(); await runDurableObjectAlarm(stub());
-  expect((await request(url)).status).toBe(200);
-});
-
-it('serves imported SVGs in a sandbox and keeps the Markdown renderer HTML-disabled', async () => {
-  await runInDurableObject(stub(), instance => { instance.env = { ...instance.env, WIKI_IMPORT_TOKEN: 'test' }; });
-  const svg = '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>';
-  const id = await hash(svg);
-  await wikiCall(env, 'importFile', { token: 'test', bytes: new TextEncoder().encode(svg), id, type: 'image/svg+xml' });
-  const url = `/wiki/files/${id}/logo.svg`;
-  expect(renderMarkdown(`![Logo](${url})`, env.SITE_URL).html).toContain(`src="${url}"`);
-  const response = await request(url);
-  expect(response.headers.get('Content-Type')).toBe('image/svg+xml');
-  expect(response.headers.get('Content-Security-Policy')).toBe("default-src 'none'; sandbox");
-});
-
 it('lets anonymous visitors read R2-backed pages and the index without D1 or personalized cookies', async () => {
   const created = await save('first-page');
   expect(created.status).toBe(200);
@@ -146,7 +100,7 @@ it('serializes competing creates/edits, rejects stale deletes, and changes page 
   const oldIndex = await request('/wiki'), indexTag = oldIndex.headers.get('ETag');
   expect((await request('/wiki/guide', { headers: { 'If-None-Match': etag } })).status).toBe(304);
   // Simulate two edge caches populated with the old revision.
-  const oldCacheKey = `${env.SITE_URL}/wiki/guide?wiki_cache=v2&revision=${page.revision}`;
+  const oldCacheKey = `${env.SITE_URL}/wiki/guide?wiki_cache=v1&revision=${page.revision}`;
   expect(await caches.default.match(oldCacheKey)).toBeDefined();
   const edits = await Promise.all([save('guide', 'Updated one', page.revision, 'New title'), save('guide', 'Updated two', page.revision, 'New title')]);
   expect(edits.map(r => r.status).sort()).toEqual([200, 409]);

@@ -8,9 +8,6 @@
   "scripts": {
     "bootstrap": "bash scripts/bootstrap-worker.sh",
     "images:hero": "node scripts/generate-hero-images.js",
-    "wiki:download": "node scripts/download-wiki.js",
-    "wiki:import": "node scripts/import-wiki.js",
-    "wiki:test-migration": "node --test scripts/wiki-migration.test.js",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "test": "vitest run",
@@ -18,10 +15,7 @@
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.22.0",
-    "cheerio": "^1.2.0",
     "sharp": "^0.35.4",
-    "turndown": "^7.2.4",
-    "turndown-plugin-gfm": "^1.0.2",
     "vitest": "~4.1.0",
     "wrangler": "^4.130.0"
   },
