@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -53,6 +54,14 @@ type printer struct {
 	command func(context.Context, printerConfig) *exec.Cmd
 }
 
+func (p *printer) logf(format string, args ...any) {
+	message := fmt.Sprintf(format, args...)
+	if code := p.config.AccessCode; code != "" {
+		message = strings.ReplaceAll(message, code, "[redacted]")
+	}
+	log.Printf("printer name=%q serial=%q host=%q activity=%q", p.config.Name, p.config.SerialNumber, p.config.Host, message)
+}
+
 // Caller holds edge.configMu, or has exclusive ownership during startup/tests.
 func (s *printerSet) replace(configs []printerConfig) {
 	wanted := make(map[string]printerConfig, len(configs))
@@ -63,6 +72,7 @@ func (s *printerSet) replace(configs []printerConfig) {
 	var removed []*printer
 	for serial, p := range s.printers {
 		if config, ok := wanted[serial]; !ok || config != p.config {
+			p.logf("stopping workers: configuration changed or shutdown")
 			p.cancel()
 			removed = append(removed, p)
 			delete(s.printers, serial)
@@ -71,6 +81,7 @@ func (s *printerSet) replace(configs []printerConfig) {
 	s.mu.Unlock()
 	for _, p := range removed {
 		p.wg.Wait()
+		p.logf("workers stopped")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -86,6 +97,7 @@ func (s *printerSet) replace(configs []printerConfig) {
 			Remaining: -1,
 		}}
 		s.printers[serial] = p
+		p.logf("starting MQTT and camera workers")
 		p.wg.Add(2)
 		go p.poll()
 		go p.runCamera()
@@ -104,6 +116,7 @@ func (p *printer) report(payload []byte) {
 		} `json:"print"`
 	}
 	if json.Unmarshal(payload, &message) != nil {
+		p.logf("MQTT invalid report received bytes=%d", len(payload))
 		return
 	}
 	report := message.Print
@@ -119,18 +132,19 @@ func (p *printer) report(payload []byte) {
 		p.data.Remaining = *report.Remaining
 	}
 	p.data.UpdatedAt, p.data.Error = time.Now(), ""
+	p.logf("MQTT status received state=%q remaining_minutes=%d bytes=%d", p.data.State, p.data.Remaining, len(payload))
 }
 
-func waitMQTT(ctx context.Context, token mqtt.Token) bool {
+func waitMQTT(ctx context.Context, token mqtt.Token) error {
 	timer := time.NewTimer(5 * time.Second)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		return false
+		return ctx.Err()
 	case <-timer.C:
-		return false
+		return fmt.Errorf("operation timed out after 5s")
 	case <-token.Done():
-		return token.Error() == nil
+		return token.Error()
 	}
 }
 
@@ -141,6 +155,9 @@ func (p *printer) poll() {
 		p.mu.Lock()
 		p.data.Error = err
 		p.mu.Unlock()
+		if p.ctx.Err() == nil {
+			p.logf("%s; retrying MQTT in 5s", err)
+		}
 		select {
 		case <-p.ctx.Done():
 			return
@@ -171,22 +188,31 @@ func (p *printer) pollConnection() string {
 	defer func() {
 		cancel()
 		client.Disconnect(100)
+		p.logf("MQTT disconnected")
 	}()
-	if !waitMQTT(ctx, client.Connect()) {
+	p.logf("MQTT connecting port=8883")
+	if err := waitMQTT(ctx, client.Connect()); err != nil {
+		p.logf("MQTT connect failed: %v", err)
 		return "MQTT connection failed"
 	}
-	if !waitMQTT(ctx, client.Subscribe("device/"+p.config.SerialNumber+"/report", 0, func(_ mqtt.Client, msg mqtt.Message) {
+	p.logf("MQTT connected; subscribing to reports")
+	if err := waitMQTT(ctx, client.Subscribe("device/"+p.config.SerialNumber+"/report", 0, func(_ mqtt.Client, msg mqtt.Message) {
 		p.report(msg.Payload())
-	})) {
+	})); err != nil {
+		p.logf("MQTT subscribe failed: %v", err)
 		return "MQTT subscription failed"
 	}
+	p.logf("MQTT report subscription active")
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
-		if !waitMQTT(ctx, client.Publish("device/"+p.config.SerialNumber+"/request", 0, false,
-			`{"pushing":{"command":"pushall","sequence_id":"0"}}`)) {
+		p.logf("MQTT publishing status request command=pushall")
+		if err := waitMQTT(ctx, client.Publish("device/"+p.config.SerialNumber+"/request", 0, false,
+			`{"pushing":{"command":"pushall","sequence_id":"0"}}`)); err != nil {
+			p.logf("MQTT status publish failed: %v", err)
 			return "MQTT status request failed"
 		}
+		p.logf("MQTT status request sent")
 		select {
 		case <-ctx.Done():
 			return "printer stopped"
@@ -215,6 +241,9 @@ func (p *printer) runCamera() {
 		p.mu.Lock()
 		p.frame, p.frameAt = nil, time.Time{}
 		p.mu.Unlock()
+		if p.ctx.Err() == nil {
+			p.logf("camera disconnected; retrying in 5s")
+		}
 		select {
 		case <-p.ctx.Done():
 			return
@@ -224,6 +253,7 @@ func (p *printer) runCamera() {
 }
 
 func (p *printer) cameraConnection() {
+	p.logf("camera connecting port=322")
 	ctx, cancel := context.WithCancel(p.ctx)
 	defer cancel()
 	command := p.command
@@ -236,28 +266,41 @@ func (p *printer) cameraConnection() {
 	cmd.WaitDelay = time.Second
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		p.logf("camera output pipe failed")
 		return
 	}
 	defer stdout.Close()
 	if cmd.Start() != nil {
+		p.logf("camera process start failed; check FFmpeg installation")
 		return
 	}
 	defer func() {
 		cancel()
 		_ = cmd.Wait()
+		p.logf("camera process stopped")
 	}()
+	p.logf("camera process started")
 	reader := multipart.NewReader(stdout, "frame")
 	// Restart a wedged upstream even when nobody is requesting images.
-	watchdog := time.AfterFunc(cameraTimeout, cancel)
+	watchdog := time.AfterFunc(cameraTimeout, func() {
+		if ctx.Err() == nil {
+			p.logf("camera timed out waiting for frame after %s", cameraTimeout)
+		}
+		cancel()
+	})
 	defer watchdog.Stop()
 	for ctx.Err() == nil {
 		part, err := reader.NextPart()
 		if err != nil {
+			if ctx.Err() == nil {
+				p.logf("camera stream ended or multipart read failed")
+			}
 			return
 		}
 		frame, err := io.ReadAll(io.LimitReader(part, maxCameraFrame+1))
 		if err != nil || len(frame) > maxCameraFrame || len(frame) < 4 ||
 			frame[0] != 0xff || frame[1] != 0xd8 || frame[len(frame)-2] != 0xff || frame[len(frame)-1] != 0xd9 {
+			p.logf("camera frame rejected: read failure, invalid JPEG, or size limit bytes=%d", len(frame))
 			return
 		}
 		watchdog.Reset(cameraTimeout)
@@ -265,6 +308,7 @@ func (p *printer) cameraConnection() {
 		// Frames are immutable so HTTP requests can write without holding the lock.
 		p.frame, p.frameAt = frame, time.Now()
 		p.mu.Unlock()
+		p.logf("camera frame received bytes=%d", len(frame))
 	}
 }
 

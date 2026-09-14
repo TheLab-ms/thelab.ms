@@ -5,11 +5,14 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -232,6 +235,104 @@ func TestWorkerPeriodicRefresh(t *testing.T) {
 	}
 	if calls.Load() < 2 {
 		t.Fatal("no periodic refresh without API traffic")
+	}
+}
+
+type workerTestTransport func(*http.Request) (*http.Response, error)
+
+func (f workerTestTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestWorkerKeyDownloadRetries(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		a, _ := loadWorkerAuth("https://thelab.example", "https://edge.example")
+		var calls atomic.Int32
+		a.client.Transport = workerTestTransport(func(r *http.Request) (*http.Response, error) {
+			switch calls.Add(1) {
+			case 1:
+				return nil, fmt.Errorf("network unavailable")
+			case 2, 4, 5, 6, 8:
+				return &http.Response{StatusCode: 503, Body: io.NopCloser(strings.NewReader("unavailable")), Header: make(http.Header)}, nil
+			case 3:
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("invalid JSON")), Header: make(http.Header)}, nil
+			default:
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"keys":[{"kid":"test","kty":"OKP","crv":"Ed25519","alg":"EdDSA","use":"sig","x":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"}]}`)), Header: make(http.Header)}, nil
+			}
+		})
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan struct{})
+		go func() { defer close(done); a.run(ctx) }()
+		synctest.Wait()
+		if calls.Load() != 1 {
+			t.Fatalf("startup requests = %d, want 1", calls.Load())
+		}
+		// Repeated failures back off to one minute; success restores the normal
+		// refresh interval and resets the backoff for the next outage.
+		for i, delay := range []time.Duration{5 * time.Second, 10 * time.Second, 20 * time.Second, 40 * time.Second, time.Minute, time.Minute, workerKeyRefresh, 5 * time.Second} {
+			time.Sleep(delay - time.Nanosecond)
+			synctest.Wait()
+			if calls.Load() != int32(i+1) {
+				t.Fatalf("retry fired early: calls=%d want=%d", calls.Load(), i+1)
+			}
+			time.Sleep(time.Nanosecond)
+			synctest.Wait()
+			if calls.Load() != int32(i+2) {
+				t.Fatalf("missing retry: calls=%d want=%d", calls.Load(), i+2)
+			}
+			if calls.Load() == 7 || calls.Load() == 9 {
+				r := httptest.NewRequest("GET", "/api/swipes", nil)
+				r.Header.Set("Authorization", "Bearer "+workerTestToken(testWorkerClaims()))
+				if !a.verify(r) {
+					t.Fatal("download retry did not restore authentication")
+				}
+			}
+		}
+		cancel()
+		synctest.Wait()
+		select {
+		case <-done:
+		default:
+			t.Fatal("refresh did not stop on cancellation")
+		}
+		time.Sleep(workerKeyRefresh)
+		if calls.Load() != 9 {
+			t.Fatal("download continued after cancellation")
+		}
+	})
+}
+
+func TestWorkerKeyRetryCancellation(t *testing.T) {
+	for _, inFlight := range []bool{false, true} {
+		t.Run(fmt.Sprintf("in_flight=%t", inFlight), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				a, _ := loadWorkerAuth("https://thelab.example", "https://edge.example")
+				var calls atomic.Int32
+				a.client.Transport = workerTestTransport(func(r *http.Request) (*http.Response, error) {
+					calls.Add(1)
+					if inFlight {
+						<-r.Context().Done()
+						return nil, r.Context().Err()
+					}
+					return nil, fmt.Errorf("offline")
+				})
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				done := make(chan struct{})
+				go func() { defer close(done); a.run(ctx) }()
+				synctest.Wait()
+				cancel()
+				synctest.Wait()
+				select {
+				case <-done:
+				default:
+					t.Fatal("cancellation did not stop refresh")
+				}
+				time.Sleep(workerKeyRefresh)
+				if calls.Load() != 1 {
+					t.Fatalf("unexpected requests: %d", calls.Load())
+				}
+			})
+		})
 	}
 }
 

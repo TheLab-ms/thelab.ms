@@ -26,6 +26,7 @@ func run() error {
 	tunnel := flag.String("tunnel", ":8080", "cloudflared origin listen address (loopback or trusted subnet)")
 	data := flag.String("data", "/data", "persistent data directory (one process only)")
 	flag.Parse()
+	log.Printf("edge proxy starting data=%q", *data)
 	e, err := openEdge(*data)
 	if err != nil {
 		return err
@@ -39,6 +40,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	log.Printf("edge proxy authentication configured worker=%t fob_signing=%t", e.workerAuth != nil, e.signingKey != nil)
 	lanHandler, tunnelHandler := e.routes()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -79,8 +81,10 @@ func run() error {
 	}
 	select {
 	case <-ctx.Done():
+		log.Printf("edge proxy shutting down: %v", ctx.Err())
 		return nil
 	case err := <-errors:
+		log.Printf("edge proxy listener stopped: %v", err)
 		stop()
 		return err
 	}
@@ -106,7 +110,7 @@ func (e *edge) routes() (http.Handler, http.Handler) {
 	tunnel.HandleFunc("GET /machines/content", e.printers.dashboard)
 	tunnel.HandleFunc("GET /machines/images/{image}", e.printers.snapshot)
 	tunnel.HandleFunc("GET /machines/app.js", printerScript)
-	return lan, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return logRequests("lan", lan), logRequests("tunnel", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		if r.URL.Path == "/machines" || strings.HasPrefix(r.URL.Path, "/machines/") {
 			w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive")
@@ -118,5 +122,5 @@ func (e *edge) routes() (http.Handler, http.Handler) {
 			return
 		}
 		tunnel.ServeHTTP(w, r)
-	})
+	}))
 }

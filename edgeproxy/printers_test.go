@@ -244,7 +244,7 @@ func TestPrinterHTTPSnapshot(t *testing.T) {
 	s := printerSet{printers: map[string]*printer{"camera": p}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{image}", s.snapshot)
-	server := httptest.NewServer(mux)
+	server := httptest.NewServer(logRequests("tunnel", mux))
 	defer server.Close()
 	client := &http.Client{Timeout: 5 * time.Second}
 	for i := 0; i < 3; i++ {

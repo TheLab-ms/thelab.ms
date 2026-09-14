@@ -96,6 +96,7 @@ func (e *edge) goal(w http.ResponseWriter, r *http.Request) {
 		storageError(w, err)
 		return
 	}
+	log.Printf("goal stored version=%d bytes=%d", *input.Version, len(body))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -193,6 +194,7 @@ func (e *edge) patchGoal(w http.ResponseWriter, r *http.Request) {
 		storageError(w, err)
 		return
 	}
+	log.Printf("goal diff stored base_version=%d version=%d added=%d removed=%d", *input.Base, *input.Version, len(input.Add), len(input.Remove))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -223,6 +225,9 @@ func (e *edge) fobs(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		storageError(w, err)
 		return
+	}
+	if len(events) > 0 {
+		log.Printf("controller swipes stored controller=%q events=%d", ip, len(events))
 	}
 	etag, err := controllerETag(body)
 	if err != nil {

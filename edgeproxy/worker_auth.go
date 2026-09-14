@@ -17,6 +17,8 @@ import (
 
 const workerKeyRefresh = 5 * time.Minute
 const workerKeyMaxAge = time.Hour
+const workerKeyRetry = 5 * time.Second
+const workerKeyRetryMax = time.Minute
 
 type workerAuth struct {
 	issuer, audience   string
@@ -43,8 +45,18 @@ func loadWorkerAuth(issuer, audience string) (*workerAuth, error) {
 }
 
 // Caller holds mu. Failures never extend the last successful key set's lifetime.
-func (a *workerAuth) refresh(ctx context.Context) error {
+func (a *workerAuth) refresh(ctx context.Context) (err error) {
 	a.attempted = time.Now()
+	log.Printf("Worker JWKS download started issuer=%q", a.issuer)
+	defer func() {
+		if err != nil {
+			if ctx.Err() == nil {
+				log.Printf("Worker JWKS download failed issuer=%q duration=%s error=%q", a.issuer, time.Since(a.attempted), err)
+			}
+		} else {
+			log.Printf("Worker JWKS download succeeded issuer=%q keys=%d duration=%s", a.issuer, len(a.keys), time.Since(a.attempted))
+		}
+	}()
 	req, err := http.NewRequestWithContext(ctx, "GET", a.issuer+"/.well-known/edge-jwks.json", nil)
 	if err != nil {
 		return err
@@ -86,12 +98,10 @@ func (a *workerAuth) refresh(ctx context.Context) error {
 	return nil
 }
 
-func (a *workerAuth) refreshKeys(ctx context.Context) {
+func (a *workerAuth) refreshKeys(ctx context.Context) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if err := a.refresh(ctx); err != nil && ctx.Err() == nil {
-		log.Printf("Worker JWKS refresh failed: %v", err)
-	}
+	return a.refresh(ctx)
 }
 
 func (a *workerAuth) run(ctx context.Context) {
@@ -102,15 +112,28 @@ func (a *workerAuth) runRefresh(ctx context.Context, interval time.Duration) {
 	if a == nil {
 		return
 	}
-	a.refreshKeys(ctx)
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+	retry := workerKeyRetry
+	for ctx.Err() == nil {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			a.refreshKeys(ctx)
+		case <-timer.C:
+			if ctx.Err() != nil {
+				return
+			}
+			delay := interval
+			if err := a.refreshKeys(ctx); err != nil {
+				delay = retry
+				retry = min(retry*2, workerKeyRetryMax)
+				if ctx.Err() == nil {
+					log.Printf("Worker JWKS retry scheduled in=%s", delay)
+				}
+			} else {
+				retry = workerKeyRetry
+			}
+			timer.Reset(delay)
 		}
 	}
 }

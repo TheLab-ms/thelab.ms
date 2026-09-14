@@ -195,6 +195,7 @@ func (e *edge) configure(w http.ResponseWriter, r *http.Request) {
 			e.renderConfig(w, http.StatusInternalServerError, printers, "Cannot save printers. Please try again.")
 			return
 		}
+		log.Printf("printer configuration saved printers=%d", len(printers))
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 	default:
 		w.Header().Set("Allow", "GET, POST")
