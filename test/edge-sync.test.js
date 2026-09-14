@@ -238,7 +238,7 @@ it('renders cached swipes across admin pages without contacting edgeproxy', asyn
   expect(execute).not.toHaveBeenCalled();
 });
 
-it('protects manual full sync with live admin role and CSRF; sends a full snapshot', async () => {
+it('protects manual full sync with an admin session and CSRF; sends a full snapshot', async () => {
   await member();
   const token = await issueToken(env, '333333333333333333', 'admin');
   const admin = await worker.fetch(new Request(`${env.SITE_URL}/admin`, { headers: { Cookie: `thelab_admin=${token}` } }), configured);
@@ -258,9 +258,10 @@ it('protects manual full sync with live admin role and CSRF; sends a full snapsh
   expect((await worker.fetch(request(csrf), configured)).status).toBe(200);
   expect(writes[0]).toMatchObject({ method: 'PUT', fobs: [7] });
   expect(await env.DB.prepare('SELECT id FROM edge_swipes').all()).toMatchObject({ results: [{ id: 'manual' }] });
-  const normal = fetchSpy.getMockImplementation();
-  fetchSpy.mockImplementation((url, init) => String(url).startsWith('https://discord.com/') ? Response.json({ roles: [] }) : normal(url, init));
-  expect((await worker.fetch(request(csrf), configured)).status).toBe(403);
+  expect(fetchSpy.mock.calls.some(([url]) => String(url).startsWith('https://discord.com/'))).toBe(false);
+  const invalid = request(csrf);
+  invalid.headers.set('Cookie', `thelab_admin=${await issueToken(env, '333333333333333333', 'member')}`);
+  expect((await worker.fetch(invalid, configured)).status).toBe(303);
   expect(writes).toHaveLength(1);
 });
 

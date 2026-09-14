@@ -369,7 +369,6 @@ describe('Discord signup', () => {
 describe('member administration', () => {
   let token, cookie;
   beforeEach(() => { token = ''; cookie = ''; });
-  const role = (roles = [env.DISCORD_ADMIN_ROLE_ID]) => mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}`, { roles });
   const fields = (extra = {}) => ({ discord_user_id: id, stripe_customer_id: customer, stripe_subscription_id: '', name_override: 'Maker Name',
     notes: 'Orientation complete', billing: 'yearly',
     discount_type: 'student', metadata_version: '0', ...extra });
@@ -384,7 +383,6 @@ describe('member administration', () => {
 
   it('records committed admin edits once and leaves history intact on stale or invalid saves', async () => {
     await seed(); await authenticate();
-    role().times(3);
     expect((await save()).status).toBe(303);
     const history = await queryEvents(env);
     expect(history.events.map(event => event.event_type).sort()).toEqual([
@@ -419,24 +417,32 @@ describe('member administration', () => {
     expect((await api(`/login/discord/callback?state=${deniedState}&code=test`, { headers: { Cookie: denied.headers.get('Set-Cookie').split(';')[0] } })).status).toBe(403);
   });
 
-  it('rejects anonymous, expired, unconfigured, and revoked access to reads and writes', async () => {
+  it('rejects anonymous, expired, and unconfigured access to reads and writes', async () => {
     expect((await api('/admin')).headers.get('Location')).toContain('https://discord.com/oauth2/authorize?');
     expect((await save()).status).toBe(303);
     await seed();
     expect((await api('/admin', { headers: { Cookie: await loginCookie() } })).status).toBe(303);
     await authenticate();
     expect((await api('/admin', { headers: { Cookie: cookie } }, { ...env, DISCORD_ADMIN_ROLE_ID: '' })).status).toBe(503);
-    role([]);
-    expect((await api('/admin', { headers: { Cookie: cookie } })).status).toBe(403);
-    role([]);
-    expect((await save()).status).toBe(403);
-    expect((await readMember()).discord_username).toBe('maker');
     vi.spyOn(Date, 'now').mockReturnValue((now() + 8 * 3600) * 1000);
     expect((await api(`/admin/members/${id}`, { headers: { Cookie: cookie } })).status).toBe(303);
+    expect((await save()).status).toBe(303);
+    expect((await readMember()).metadata_version).toBe(0);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it('authorizes admin reads and saves from the signed session without Discord requests', async () => {
+    await seed(); await authenticate();
+    for (const path of ['/admin', `/admin/members/${id}`, '/admin/events', `/admin/members/${id}/events`]) {
+      expect((await api(path, { headers: { Cookie: cookie } }, { ...env, DISCORD_BOT_TOKEN: '' })).status).toBe(200);
+    }
+    expect((await save()).status).toBe(303);
+    expect((await readMember()).name_override).toBe('Maker Name');
+    expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
   it('logs unexpected admin database errors with context and keeps details out of HTML', async () => {
-    await authenticate(); role();
+    await authenticate();
     const log = vi.spyOn(console, 'error').mockImplementation(() => {});
     const response = await api('/admin?code=private-code', { headers: { Cookie: cookie } }, {
       ...env, DB: { prepare() { throw new Error('D1 connection failed', { cause: new Error('database offline') }); } },
@@ -454,11 +460,9 @@ describe('member administration', () => {
 
   it('paginates all members with deterministic ordering and handles empty/invalid pages', async () => {
     await authenticate();
-    role();
     expect(await (await api('/admin', { headers: { Cookie: cookie } })).text()).toContain('No members have registered yet.');
     await env.DB.batch(Array.from({ length: 26 }, (_, i) => env.DB.prepare('INSERT INTO members (discord_user_id, discord_username, discord_email, created) VALUES (?, ?, ?, ?)')
       .bind(String(BigInt(id) + BigInt(i)), `maker-${i}`, `maker${i}@example.com`, 1000)));
-    role();
     const first = await api('/admin', { headers: { Cookie: cookie } });
     const html = await first.text();
     expect(first.headers.get('Cache-Control')).toBe('no-store');
@@ -467,13 +471,10 @@ describe('member administration', () => {
     expect(html.match(/href="\/admin\/members\//g)).toHaveLength(25);
     expect(html).toContain('>maker-25</a>');
     expect(html).not.toContain('>maker-0</a>');
-    role();
     const second = await (await api('/admin?page=2', { headers: { Cookie: cookie } })).text();
     expect(second.match(/href="\/admin\/members\//g)).toHaveLength(1);
     expect(second).toContain('>maker-0</a>');
-    role();
     expect((await api('/admin?page=3', { headers: { Cookie: cookie } })).headers.get('Location')).toBe('/admin?page=2');
-    role();
     expect((await api('/admin?page=-1', { headers: { Cookie: cookie } })).status).toBe(400);
   });
 
@@ -489,7 +490,7 @@ describe('member administration', () => {
     const otherID = '555555555555555555';
     await env.DB.prepare('INSERT INTO members (discord_user_id, discord_username, discord_email) VALUES (?, ?, ?)')
       .bind(otherID, 'unrelated', 'unrelated@example.com').run();
-    await authenticate(); role();
+    await authenticate();
     const response = await api(`/admin?${new URLSearchParams({ q: `  ${query}  ` })}`, { headers: { Cookie: cookie } });
     expect(response.status).toBe(200);
     const html = await response.text();
@@ -503,13 +504,11 @@ describe('member administration', () => {
     await seed({ billing_name: '100%_\\special' });
     await authenticate();
     for (const query of ['%', '_', '\\']) {
-      role();
       const html = await (await api(`/admin?${new URLSearchParams({ q: query })}`, { headers: { Cookie: cookie } })).text();
       expect(html).toContain(`href="/admin/members/${id}"`);
     }
     await env.DB.prepare("UPDATE members SET billing_name = ''").run();
     for (const query of ['%', '_', '\\', "' OR 1=1 --", '"><script>alert(1)</script>']) {
-      role();
       const html = await (await api(`/admin?${new URLSearchParams({ q: query })}`, { headers: { Cookie: cookie } })).text();
       expect(html).toContain('0 matching members');
       expect(html).toContain('No members match your search.');
@@ -517,11 +516,9 @@ describe('member administration', () => {
       expect(html).not.toContain('<script>');
       if (query.includes('<script>')) expect(html).toContain('&lt;script&gt;');
     }
-    role();
     const empty = await (await api('/admin?q=++', { headers: { Cookie: cookie } })).text();
     expect(empty).toContain('1 registered member');
     for (const query of ['q=one&q=two', `q=${'x'.repeat(255)}`]) {
-      role();
       expect((await api(`/admin?${query}`, { headers: { Cookie: cookie } })).status).toBe(400);
     }
   });
@@ -530,7 +527,7 @@ describe('member administration', () => {
     await seed();
     await env.DB.batch(Array.from({ length: 26 }, (_, i) => env.DB.prepare('INSERT INTO members (discord_user_id, discord_username, discord_email, billing_name, created) VALUES (?, ?, ?, ?, ?)')
       .bind(String(BigInt(id) + BigInt(i + 1)), `person-${i}`, '', 'Search & Match', 1000)));
-    await authenticate(); role();
+    await authenticate();
     const first = await (await api('/admin?q=Search+%26+Match', { headers: { Cookie: cookie } })).text();
     expect(first).toContain('26 matching members');
     expect(first.match(/href="\/admin\/members\//g)).toHaveLength(25);
@@ -538,14 +535,11 @@ describe('member administration', () => {
     expect(first).toContain('href="/admin">Clear</a>');
     expect(first).toContain('method="get" action="/admin"');
     expect(first).not.toContain('name="page"');
-    role();
     const second = await (await api('/admin?page=2&q=Search+%26+Match', { headers: { Cookie: cookie } })).text();
     expect(second.match(/href="\/admin\/members\//g)).toHaveLength(1);
     expect(second).toContain('href="/admin?page=1&amp;q=Search+%26+Match"');
-    role();
     expect((await api('/admin?page=3&q=Search+%26+Match', { headers: { Cookie: cookie } })).headers.get('Location'))
       .toBe('/admin?page=2&q=Search+%26+Match');
-    role();
     expect((await api('/admin?page=3&q=absent', { headers: { Cookie: cookie } })).headers.get('Location')).toBe('/admin?page=1&q=absent');
   });
 
@@ -566,14 +560,12 @@ describe('member administration', () => {
     const log = vi.spyOn(console, 'warn').mockImplementation(() => {});
     await seed({ stripe_subscription_id: 'sub_member', stripe_subscription_state: 'active' });
     await authenticate();
-    role();
     const result = await save(fields({ notes: '<script>alert(1)</script>', stripe_subscription_id: 'sub_member', stripe_subscription_state: 'canceled',
       discord_username: 'forged', discord_email: 'forged@example.com', billing_name: 'forged', billing_email: 'forged@example.com' }));
     expect(result.status).toBe(303);
     expect(await readMember()).toMatchObject({ discord_username: user.username, discord_email: user.email, name_override: 'Maker Name', billing_name: '', billing_email: '',
       bill_annually: 1, discount_type: 'student', metadata_version: 1,
       stripe_customer_id: customer, stripe_subscription_state: 'active', stripe_subscription_id: 'sub_member' });
-    role();
     const view = await api(`/admin/members/${id}?saved=1`, { headers: { Cookie: cookie } });
     const html = await view.text();
     expect(html).toContain('Member metadata saved.');
@@ -595,7 +587,6 @@ describe('member administration', () => {
     }
     expect(html).toContain(await hash(`admin-csrf:${token}`));
     expect(view.headers.get('Content-Security-Policy')).toContain("frame-ancestors 'none'");
-    role();
     const stale = await save(fields({ notes: 'Stale notes' }));
     expect(stale.status).toBe(409);
     const entries = log.mock.calls.map(([entry]) => JSON.parse(entry));
@@ -616,7 +607,6 @@ describe('member administration', () => {
     expect((await save(fields(), { 'Content-Type': 'application/json' })).status).toBe(415);
     for (const invalid of [{ discount_type: 'free' }, { billing: 'weekly' }, { discord_user_id: 'invalid' }, { stripe_customer_id: 'bad' },
       { stripe_subscription_id: 'bad' }, { stripe_customer_id: '', stripe_subscription_id: 'sub_member' }, { name_override: 'x'.repeat(161) }, { notes: 'x'.repeat(5001) }]) {
-      role();
       const response = await save(fields(invalid));
       expect(response.status).toBe(400);
       const html = await response.text();
@@ -626,7 +616,6 @@ describe('member administration', () => {
       }
     }
     expect((await readMember()).metadata_version).toBe(0);
-    role();
     expect((await api('/admin/members/999999999999999999', { headers: { Cookie: cookie } })).status).toBe(404);
   });
 
@@ -641,7 +630,6 @@ describe('member administration', () => {
     await seed({ stripe_subscription_state: state, stripe_subscription_id: subscriptionID, stripe_synced_at: 1000 });
     await authenticate();
     for (const path of ['/admin', `/admin/members/${id}`]) {
-      role();
       const html = await (await api(path, { headers: { Cookie: cookie } })).text();
       expect(html).toContain(label);
       expect(html).toContain('1970-01-01 00:16:40 UTC');
@@ -649,7 +637,6 @@ describe('member administration', () => {
       else expect(html).not.toContain('dashboard.stripe.com');
     }
     if (subscriptionID) {
-      role();
       const html = await (await api(`/admin/members/${id}`, { headers: { Cookie: cookie } }, { ...env, STRIPE_SECRET_KEY: 'sk_live_fake' })).text();
       expect(html).toContain('href="https://dashboard.stripe.com/subscriptions/sub_member"');
     }
@@ -661,9 +648,7 @@ describe('member administration', () => {
     { name_override: ' ', billing_name: ' ', expected: user.username },
   ])('uses the same name precedence in member lists and editor titles: $expected', async ({ expected, ...names }) => {
     await seed(names); await authenticate();
-    role();
     expect(await (await api('/admin', { headers: { Cookie: cookie } })).text()).toContain(`>${expected}</a>`);
-    role();
     expect(await (await api(`/admin/members/${id}`, { headers: { Cookie: cookie } })).text()).toContain(`<h1>Edit ${expected}</h1>`);
   });
 
@@ -672,7 +657,6 @@ describe('member administration', () => {
     await seed({ stripe_subscription_id: 'sub_member', stripe_subscription_state: 'active' });
     await authenticate(); const oldCookie = await loginCookie();
     const before = await readMember();
-    role();
     mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${replacement}`, { user: { id: replacement, username: 'new-maker' } });
     mockBilling();
     mockStripe('/subscriptions/sub_member', subscription());
@@ -710,7 +694,6 @@ describe('member administration', () => {
     await runInDurableObject(stub, async (_instance, state) => {
       await state.storage.put('customer', { result: { id: customer } });
     });
-    role();
     mockStripe('/customers/cus_new', { id: 'cus_new', name: 'New Billing', email: 'new@example.com' });
     mockStripe('/subscriptions/sub_new', { ...subscription('past_due', 'sub_new'), customer: 'cus_new' });
     mockStripe('/subscriptions/sub_new', {}, { method: 'POST' });
@@ -728,10 +711,9 @@ describe('member administration', () => {
     await env.DB.prepare('INSERT INTO members (discord_user_id, discord_username, discord_email, stripe_customer_id) VALUES (?, ?, ?, ?)')
       .bind(other, 'other', 'other@example.com', 'cus_other').run();
     for (const edit of [{ discord_user_id: other }, { stripe_customer_id: 'cus_other' }]) {
-      role();
       expect((await save(fields(edit))).status).toBe(409);
     }
-    role(); mockBilling();
+    mockBilling();
     mockStripe('/subscriptions/sub_wrong', { ...subscription('active', 'sub_wrong'), customer: 'cus_other' });
     expect((await save(fields({ stripe_subscription_id: 'sub_wrong' }))).status).toBe(400);
     expect(await readMember()).toMatchObject({ metadata_version: 0, stripe_customer_id: customer, stripe_subscription_id: null });
@@ -744,7 +726,6 @@ describe('member administration', () => {
     mockStripe('/checkout/sessions', { id: 'cs_transfer', url: 'https://checkout.stripe.com/c/pay/transfer' }, { method: 'POST' });
     await checkout();
     const member = await readMember();
-    role();
     mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${replacement}`, { user: { id: replacement, username: 'new-maker' } });
     mockBilling();
     mockStripe('/checkout/sessions/cs_transfer', { id: 'cs_transfer', status: 'open' });
@@ -767,7 +748,6 @@ describe('member administration', () => {
   it('clears billing fields and reconciles role removal when Stripe IDs are cleared', async () => {
     await seed({ billing_name: 'Old billing', billing_email: 'old@example.com' }); await authenticate();
     const member = await readMember();
-    role();
     mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, {}, 'DELETE', 204).times(2);
     expect((await save(fields({ stripe_customer_id: '' }))).status).toBe(303);
     await processMessage({ member_id: member.member_id }, env);
@@ -780,12 +760,10 @@ describe('member administration', () => {
     mockStripe('/checkout/sessions', { id: 'cs_admin', url: 'https://checkout.stripe.com/c/pay/admin' }, { method: 'POST' });
     await checkout();
     const version = String((await readMember()).metadata_version);
-    role();
     mockStripe('/checkout/sessions/cs_admin', { id: 'cs_admin', status: 'open' }).times(2);
     mockStripe('/checkout/sessions/cs_admin/expire', {}, { method: 'POST', status: 500 });
     expect((await save(fields({ metadata_version: version }))).status).toBe(502);
     expect((await readMember()).bill_annually).toBe(0);
-    role();
     mockStripe('/checkout/sessions/cs_admin', { id: 'cs_admin', status: 'open' });
     mockStripe('/checkout/sessions/cs_admin/expire', { id: 'cs_admin', status: 'expired' }, { method: 'POST' });
     expect((await save(fields({ metadata_version: version }))).status).toBe(303);
@@ -800,7 +778,6 @@ describe('member administration', () => {
     if (!discount) mockStripe(/^\/v1\/coupons\?/, { data: [{ id: 'coupon_student', valid: true, metadata: { discountTypes: 'student' } }], has_more: false });
     mockStripe('/checkout/sessions', { id: 'cs_before', url: 'https://checkout.stripe.com/c/pay/before' }, { method: 'POST' });
     await checkout();
-    role();
     mockStripe('/checkout/sessions/cs_before', { id: 'cs_before', status: 'open' });
     mockStripe('/checkout/sessions/cs_before/expire', { status: 'expired' }, { method: 'POST' });
     expect((await save(fields({ billing: 'monthly', discount_type: discount, metadata_version: String((await readMember()).metadata_version) }))).status).toBe(303);
@@ -819,7 +796,6 @@ describe('member administration', () => {
     mockSubs(); mockPrice(); mockCheckoutEmail();
     mockStripe('/checkout/sessions', { id: 'cs_profile', url: 'https://checkout.stripe.com/c/pay/profile' }, { method: 'POST' });
     await checkout();
-    role();
     expect((await save()).status).toBe(409);
     expect(await readMember()).toMatchObject({ name_override: 'Admin name', notes: 'Keep me', discount_type: '' });
   });
@@ -856,7 +832,6 @@ describe('member administration', () => {
     mockSubs(); mockPrice(); mockCheckoutEmail();
     mockStripe('/checkout/sessions', { id: 'cs_complete', url: 'https://checkout.stripe.com/c/pay/complete' }, { method: 'POST' });
     await checkout();
-    role();
     mockStripe('/checkout/sessions/cs_complete', { id: 'cs_complete', status: 'complete', subscription: 'sub_member' });
     expect((await save(fields({ metadata_version: String((await readMember()).metadata_version) }))).status).toBe(303);
     mockSubs().times(2);
@@ -867,7 +842,6 @@ describe('member administration', () => {
 
   it('serializes simultaneous admin saves so only one stale-version update wins', async () => {
     await seed(); await authenticate();
-    role().times(2);
     const results = await Promise.all([save(fields({ notes: 'First edit' })), save(fields({ notes: 'Second edit' }))]);
     expect(results.map(result => result.status).sort()).toEqual([303, 409]);
     expect((await readMember()).metadata_version).toBe(1);
@@ -954,15 +928,16 @@ describe('member history', () => {
     expect((await queryEvents(env)).events.every(event => event.member_id === null)).toBe(true);
   });
 
-  it.each(['/admin/events', `/admin/members/${id}/events`])('requires current admin authorization for %s and preserves OAuth destinations', async path => {
+  it.each(['/admin/events', `/admin/members/${id}/events`])('requires a valid admin session for %s and preserves OAuth destinations', async path => {
+    await seed();
     const destination = `${path}?page=2&event_type=DiscountTypeModified`;
     const redirect = await api(destination);
     expect(redirect.status).toBe(303);
     const claims = await verifyToken(env, new URL(redirect.headers.get('Location')).searchParams.get('state'), 'oauth');
     expect(claims.return_to).toBe(destination);
     const token = await issueToken(env, id, 'admin');
-    mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}`, { roles: [] });
-    expect((await api(path, { headers: { Cookie: `thelab_admin=${token}` } })).status).toBe(403);
+    expect((await api(path, { headers: { Cookie: `thelab_admin=${token}` } })).status).toBe(200);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
     const memberToken = await issueToken(env, id, 'member');
     expect((await api(path, { headers: { Cookie: `thelab_admin=${memberToken}` } })).status).toBe(303);
     expect((await api(path, { method: 'POST' })).status).toBe(405);
@@ -980,7 +955,6 @@ describe('member history', () => {
     }
     const token = await issueToken(env, id, 'admin');
     const get = async path => {
-      mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}`, { roles: [env.DISCORD_ADMIN_ROLE_ID] });
       return api(path, { headers: { Cookie: `thelab_admin=${token}` } });
     };
     const response = await get(`/admin/members/${id}/events?event_type=NameOverrideChanged`);
@@ -1003,7 +977,13 @@ describe('member history', () => {
     expect(global).toContain('2 events.');
     expect(global).toContain(`/admin/members/${id}`);
     expect(global).toContain(`/admin/members/${other.discord_user_id}`);
-    const detail = await (await get(`/admin/members/${id}`)).text();
+    const prepare = vi.fn(sql => env.DB.prepare(sql));
+    const detail = await (await api(`/admin/members/${id}`, { headers: { Cookie: `thelab_admin=${token}` } }, {
+      ...env, DB: { prepare },
+    })).text();
+    // The detail preview stays bounded even when this member has many events.
+    expect(prepare).toHaveBeenCalledTimes(3);
+    expect(prepare.mock.calls.some(([sql]) => /COUNT\(|JOIN members/i.test(sql))).toBe(false);
     expect(detail).toContain('Recent member history');
     expect(detail).toContain(`/admin/members/${id}/events`);
     expect(detail).toContain('edit-20');

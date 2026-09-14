@@ -37,6 +37,13 @@ export function eventListURL(path, current, type = '') {
   return `${path}?${params}`;
 }
 
+// The editor needs only a bounded preview, without pagination totals or member names.
+export async function recentMemberEvents(env, memberID) {
+  const { results } = await env.DB.prepare(`SELECT * FROM member_events WHERE member_id = ?
+    ORDER BY created DESC, id DESC LIMIT 10`).bind(memberID).all();
+  return results;
+}
+
 export async function queryEvents(env, { memberID, type = '', current = 1, limit = 25 } = {}) {
   const clauses = [], values = [];
   if (memberID) { clauses.push('e.member_id = ?'); values.push(memberID); }

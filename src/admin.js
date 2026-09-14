@@ -1,11 +1,10 @@
 import { boundedText, cookie, cookieHeader, discordID, escapeHTML as e, hash, HttpError, origin, redirect } from './http.js';
-import { discord } from './providers.js';
 import { finishLogin, issueToken, loginDestination, startLogin, verifyToken } from './auth.js';
 import { coordinated } from './membership.js';
 import { logError, requestContext } from './logging.js';
 import { editor, memberList, page } from './admin-views.js';
 import { memberListParams, memberListURL } from './admin-search.js';
-import { eventListParams, eventListURL, queryEvents } from './member-events.js';
+import { eventListParams, eventListURL, queryEvents, recentMemberEvents } from './member-events.js';
 import { eventList } from './event-views.js';
 import { memberName, memberPath } from './member-metadata.js';
 import { memberWaivers } from './waiver.js';
@@ -98,13 +97,8 @@ export async function adminRequest(request, env, context = requestContext(reques
       response.headers.set('Set-Cookie', cookieHeader(env, 'thelab_admin', '', 0));
       return response;
     }
-    let guildMember;
-    try { guildMember = await discord(env, `/guilds/${env.DISCORD_GUILD_ID}/members/${claims.sub}`); }
-    catch (error) {
-      if (error.providerStatus === 404) throw new HttpError(403, 'Admin access is required to view this page.');
-      throw error;
-    }
-    requireRole(env, guildMember);
+    // Admin tokens are issued only after the OAuth role check. Trust that
+    // authorization until the signed session expires, without a Discord round trip.
     if (path === '/admin/edge/resync') {
       await edgeCall(env, 'full');
       return page('Cache sync complete', '<p role="status">The complete authorized fob set was sent to edgeproxy and swipe history was backed up.</p><p><a href="/admin/events?event_type=FobSwipe">View swipes</a></p>', csrf, 200, env);
@@ -122,8 +116,9 @@ export async function adminRequest(request, env, context = requestContext(reques
         let message = error instanceof HttpError ? error.message : 'Saving failed. Please try again.';
         let events = [], waivers = '';
         try {
-          ({ events } = await queryEvents(env, { memberID: member.member_id, limit: 10 }));
-          waivers = await memberWaivers(env, member);
+          [events, waivers] = await Promise.all([
+            recentMemberEvents(env, member.member_id), memberWaivers(env, member),
+          ]);
         } catch (refreshError) {
           // Keep the submitted draft even if ancillary reads fail.
           logError('admin.refresh_failed', refreshError, context, env);
@@ -133,8 +128,10 @@ export async function adminRequest(request, env, context = requestContext(reques
       }
       return redirect(`${memberPath({ ...member, discord_user_id: fields.discord_user_id.trim() })}?saved=1`);
     }
-    const { events } = await queryEvents(env, { memberID: member.member_id, limit: 10 });
-    return editor(member, null, csrf, env, url.searchParams.get('saved') === '1' ? 'Member metadata saved.' : '', 200, events, await memberWaivers(env, member));
+    const [events, waivers] = await Promise.all([
+      recentMemberEvents(env, member.member_id), memberWaivers(env, member),
+    ]);
+    return editor(member, null, csrf, env, url.searchParams.get('saved') === '1' ? 'Member metadata saved.' : '', 200, events, waivers);
   } catch (error) {
     logError('admin.failed', error, context, env);
     if (path === '/admin/edge/resync' && csrf && error.status === 503) {
