@@ -296,20 +296,28 @@ store; firmware retries can still yield distinct IDs for the same physical swipe
 
 ### Configure Worker → edge access
 
-1. Follow the [edge Cloudflare Access setup](edgeproxy/README.md#cloudflare-access-service-token-setup)
-   to protect the machine API with a **Service Auth** policy for a dedicated token.
+1. Follow the [edge Worker JWT setup](edgeproxy/README.md#worker-jwt-authentication)
+   to generate a dedicated Ed25519 signing key and configure edgeproxy's trusted
+   Worker issuer and edge audience.
 2. Set `EDGE_URL` in `wrangler.jsonc` to the HTTPS tunnel origin, without a trailing
    slash (for example `https://edge.example.com`). This may equal `PRINTER_EDGE_URL`.
-3. Store the token credentials:
+3. Store the base64 PKCS#8 private key:
 
    ```sh
-   npx wrangler secret put EDGE_ACCESS_CLIENT_ID
-   npx wrangler secret put EDGE_ACCESS_CLIENT_SECRET
+   npx wrangler secret put EDGE_JWT_PRIVATE_KEY
    ```
 
 4. Deploy the Worker and edgeproxy, then select **Full resync** and confirm that
-   controller polls return the expected fob set. Keep service-token expiry/rotation
-   settings current in Cloudflare Access.
+   controller polls return the expected fob set. The Worker publishes public keys
+   at `/.well-known/edge-jwks.json`; edgeproxy refreshes them every five minutes.
+   `EDGE_JWT_PUBLIC_KEYS` is an optional JSON array of additional public Ed25519
+   JWKs for overlapping key rotation. See the edge README for the rotation sequence.
+
+Each API request carries a 60-second EdDSA bearer JWT. Edge validates the signature,
+issuer, audience, service identity, scope, and timestamps. The Tunnel forwards the
+Authorization header normally; remove the previous Access service-token or mTLS
+requirements when deploying this version. Remove obsolete `EDGE_ACCESS_CLIENT_ID`,
+`EDGE_ACCESS_CLIENT_SECRET`, and `PRINTER_JWT_PRIVATE_KEY` secrets after migration.
 
 Leaving `EDGE_URL` empty disables integration. Fob assignments can still be edited,
 but no goals are delivered. For this undeployed app, all new D1 schema and both
@@ -378,26 +386,18 @@ The Worker checks image availability before consulting its cache, so deleted
 images cannot be fetched from stale cached entries. Upload the image again if it
 expires while an unsaved draft remains open.
 
-## Member machines dashboard
+## Public machines dashboard
 
-The standalone [`edgeproxy`](edgeproxy/README.md) serves a member-facing dashboard at
+The standalone [`edgeproxy`](edgeproxy/README.md) serves a public dashboard at
 `https://<edge-host>/machines` with 3D printer status, remaining print time, and still
-images refreshing every five seconds. Main-site `/machines` is a shortcut into its
-sign-in flow. The browser talks directly to edgeproxy for page and image requests.
+images refreshing every five seconds. Main-site `/machines` redirects directly to
+the dashboard. The browser talks directly to edgeproxy for page and image requests.
 
-Set `PRINTER_EDGE_URL` to the HTTPS edge origin in `wrangler.jsonc`, and store the
-dedicated base64 PKCS#8 Ed25519 private key with
-`npx wrangler secret put PRINTER_JWT_PRIVATE_KEY`. Configure the corresponding
-public key, issuer, and public origin on edgeproxy. See the edge README for key
-generation and Cloudflare WAF path exceptions.
-
-The Worker reuses Discord/member login and grants printer JWTs only when the
-authenticated member's current D1 subscription state is `active` or `trialing`.
-Printer JWTs have a five-minute lifetime, an edge-specific audience, and an
-active-member/read-scope claim. A nonce-bound browser handoff establishes an
-HttpOnly cookie on the edge host. Edge verifies every dashboard/image request.
-Automatic renewal rechecks D1; membership changes take effect within five minutes
-after Stripe webhook/queue reconciliation updates the database.
+Set `PRINTER_EDGE_URL` to the HTTPS edge origin in `wrangler.jsonc`. No member
+login, cookies, or signing keys are needed for the dashboard. Machines HTML,
+content, and images carry `X-Robots-Tag: noindex, nofollow, noarchive`, and the HTML
+includes matching robots metadata. These directives ask crawlers not to index;
+the status and cameras are publicly accessible. Machine APIs still require Worker JWTs.
 
 ## Member administration and discounts
 

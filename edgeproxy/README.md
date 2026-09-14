@@ -11,9 +11,9 @@ go build .
 ./conwayedge -lan 192.168.1.10:8080 -tunnel 127.0.0.1:8081 -data ./data
 ```
 
-Defaults: `-lan :8080`, `-tunnel 127.0.0.1:8081`, `-data data`. Run one instance per data directory on a local filesystem, as an unprivileged user. New directories use mode 0700 and the database uses 0600. Protect existing directories equivalently: the database contains printer access codes.
+Defaults: `-lan :80`, `-tunnel :8080`, `-data /data`. Run one instance per data directory on a local filesystem. For an unprivileged local process, use the explicit non-privileged ports and writable directory in the example above. New directories use mode 0700 and the database uses 0600. Protect existing directories equivalently: the database contains printer access codes.
 
-Point controllers at the LAN listener. Its configuration page at `/` is unauthenticated and trusts the LAN; saves require the page's CSRF token. Point cloudflared **only** at the tunnel listener. It defaults to loopback; use `-tunnel <trusted-subnet-IP>:8081` (or `:8081` in the router container) for a separate cloudflared host, and restrict that port to the cloudflared host through the network firewall. Machine APIs use Cloudflare Access JWT assertions when configured, otherwise mTLS certificate-status headers from trusted cloudflared. Member printer routes validate Worker-issued JWTs using a public key.
+Point controllers at the LAN listener. Its configuration page at `/` is unauthenticated and trusts the LAN; saves require the page's CSRF token. Point cloudflared **only** at the tunnel listener. Bind it to loopback for a local cloudflared process, or use a trusted-subnet address for a separate cloudflared host and restrict that port to the cloudflared host through the network firewall. Machine APIs validate Worker-signed bearer JWTs using periodically refreshed public JWKS keys. Machines status and camera routes are public with no-index directives.
 
 ## Build for MikroTik ARM64
 
@@ -27,7 +27,7 @@ Build-script checks: `python3 -m unittest discover -s edgeproxy -p build_test.py
 
 Output: **`edgeproxy/dist/conwayedge-linux-arm64.tar.gz`**, with a companion `.sha256` file. This is a RouterOS-importable container image archive (manifest, configuration, filesystem layer), generated directly without Docker, Podman, a Linux VM, or target emulation. Cross-builds run on macOS or Linux using installed **Python 3.12+, Go 1.25+, and curl**. The script selects a compatible Go on PATH or in Go's existing toolchain cache; `--go /path/to/go` overrides selection. Go toolchain auto-downloads are disabled; Go module downloads follow `go.sum`.
 
-The build downloads **precompiled Alpine 3.23 ARM64 packages** for FFmpeg, its transitive runtime dependencies (including OpenSSL and the musl dynamic loader), BusyBox, and CA certificates. Only edgeproxy is cross-compiled, using `CGO_ENABLED=0`; SQLite and dashboard assets are compiled into it. Packages are unpacked directly with Python; no package install scripts or target binaries run on the build host. The complete runtime supports FFmpeg's RTSPS-to-MJPEG camera pipeline and outbound HTTPS for Access key discovery. The build checks ARM64 ELF architecture and resolves the executable/shared-library dependencies inside the image.
+The build downloads **precompiled Alpine 3.23 ARM64 packages** for FFmpeg, its transitive runtime dependencies (including OpenSSL and the musl dynamic loader), BusyBox, and CA certificates. Only edgeproxy is cross-compiled, using `CGO_ENABLED=0`; SQLite and dashboard assets are compiled into it. Packages are unpacked directly with Python; no package install scripts or target binaries run on the build host. The complete runtime supports FFmpeg's RTSPS-to-MJPEG camera pipeline and outbound HTTPS for Worker JWKS discovery. The build checks ARM64 ELF architecture and resolves the executable/shared-library dependencies inside the image.
 
 Every package URL, version, and SHA-256 is pinned in `edgeproxy/build-packages.json`, also included in the image at `/usr/share/conwayedge/build-packages.json`. Downloads are cached under `edgeproxy/.build-cache/` and verified on every build. Options: `--cache /path/to/cache`, `--output /path/to/image.tar.gz`. Normal builds use the lockfile without fetching repository indexes. To update dependencies, run `python3 edgeproxy/build.py --update-lock`, review the lockfile changes, then rebuild. This explicit maintenance command resolves dependencies from the Alpine branch's main/community indexes over HTTPS and pins the downloaded package bytes. Alpine mirrors may retire older package revisions; retain the download cache for rebuilding those revisions, or refresh the lockfile.
 
@@ -39,19 +39,19 @@ Use an ARM64 router with RouterOS v7, its matching `container` package installed
 /interface/veth/add name=veth-edge address=192.168.50.2/24 gateway=192.168.50.1
 /interface/bridge/port/add bridge=secure-bridge interface=veth-edge
 /container/mounts/add list=edge-data src=disk1/edge-data dst=/data
-/container/envs/add list=edge-env key=CONWAYEDGE_ACCESS_ISSUER value="https://your-team.cloudflareaccess.com"
-/container/envs/add list=edge-env key=CONWAYEDGE_ACCESS_AUDIENCE value="<application AUD tag>"
+/container/envs/add list=edge-env key=CONWAYEDGE_WORKER_ISSUER value="https://thelab.ms"
+/container/envs/add list=edge-env key=CONWAYEDGE_PUBLIC_URL value="https://edge.example.com"
 /container/add file=disk1/conwayedge-linux-arm64.tar.gz name=edgeproxy interface=veth-edge root-dir=disk1/edge-root mountlists=edge-data envlist=edge-env dns=192.168.50.1 logging=yes start-on-boot=yes
 /container/print
 ```
 
-Wait for extraction to finish (`status=stopped`), then `/container/start edgeproxy`. The image runs directly as UID/GID **65532:65532**, with `-lan :8080 -tunnel :8081 -data /data`; set RouterOS `cmd` to override those arguments. `/data` is mode 0700 and owned by that UID in the image. Let RouterOS populate a new mount from the image; a pre-existing data directory must also be writable by 65532:65532. Keep the data mount separate from `root-dir` so replacing the container preserves SQLite. A BusyBox `/bin/sh` is included for `/container/shell edgeproxy`; use `/bin/busybox <command>` for its utilities. Runtime updates are deployed by rebuilding/reimporting the image.
+Wait for extraction to finish (`status=stopped`), then `/container/start edgeproxy`. The image runs directly as UID/GID **0:0** (root) so it can bind privileged ports such as TCP 80 on RouterOS. Its image arguments are `-lan :8080 -tunnel :8081 -data /data`; set RouterOS `cmd` to override those arguments, for example `cmd="-lan :80 -tunnel :8081 -data /data"` for LAN HTTP on port 80. `/data` is mode 0700 and owned by root in the image. Let RouterOS populate a new mount from the image; a pre-existing data directory must also be writable by the container's root user. Keep the data mount separate from `root-dir` so replacing the container preserves SQLite. A BusyBox `/bin/sh` is included for `/container/shell edgeproxy`; use `/bin/busybox <command>` for its utilities. Runtime updates are deployed by rebuilding/reimporting the image.
 
-Allow controllers/admin clients to reach TCP 8080, and **only cloudflared** to reach TCP 8081. Apply that policy on the actual packet path: routed traffic uses RouterOS IP firewall forwarding rules; hosts on the same bridge require bridge filtering or equivalent subnet isolation. Cloudflared routes the protected hostname to `http://192.168.50.2:8081` with a catch-all `http_status:404`. Configure the Access application below and, for the machines dashboard, add the three `CONWAYEDGE_MEMBER_*` / `CONWAYEDGE_PUBLIC_URL` settings documented under member access to `edge-env`. Signing seeds, when used, are runtime-mounted files referenced by `CONWAYEDGE_SIGNING_SEED`.
+Allow controllers/admin clients to reach TCP 8080, and **only cloudflared** to reach TCP 8081. Apply that policy on the actual packet path: routed traffic uses RouterOS IP firewall forwarding rules; hosts on the same bridge require bridge filtering or equivalent subnet isolation. Cloudflared routes the edge hostname to `http://192.168.50.2:8081` with a catch-all `http_status:404`. Configure Worker JWT authentication below. Controller signing seeds, when used, are runtime-mounted files referenced by `CONWAYEDGE_SIGNING_SEED`.
 
-The container needs DNS and outbound HTTPS for Access verification and routes to printer TCP ports 8883 and 322. Cloudflared is deployed separately and keeps its tunnel credentials there.
+The container needs DNS and outbound HTTPS to the Worker's JWKS endpoint and routes to printer TCP ports 8883 and 322. Cloudflared is deployed separately and keeps its tunnel credentials there.
 
-After importing, check `/log/print` for both listeners, open `http://192.168.50.2:8080/`, configure a printer, and use admin **Full resync** to verify the cloud API. Restart the container to verify configuration/goal persistence. Open the member machines dashboard and verify fresh camera snapshots; this exercises the target FFmpeg RTSPS pipeline on the router. Host-side build checks inspect Linux binaries without executing them, so this on-router smoke test is still required.
+After importing, check `/log/print` for both listeners, open `http://192.168.50.2:8080/`, configure a printer, and use admin **Full resync** to verify the cloud API. Restart the container to verify configuration/goal persistence. Open the public machines dashboard and verify fresh camera snapshots; this exercises the target FFmpeg RTSPS pipeline on the router. Host-side build checks inspect Linux binaries without executing them, so this on-router smoke test is still required.
 
 ### Switching from file-backed edge
 
@@ -67,9 +67,9 @@ Controller firmware keeps its existing protocol and optional signing identity. B
 | Tunnel | `GET /api/goal` | Current `{"version":123,"fobs":[7,42]}`; 503 before initialization. |
 | Tunnel | `PATCH /api/goal` | `{"base_version":123,"version":124,"add":[8],"remove":[7]}`; atomic version-checked diff. |
 | Tunnel | `GET /api/swipes` | JSON array of all events retained from the last seven days; does not consume them. No pagination parameters. |
-| Tunnel | `GET /machines` | Active-member machines dashboard; status and images refresh every five seconds. |
-| Tunnel | `GET /machines/content` | Protected HTML printer cards used by the dashboard refresh. |
-| Tunnel | `GET /machines/images/{serial}.jpg` | Protected current JPEG; 404 unknown printer, 502 camera unavailable. |
+| Tunnel | `GET /machines` | Public machines dashboard; status and images refresh every five seconds. |
+| Tunnel | `GET /machines/content` | Public HTML printer cards used by the dashboard refresh. |
+| Tunnel | `GET /machines/images/{serial}.jpg` | Public current JPEG; 404 unknown printer, 502 camera unavailable. |
 | LAN | `POST /api/fobs` | Controller swipe array in; authorized ID array or 304 out. |
 | LAN | `GET /`, `POST /` | Printer configuration form. |
 
@@ -78,13 +78,16 @@ Cloud responses have `Cache-Control: no-store`. JSON mutations have a 16 KiB bod
 ### Access goal
 
 ```sh
-curl --fail-with-body --cert client.pem --key client.key \
+curl --fail-with-body -H "Authorization: Bearer $EDGE_JWT" \
   -X PUT https://edge.example.com/api/goal \
   -H 'Content-Type: application/json' \
   --data '{"version":123,"fobs":[7,42]}'
 ```
 
 Send at most 512 nonzero unsigned 32-bit IDs. IDs are sorted and deduplicated. An empty array explicitly revokes all remote access; missing/null arrays are rejected. Versions are integers from 0 through 9007199254740991 (JavaScript's largest safe integer).
+
+`EDGE_JWT` above is a fresh Worker-signed token with the claims documented below;
+normal delivery is handled by the Worker's edge-sync coordinator.
 
 - A higher version replaces the complete goal.
 - An equal version with the same canonical set is an idempotent 204.
@@ -145,93 +148,108 @@ Set `CONWAYEDGE_SIGNING_SEED=/secure/path/fob-signing.ed25519` to retain existin
 
 There is no in-memory goal/queue mirror, atomic-file replacement code, or separate recovery state. SQLite handles transaction rollback and crash recovery. Startup validates persisted goal and printer configuration and rejects unreadable/corrupt databases, including noncanonical goal JSON. Goals written through the API are always canonical; controller polls serve those stored bytes directly. Stop edge before copying its data directory for backup, or use SQLite's online backup facility. Do not copy only the database file while it is running: committed data may be in `edge.db-wal`.
 
-## Cloudflare Access service-token setup
+## Worker JWT authentication
 
-This is the transport used by the membership Worker; it works with Cloudflare
-Tunnel without a separate relay.
+The Worker signs a fresh 60-second Ed25519 JWT for each machine API request and
+sends `Authorization: Bearer <JWT>` through the existing HTTPS Tunnel. Edgeproxy
+verifies the signature locally against the Worker's public JWKS. No Cloudflare
+Access application, service token, or mTLS certificate is required.
 
-1. Create a self-hosted Access application for `edge.example.com/api/*`.
-   Configure only a **Service Auth** policy allowing the dedicated Worker service
-   token. Do not use a human Allow or Bypass policy on this machine application.
-2. Copy the application's **AUD tag** and your team origin. Set on edgeproxy:
+### Setup
+
+1. Generate a dedicated private key on a trusted machine, outside the repository:
 
    ```sh
-   export CONWAYEDGE_ACCESS_ISSUER=https://your-team.cloudflareaccess.com
-   export CONWAYEDGE_ACCESS_AUDIENCE='<application AUD tag>'
+   umask 077
+   openssl genpkey -algorithm ED25519 -out edge-private.pem
+   openssl pkey -in edge-private.pem -outform DER | openssl base64 -A
    ```
 
-   Set both or neither; partial/invalid configuration prevents startup. Restart
-   edgeproxy. Access mode requires `Cf-Access-Jwt-Assertion` on machine requests
-   and does not accept mTLS as a bypass. It verifies RS256 signatures against the
-   team's HTTPS JWKS, issuer, application audience, issuance, not-before, and
-   expiration. Keys are cached for an hour; unknown-key refreshes are rate-limited
-   to once per minute. Raw service-token headers alone do not authorize the origin.
-3. Store the Client ID and Client Secret as `EDGE_ACCESS_CLIENT_ID` and
-   `EDGE_ACCESS_CLIENT_SECRET` Worker secrets, and set `EDGE_URL` to this origin.
-   The Worker sends both headers on every request and rejects redirects.
-4. Remove the old hostname-wide mTLS WAF requirement for `/api/*`, so Access can
-   authenticate the service token. Keep `/machines` and `/machines/*` outside the
-   Access application; those browser routes use the separate member JWT flow.
-   Route the hostname through cloudflared to `http://127.0.0.1:8081` (or the edge container's trusted-subnet IP on port 8081), followed by
-   a catch-all `http_status:404`. Do not expose the LAN listener through the tunnel.
-5. Use **Full resync** in the membership admin UI to bootstrap the goal and verify
-   both API directions. Rotate/renew the service token in Access and update Worker
-   secrets before it expires; edgeproxy only holds public verification settings.
+   Store the printed base64 PKCS#8 value as the Worker's `EDGE_JWT_PRIVATE_KEY`
+   secret (`npx wrangler secret put EDGE_JWT_PRIVATE_KEY` from the repository root).
+   Keep the private key out of the edge host and repository. The Worker derives its
+   public JWK and RFC 7638 SHA-256 `kid` from this key automatically.
+2. Set Worker `EDGE_URL` to the HTTPS edge origin, without a trailing slash.
+   Deploy the Worker and confirm `https://thelab.ms/.well-known/edge-jwks.json`
+   returns `{"keys":[...]}` with only public fields (`kty`, `crv`, `x`, `kid`,
+   `alg`, `use`). The route is public and has a 60-second cache lifetime.
+3. Configure edgeproxy and restart:
 
-## Cloudflare API Shield mTLS setup (standalone fallback)
-
-1. Create a client certificate under **SSL/TLS → Client Certificates**, retain its private key for the calling client, and enable mTLS for the tunnel's public hostname (for example, `edge.example.com`).
-2. Deploy an API Shield/WAF custom rule with action **Block** for the hostname **except `/machines` and `/machines/*`**, which use member JWTs. Restrict controller API access to the intended client certificate(s), for example:
-
-   ```txt
-    (http.host eq "edge.example.com" and
-      not (http.request.uri.path eq "/machines" or starts_with(http.request.uri.path, "/machines/")) and
-     (not cf.tls_client_auth.cert_verified or
-      cf.tls_client_auth.cert_revoked or
-      not (cf.tls_client_auth.cert_fingerprint_sha256 in {"<CLIENT_CERT_SHA256>"})))
+   ```sh
+   export CONWAYEDGE_WORKER_ISSUER=https://thelab.ms
+   export CONWAYEDGE_PUBLIC_URL=https://edge.example.com
    ```
 
-   Replace the placeholder with the certificate's fingerprint in Cloudflare's field format. During rotation, allow both fingerprints, migrate callers, then remove/revoke the old certificate. This rule provides client authorization; edge accepts any verified, non-revoked certificate forwarded by Cloudflare.
-3. Enable the **Add TLS client auth headers** managed transform under **Rules → Settings → Managed Transforms**. Cloudflare must overwrite client-supplied values on every request. Machine APIs require exactly `Cf-Cert-Presented: true`, `Cf-Cert-Verified: true`, and `Cf-Cert-Revoked: false`. Missing, malformed, duplicate, unverified, or revoked status is rejected with 401. Member JWTs do not grant machine API access, and mTLS does not grant printer access.
-4. Route only the protected hostname to `http://127.0.0.1:8081` (or the edge container's trusted-subnet IP on port 8081), followed by a catch-all `http_status:404` ingress rule. The flow is **client certificate → Cloudflare API Shield → tunnel → trusted HTTP origin**. Edge trusts cloudflared and the origin network; these headers are trusted-proxy assertions.
+   These must exactly match Worker `SITE_URL` and `EDGE_URL`. Set both or neither;
+   partial/invalid configuration prevents startup. With neither set, machine APIs
+   reject every request with 401 while the public dashboard remains available.
+4. Route the edge hostname through cloudflared to the tunnel listener, with a
+   catch-all `http_status:404`; forward `Authorization` without rewriting it.
+   Remove old Access application/service-token requirements, cloudflared Access
+   validation, and mTLS WAF requirements for this hostname when deploying the JWT
+   verifier. Do not expose the LAN listener through the tunnel. Old
+   `CONWAYEDGE_ACCESS_*` and `CONWAYEDGE_MEMBER_*` settings are no longer used.
+5. Select admin **Full resync** to verify goal delivery and swipe reads. An anonymous
+   `GET /api/swipes` must return 401; `GET /machines` must return 200.
 
-**Worker transport limitation for machine APIs:** Cloudflare documents that [Worker mTLS certificate bindings cannot call Cloudflare-proxied services](https://developers.cloudflare.com/workers/runtime-apis/bindings/mtls/) (they return 520). A tunnel hostname is Cloudflare-proxied. A Worker coordinator therefore needs a transport capable of presenting the certificate to API Shield, such as a separately hosted mTLS-capable relay. That transport is outside this module. The machines dashboard uses direct browser requests with JWT cookies and does not need this relay.
+### Verification and refresh
 
-References: [API Shield mTLS configuration](https://developers.cloudflare.com/api-shield/security/mtls/configure/), [TLS client auth managed headers](https://developers.cloudflare.com/rules/transform/managed-transforms/reference/#add-tls-client-auth-headers).
+JWT headers require `alg: "EdDSA"`, `typ: "JWT"`, and a known `kid`. Claims require
+the configured `iss` and `aud`, `sub: "edge-sync"`, `scope: "edge:api"`, integer
+`iat`/`exp`, and a lifetime of at most 60 seconds. Future issuance/not-before and
+expired tokens are rejected. Keep both hosts' clocks synchronized. These are bearer
+tokens and can be replayed until expiry; do not log Authorization headers.
+
+Edge fetches **only** `<CONWAYEDGE_WORKER_ISSUER>/.well-known/edge-jwks.json` over
+verified HTTPS, without following redirects. Token-supplied key URLs are rejected.
+A background loop fetches at startup and every five minutes, even with no API
+traffic. Unknown key IDs or expired caches can trigger an additional fetch at most
+once per minute. Requests fail closed until keys are available. Successful fetches
+replace the key set; removed keys stop working, including before JWT expiry.
+
+Fetch failures retain the last successful keys for at most one hour from that
+fetch, without extending their lifetime. After that, authentication fails until
+JWKS retrieval succeeds. Keys are cached in memory, so a restart during a JWKS
+outage cannot authenticate API calls. Requests and refreshes share a lock; JWKS
+HTTP requests have a five-second timeout and a 64 KiB response limit.
+
+### Key rotation
+
+`EDGE_JWT_PUBLIC_KEYS` is an optional JSON array of additional public Ed25519 JWKs,
+stored as a Worker variable (default `"[]"`). Up to seven additional keys may be
+published alongside the current signing key. Only `kty`, `crv`, and `x` are needed;
+the Worker derives each `kid` and publishes public fields only.
+
+1. Generate the next key as above. Export its public JWK with Node:
+
+   ```sh
+   node --input-type=module -e 'import {readFileSync} from "node:fs"; import {createPublicKey} from "node:crypto"; console.log(JSON.stringify(createPublicKey(readFileSync("edge-private.pem")).export({format:"jwk"})))'
+   ```
+
+2. Add the new public JWK to `EDGE_JWT_PUBLIC_KEYS` and deploy. Save the old public
+   JWK from the JWKS response for the overlap period. Allow at least six minutes
+   for HTTP caching plus periodic refresh, and confirm edge can fetch the new set.
+3. Replace `EDGE_JWT_PRIVATE_KEY` with the new private key. Keep the old public JWK
+   in `EDGE_JWT_PUBLIC_KEYS` during the switch; publish both public keys throughout.
+4. After the old signing deployment has stopped and its last token's 60-second
+   lifetime has passed, remove the old public JWK and deploy. Edge drops it on its
+   next successful refresh. For urgent revocation, refresh/restart edge after the
+   updated JWKS is visible; during an outage the one-hour cache bound still applies.
 
 ## Machines dashboard
 
-The member-facing Machines page currently displays configured 3D printers.
+The public Machines page displays configured 3D printers, including status and
+camera snapshots. Set Worker `PRINTER_EDGE_URL` to the HTTPS edge origin so the
+main site's `/machines` route redirects directly to `https://<edge-host>/machines`.
+No Discord login, membership check, JWT cookie, or session renewal is needed.
+The former `/machines/login`, `/machines/callback`, and `/machines/session` routes
+are removed. Remove the obsolete Worker `PRINTER_JWT_PRIVATE_KEY` secret.
 
-### Member access setup
-
-Generate a dedicated Ed25519 key pair on a trusted machine:
-
-```sh
-openssl genpkey -algorithm ED25519 -out printer-private.pem
-openssl pkey -in printer-private.pem -outform DER | openssl base64 -A
-openssl pkey -in printer-private.pem -pubout -outform DER | openssl base64 -A
-```
-
-The first base64 value is the PKCS#8 private key: store it as the Worker's `PRINTER_JWT_PRIVATE_KEY` secret (`npx wrangler secret put PRINTER_JWT_PRIVATE_KEY` from the repository root). The second is the SPKI public key, for edgeproxy. Keep the private key in secure storage and out of the edge host/repository.
-
-Set the Worker's `PRINTER_EDGE_URL` to the HTTPS edge origin (for example `https://edge.example.com`) in `wrangler.jsonc`. Set these edge environment variables and restart:
-
-```sh
-export CONWAYEDGE_MEMBER_ISSUER=https://thelab.ms
-export CONWAYEDGE_PUBLIC_URL=https://edge.example.com
-export CONWAYEDGE_MEMBER_PUBLIC_KEY='<base64 SPKI public key>'
-```
-
-Origins must match the Worker `SITE_URL` and `PRINTER_EDGE_URL` exactly, with no trailing slash. Use HTTPS; the browser session requires Secure cookies. Leaving all three edge settings unset disables member routes with 503; partial/invalid settings prevent startup. Updating the public key invalidates previously issued printer sessions.
-
-Members can open `https://edge.example.com/machines` directly or follow `/machines` on the main site. Edge creates a ten-minute random HttpOnly nonce cookie and redirects to the Worker's `/machines?state=…`. The Worker uses existing Discord sign-in and reads the authenticated member's current D1 record. Only `active` or `trialing` subscription states grant access. It signs a five-minute EdDSA JWT with `active_member: true`, `scope: "printers:read"`, Discord subject, issuer, edge-origin audience, timestamps, and nonce.
-
-The Worker redirects to the fixed `/machines/callback` with the JWT in a URL fragment. The callback clears the fragment immediately and POSTs it to `/machines/session`; edge validates the signature, claims, same-origin request, and browser nonce before setting a Secure, HttpOnly, SameSite=Lax, host-only `__Host-thelab_printers` cookie and clearing the nonce. Tokens are never put in query strings. The callback, login, session, and JavaScript routes are public handoff resources; dashboard HTML, refresh content, and images require a valid member JWT on every request. The LAN listener does not expose these routes.
-
-Thirty seconds before expiry, the dashboard makes a top-level round-trip through the Worker to recheck membership and renew the session. This works with third-party cookies blocked. An expired main-site session requires Discord sign-in again. Revocation takes effect within five minutes **after D1 reflects the change**; the existing Stripe webhook/queue sync supplies that status. The edge does not query Stripe or D1. A copied JWT remains valid until expiry.
-
-Apply the WAF path exception described above before opening the dashboard. Do not configure Cloudflare to cache member responses or require browser client certificates on printer routes.
+All `/machines` and `/machines/*` responses carry
+`X-Robots-Tag: noindex, nofollow, noarchive`; dashboard HTML has matching robots
+metadata. Crawlers must be allowed to fetch the page to see these directives;
+they are indexing instructions, not access restrictions. The LAN listener does
+not expose the dashboard. Keep Cloudflare caching disabled for machines responses.
 
 ### Printer configuration and display
 

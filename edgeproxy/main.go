@@ -22,20 +22,16 @@ func main() {
 }
 
 func run() error {
-	lan := flag.String("lan", ":8080", "LAN controller/config listen address")
-	tunnel := flag.String("tunnel", "127.0.0.1:8081", "cloudflared origin listen address (loopback or trusted subnet)")
-	data := flag.String("data", "data", "persistent data directory (one process only)")
+	lan := flag.String("lan", ":80", "LAN controller/config listen address")
+	tunnel := flag.String("tunnel", ":8080", "cloudflared origin listen address (loopback or trusted subnet)")
+	data := flag.String("data", "/data", "persistent data directory (one process only)")
 	flag.Parse()
 	e, err := openEdge(*data)
 	if err != nil {
 		return err
 	}
 	defer e.close()
-	e.accessAuth, err = loadAccessAuth(os.Getenv("CONWAYEDGE_ACCESS_ISSUER"), os.Getenv("CONWAYEDGE_ACCESS_AUDIENCE"))
-	if err != nil {
-		return err
-	}
-	e.memberAuth, err = loadPrinterAuth(os.Getenv("CONWAYEDGE_MEMBER_ISSUER"), os.Getenv("CONWAYEDGE_PUBLIC_URL"), os.Getenv("CONWAYEDGE_MEMBER_PUBLIC_KEY"))
+	e.workerAuth, err = loadWorkerAuth(os.Getenv("CONWAYEDGE_WORKER_ISSUER"), os.Getenv("CONWAYEDGE_PUBLIC_URL"))
 	if err != nil {
 		return err
 	}
@@ -46,6 +42,7 @@ func run() error {
 	lanHandler, tunnelHandler := e.routes()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go e.workerAuth.run(ctx)
 	local, err := net.Listen("tcp", *lan)
 	if err != nil {
 		return err
@@ -57,7 +54,7 @@ func run() error {
 	}
 	defer cloud.Close()
 	// The tunnel listener may bind a trusted subnet for a separate cloudflared
-	// host. Firewall it to that host: fallback mTLS headers are proxy assertions.
+	// host. Firewall it to that host; machine APIs also verify Worker JWTs.
 	errors := make(chan error, 2)
 	for _, endpoint := range []struct {
 		listener net.Listener
@@ -105,42 +102,21 @@ func (e *edge) routes() (http.Handler, http.Handler) {
 	tunnel.HandleFunc("GET /api/goal", e.getGoal)
 	tunnel.HandleFunc("PATCH /api/goal", e.patchGoal)
 	tunnel.HandleFunc("GET /api/swipes", e.getSwipes)
-	tunnel.HandleFunc("GET /machines", e.requirePrinterMember(e.printers.dashboard))
-	tunnel.HandleFunc("GET /machines/content", e.requirePrinterMember(e.printers.dashboard))
-	tunnel.HandleFunc("GET /machines/images/{image}", e.requirePrinterMember(func(w http.ResponseWriter, r *http.Request, _ *printerClaims) {
-		e.printers.snapshot(w, r)
-	}))
-	tunnel.HandleFunc("GET /machines/login", e.printerResource(e.printerLogin))
-	tunnel.HandleFunc("POST /machines/session", e.printerResource(e.printerSession))
-	tunnel.HandleFunc("GET /machines/callback", e.printerResource(printerCallback))
-	tunnel.HandleFunc("GET /machines/app.js", e.printerResource(printerScript))
+	tunnel.HandleFunc("GET /machines", e.printers.dashboard)
+	tunnel.HandleFunc("GET /machines/content", e.printers.dashboard)
+	tunnel.HandleFunc("GET /machines/images/{image}", e.printers.snapshot)
+	tunnel.HandleFunc("GET /machines/app.js", printerScript)
 	return lan, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		if r.URL.Path == "/machines" || strings.HasPrefix(r.URL.Path, "/machines/") {
+			w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive")
 			w.Header().Set("Referrer-Policy", "no-referrer")
 			w.Header().Set("X-Content-Type-Options", "nosniff")
 			w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
-		} else if (e.accessAuth != nil && !e.accessAuth.verify(r)) || (e.accessAuth == nil && !cloudflareMTLSVerified(r.Header)) {
+		} else if !e.workerAuth.verify(r) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		tunnel.ServeHTTP(w, r)
 	})
-}
-
-func cloudflareMTLSVerified(headers http.Header) bool {
-	// Cloudflare's "Add TLS client auth headers" managed transform must
-	// overwrite these headers on every request. Fail closed on missing,
-	// malformed, or duplicate values, including a missing revocation status.
-	for name, want := range map[string]string{
-		"Cf-Cert-Presented": "true",
-		"Cf-Cert-Verified":  "true",
-		"Cf-Cert-Revoked":   "false",
-	} {
-		values := headers.Values(name)
-		if len(values) != 1 || values[0] != want {
-			return false
-		}
-	}
-	return true
 }

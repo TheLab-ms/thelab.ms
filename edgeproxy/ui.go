@@ -274,21 +274,15 @@ func (s *printerSet) cards() []printerCard {
 	return cards
 }
 
-func (s *printerSet) dashboard(w http.ResponseWriter, r *http.Request, claims *printerClaims) {
+func (s *printerSet) dashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	name := "dashboard"
 	if r.URL.Path == "/machines/content" {
 		name = "cards"
 	}
 	_ = dashboardTemplate.ExecuteTemplate(w, name, struct {
-		Cards   []printerCard
-		Expires int64
-	}{s.cards(), claims.Expires})
-}
-
-func printerCallback(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_ = dashboardTemplate.ExecuteTemplate(w, "callback", nil)
+		Cards []printerCard
+	}{s.cards()})
 }
 
 func printerScript(w http.ResponseWriter, r *http.Request) {

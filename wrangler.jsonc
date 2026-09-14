@@ -10,6 +10,7 @@
 		"directory": "static",
 		"binding": "ASSETS",
 		"run_worker_first": [
+			"/.well-known/edge-jwks.json",
 			"/admin",
 			"/admin/*",
 			"/signup",
@@ -82,6 +83,7 @@
 		"TURNSTILE_SITE_KEY": "",
 		"PRINTER_EDGE_URL": "",
 		"EDGE_URL": "",
+		"EDGE_JWT_PUBLIC_KEYS": "[]",
 		"DISCORD_GUILD_ID": "690314626289631294",
 		"DISCORD_ROLE_ID": "1252789548073619458",
 		"DISCORD_ADMIN_ROLE_ID": "",

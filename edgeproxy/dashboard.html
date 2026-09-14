@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="robots" content="noindex">
+  <meta name="robots" content="noindex, nofollow, noarchive">
   <title>Machines | TheLab</title>
   <script src="/machines/app.js" defer></script>
   <style>
@@ -33,16 +33,16 @@
   </style>
 </head>
 <body>
-  <main id="dashboard" data-expires="{{.Expires}}">
+  <main id="dashboard">
     <header>
-      <span class="brand">THELAB / MEMBERS</span>
+      <span class="brand">THELAB</span>
       <h1>Machines</h1>
       <p>Check machine status and follow your 3D prints from wherever you are.</p>
       <p id="refresh-status" role="status">Status and still images refresh every 5 seconds.</p>
     </header>
     <noscript>Enable JavaScript for automatic updates. Reload this page to see the latest status.</noscript>
     <section id="printers" class="grid" aria-label="Printers">{{template "cards" .}}</section>
-    <footer class="muted">Remaining times are printer estimates. <a href="/machines/login">Renew member access</a></footer>
+    <footer class="muted">Remaining times are printer estimates.</footer>
   </main>
 </body>
 </html>
@@ -64,24 +64,4 @@
   {{else}}
     <p>No printers are configured yet.</p>
   {{end}}
-{{end}}
-
-{{define "callback"}}
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Machines sign-in | TheLab</title>
-  <script src="/machines/app.js" defer></script>
-</head>
-<body>
-  <main>
-    <h1>Machines sign-in</h1>
-    <p id="login-status" role="status">Completing sign-in…</p>
-    <noscript>JavaScript is required to complete sign-in and refresh machine images.</noscript>
-    <a href="/machines/login">Restart sign-in</a>
-  </main>
-</body>
-</html>
 {{end}}

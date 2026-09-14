@@ -22,7 +22,7 @@ import (
 func pushVersion(t *testing.T, e *edge, version int, fobs string, want int) {
 	t.Helper()
 	_, cloud := e.routes()
-	w := mtlsRequest(cloud, "PUT", "/api/goal", fmt.Sprintf(`{"version":%d,"fobs":%s}`, version, fobs))
+	w := jwtRequest(cloud, "PUT", "/api/goal", fmt.Sprintf(`{"version":%d,"fobs":%s}`, version, fobs))
 	if w.Code != want {
 		t.Fatalf("version %d: got %d, want %d: %s", version, w.Code, want, w.Body.String())
 	}
@@ -31,19 +31,19 @@ func pushVersion(t *testing.T, e *edge, version int, fobs string, want int) {
 func TestGoalDiff(t *testing.T) {
 	e := testEdge(t)
 	_, cloud := e.routes()
-	if got := mtlsRequest(cloud, "GET", "/api/goal", "").Code; got != 503 {
+	if got := jwtRequest(cloud, "GET", "/api/goal", "").Code; got != 503 {
 		t.Fatal(got)
 	}
 	pushVersion(t, e, 1, "[7,8]", 204)
 	patch := `{"base_version":1,"version":2,"add":[9],"remove":[7]}`
 	for _, body := range []string{patch, patch} {
-		if w := mtlsRequest(cloud, "PATCH", "/api/goal", body); w.Code != 204 {
+		if w := jwtRequest(cloud, "PATCH", "/api/goal", body); w.Code != 204 {
 			t.Fatal(w.Code, w.Body.String())
 		}
 	}
 	e = restartEdge(t, e)
 	_, cloud = e.routes()
-	if got := mtlsRequest(cloud, "PATCH", "/api/goal", patch).Code; got != 204 {
+	if got := jwtRequest(cloud, "PATCH", "/api/goal", patch).Code; got != 204 {
 		t.Fatal(got)
 	}
 	for _, tc := range []struct {
@@ -55,15 +55,15 @@ func TestGoalDiff(t *testing.T) {
 		{`{"base_version":2,"version":3,"add":[8],"remove":[8]}`, 400},
 		{`{"base_version":2,"version":3,"add":null,"remove":[]}`, 400},
 	} {
-		if w := mtlsRequest(cloud, "PATCH", "/api/goal", tc.body); w.Code != tc.status {
+		if w := jwtRequest(cloud, "PATCH", "/api/goal", tc.body); w.Code != tc.status {
 			t.Fatal(w.Code, w.Body.String())
 		}
 	}
-	w := mtlsRequest(cloud, "GET", "/api/goal", "")
+	w := jwtRequest(cloud, "GET", "/api/goal", "")
 	if w.Code != 200 || w.Body.String() != "{\"version\":2,\"fobs\":[8,9]}\n" {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	if got := mtlsRequest(cloud, "PATCH", "/api/goal", `{"base_version":2,"version":3,"add":[],"remove":[8,9]}`).Code; got != 204 {
+	if got := jwtRequest(cloud, "PATCH", "/api/goal", `{"base_version":2,"version":3,"add":[],"remove":[8,9]}`).Code; got != 204 {
 		t.Fatal(got)
 	}
 	lan, _ := e.routes()
@@ -75,7 +75,7 @@ func TestGoalDiff(t *testing.T) {
 func readSwipes(t *testing.T, e *edge) []swipe {
 	t.Helper()
 	_, cloud := e.routes()
-	w := mtlsRequest(cloud, "GET", "/api/swipes", "")
+	w := jwtRequest(cloud, "GET", "/api/swipes", "")
 	var events []swipe
 	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &events) != nil || events == nil {
 		t.Fatalf("swipe fetch: %d %s", w.Code, w.Body.String())
@@ -138,10 +138,10 @@ func TestAPIValidationAndRoutes(t *testing.T) {
 		if w := request(cloud, route.method, route.path, route.body); w.Code != 401 {
 			t.Fatalf("auth bypass: %s: %d", route.path, w.Code)
 		}
-		if w := mtlsRequest(lan, route.method, route.path, route.body); w.Code != 404 {
+		if w := jwtRequest(lan, route.method, route.path, route.body); w.Code != 404 {
 			t.Fatalf("tunnel API on LAN: %s: %d", route.path, w.Code)
 		}
-		if w := mtlsRequest(cloud, route.method, route.path, route.body); w.Code != route.want {
+		if w := jwtRequest(cloud, route.method, route.path, route.body); w.Code != route.want {
 			t.Fatalf("authenticated request: %s: %d", route.path, w.Code)
 		}
 	}
@@ -153,7 +153,7 @@ func TestAPIValidationAndRoutes(t *testing.T) {
 		{"GET", "/machines/stream/test", 404}, {"GET", "/", 404},
 		{"POST", "/api/fobs", 404}, {"POST", "/api/kiosk/claims", 404},
 	} {
-		if w := mtlsRequest(cloud, route.method, route.path, "[]"); w.Code != route.want {
+		if w := jwtRequest(cloud, route.method, route.path, "[]"); w.Code != route.want {
 			t.Fatalf("obsolete/LAN route: %s: %d", route.path, w.Code)
 		}
 	}
@@ -165,7 +165,7 @@ func TestAPIValidationAndRoutes(t *testing.T) {
 		`{"version":2,"fobs":[]} {}`, strings.Repeat(" ", 16385),
 		`{"version":2,"fobs":[` + strings.Repeat("1,", 512) + `1]}`,
 	} {
-		if w := mtlsRequest(cloud, "PUT", "/api/goal", body); w.Code != 400 {
+		if w := jwtRequest(cloud, "PUT", "/api/goal", body); w.Code != 400 {
 			t.Fatalf("accepted invalid goal: %q: %d", body, w.Code)
 		}
 	}

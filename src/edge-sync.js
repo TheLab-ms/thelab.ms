@@ -2,6 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { boundedText, HttpError } from './http.js';
 import { logError } from './logging.js';
 import { fobEnabledSQL } from './fob-access.js';
+import { edgeToken } from './edge-auth.js';
 
 export const edgeEnabled = env => Boolean(env.EDGE_URL);
 const stub = env => env.EDGE_SYNC.get(env.EDGE_SYNC.idFromName('edge'));
@@ -76,15 +77,16 @@ export class EdgeSync extends DurableObject {
   }
 
   async request(path, method = 'GET', body) {
-    const { EDGE_URL: origin, EDGE_ACCESS_CLIENT_ID: id, EDGE_ACCESS_CLIENT_SECRET: secret } = this.env;
+    const { EDGE_URL: origin } = this.env;
     const url = new URL(origin);
-    if (url.protocol !== 'https:' || url.origin !== origin || !id || !secret) throw new Error('Invalid edge configuration.');
+    if (url.protocol !== 'https:' || url.origin !== origin) throw new Error('Invalid edge configuration.');
+    const token = await edgeToken(this.env);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 20000);
     try {
       const response = await fetch(`${origin}${path}`, {
         method, redirect: 'manual', signal: controller.signal,
-        headers: { 'CF-Access-Client-Id': id, 'CF-Access-Client-Secret': secret, 'Content-Type': 'application/json' },
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         ...(body ? { body: JSON.stringify(body) } : {}),
       });
       const text = await boundedText(response, path === '/api/swipes' ? 32 * 1024 * 1024 : 16384);

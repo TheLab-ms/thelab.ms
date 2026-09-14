@@ -23,6 +23,7 @@ func testEdge(t *testing.T) *edge {
 		t.Fatal(err)
 	}
 	t.Cleanup(e.close)
+	e.workerAuth = testWorkerAuth()
 	return e
 }
 
@@ -38,6 +39,7 @@ func restartEdge(t *testing.T, e *edge) *edge {
 		t.Fatal(err)
 	}
 	t.Cleanup(restarted.close)
+	restarted.workerAuth = testWorkerAuth()
 	return restarted
 }
 
@@ -51,9 +53,9 @@ func request(handler http.Handler, method, path, body string, headers ...string)
 	return w
 }
 
-func mtlsRequest(handler http.Handler, method, path, body string) *httptest.ResponseRecorder {
+func jwtRequest(handler http.Handler, method, path, body string) *httptest.ResponseRecorder {
 	return request(handler, method, path, body,
-		"Cf-Cert-Presented", "true", "Cf-Cert-Verified", "true", "Cf-Cert-Revoked", "false")
+		"Authorization", "Bearer "+workerTestToken(testWorkerClaims()))
 }
 
 func execSQL(t *testing.T, e *edge, query string, args ...any) {
@@ -251,7 +253,7 @@ func TestConcurrentGoalSwipesAndFetch(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 1; i <= 40; i++ {
 		wg.Go(func() {
-			w := mtlsRequest(cloud, "PUT", "/api/goal", fmt.Sprintf(`{"version":%d,"fobs":[%d]}`, i, i))
+			w := jwtRequest(cloud, "PUT", "/api/goal", fmt.Sprintf(`{"version":%d,"fobs":[%d]}`, i, i))
 			if w.Code != 204 && w.Code != 409 {
 				t.Errorf("concurrent version: %d", w.Code)
 			}
@@ -309,6 +311,7 @@ func TestCrashRecovery(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		e.workerAuth = testWorkerAuth()
 		pushVersion(t, e, 1, "[7]", 204)
 		if _, err := e.controllerPoll(context.Background(), "test", []controllerSwipe{{7, true}, {8, false}}); err != nil {
 			t.Fatal(err)
@@ -336,6 +339,7 @@ func TestCrashRecovery(t *testing.T) {
 	}
 	defer e.close()
 	assertGoal(t, e, 1, "[7]\n")
+	e.workerAuth = testWorkerAuth()
 	events := readSwipes(t, e)
 	if len(events) != 2 || events[0].Fob != 7 || events[1].Fob != 8 || countSwipes(t, e) != 2 {
 		t.Fatal("crash recovery lost committed events or committed an open transaction")

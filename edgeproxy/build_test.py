@@ -31,13 +31,13 @@ class BuildTests(unittest.TestCase):
                 self.assertEqual(hashlib.sha256(config_bytes).hexdigest() + ".json", manifest["Config"])
                 config = json.loads(config_bytes)
                 self.assertEqual((config["os"], config["architecture"]), ("linux", "arm64"))
-                self.assertEqual(config["config"]["User"], "65532:65532")
+                self.assertEqual(config["config"]["User"], "0:0")
                 self.assertEqual(config["config"]["Entrypoint"], ["/usr/local/bin/conwayedge"])
                 layer_bytes = image.extractfile(manifest["Layers"][0]).read()
                 self.assertEqual(config["rootfs"]["diff_ids"], ["sha256:" + hashlib.sha256(layer_bytes).hexdigest()])
             with tarfile.open(fileobj=io.BytesIO(layer_bytes)) as layer:
                 data = layer.getmember("data")
-                self.assertEqual((data.uid, data.gid, data.mode), (65532, 65532, 0o700))
+                self.assertEqual((data.uid, data.gid, data.mode), (0, 0, 0o700))
                 self.assertEqual(layer.getmember("bin/program").mode, 0o755)
                 self.assertEqual(layer.getmember("bin/link").linkname, "program")
             checksum = Path(str(destination) + ".sha256").read_text().split()[0]

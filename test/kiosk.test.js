@@ -196,7 +196,8 @@ it('rate limits issuance atomically', async () => {
 it('synchronizes replacement immediately and retains the commit when edge delivery fails', async () => {
   const m = await member(undefined, 99);
   await env.DB.prepare('UPDATE members SET non_billable = 1 WHERE member_id = ?').bind(m.member_id).run();
-  const edgeConfig = { ...config, EDGE_URL: 'https://edge.example', EDGE_ACCESS_CLIENT_ID: 'client', EDGE_ACCESS_CLIENT_SECRET: 'secret' };
+  const { testEdgePrivateKey } = await import('./edge-auth-helpers.js');
+  const edgeConfig = { ...config, EDGE_URL: 'https://edge.example', EDGE_JWT_PRIVATE_KEY: testEdgePrivateKey };
   await runInDurableObject(env.MEMBERS.get(env.MEMBERS.idFromName(m.member_id)), instance => { instance.env = { ...instance.env, ...edgeConfig }; });
   await runInDurableObject(env.EDGE_SYNC.get(env.EDGE_SYNC.idFromName('edge')), instance => { instance.env = { ...instance.env, ...edgeConfig }; });
   const c = await claim(), next = await claim(456), writes = [];

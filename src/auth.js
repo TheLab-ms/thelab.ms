@@ -74,7 +74,6 @@ export function loginDestination(value, purpose) {
     }
     return '/admin';
   }
-  if (purpose === 'member' && /^\/machines\?state=[a-f0-9]{64}$/.test(value)) return value;
   if (purpose === 'member' && value === '/waiver?signup=1') return value;
   if (purpose === 'member' && value.length < 1100 && /^\/keyfob\/bind\?token=[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/.test(value)) return value;
   if (purpose === 'member' && (value === '/wiki/new' || /^\/wiki\/[a-z0-9]+(?:-[a-z0-9]+)*\/edit$/.test(value))) return value;

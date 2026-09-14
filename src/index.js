@@ -6,6 +6,7 @@ import { coordinated, registerMember } from './membership.js';
 import { adminConfigured, adminRequest, finishAdminLogin } from './admin.js';
 import { logError, requestContext } from './logging.js';
 import { printerAccess } from './printers.js';
+import { edgeJWKS } from './edge-auth.js';
 import { waiverRequest } from './waiver.js';
 import { wikiRequest } from './wiki.js';
 import { bindFob, cleanupFobClaims, kioskClaims, kioskPage } from './kiosk.js';
@@ -121,6 +122,7 @@ export async function processMessage(body, env) {
 }
 
 const routes = new Map([
+  ['/.well-known/edge-jwks.json', ['GET', edgeJWKS]],
   ['/signup', ['GET', signup]],
   ['/waiver', ['GET, POST', waiverRequest]],
   ['/login/discord/callback', ['GET', callback]],

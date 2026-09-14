@@ -235,7 +235,7 @@ def package(root, destination, work):
     layer = work / "layer.tar"
 
     def normalize(entry):
-        entry.uid = entry.gid = 65532 if entry.name == "data" else 0
+        entry.uid = entry.gid = 0
         entry.uname = entry.gname = ""
         entry.mtime = 0
         return entry
@@ -247,7 +247,7 @@ def package(root, destination, work):
     config = json_bytes({
         "architecture": "arm64", "os": "linux",
         "config": {
-            "User": "65532:65532", "WorkingDir": "/data",
+            "User": "0:0", "WorkingDir": "/data",
             "Env": ["PATH=/usr/local/bin:/usr/bin:/bin", "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt"],
             "Entrypoint": ["/usr/local/bin/conwayedge"],
             "Cmd": ["-lan", ":8080", "-tunnel", ":8081", "-data", "/data"],
@@ -305,8 +305,8 @@ def main():
             (root / name).mkdir(parents=True, exist_ok=True)
         (root / "data").chmod(0o700)
         (root / "tmp").chmod(0o1777)
-        (root / "etc/passwd").write_text("conwayedge:x:65532:65532:conwayedge:/data:/bin/sh\n")
-        (root / "etc/group").write_text("conwayedge:x:65532:\n")
+        (root / "etc/passwd").write_text("root:x:0:0:root:/data:/bin/sh\n")
+        (root / "etc/group").write_text("root:x:0:\n")
         shutil.copy2(LOCK, root / "usr/share/conwayedge/build-packages.json")
         (root / "etc/alpine-release").write_text(lock["alpine"] + "\n")
         binary = root / "usr/local/bin/conwayedge"

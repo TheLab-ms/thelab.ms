@@ -5,21 +5,23 @@ import { edgeCall, nightlyDate } from '../src/edge-sync.js';
 import worker from '../src/index.js';
 import { issueToken } from '../src/auth.js';
 import { hash } from '../src/http.js';
+import { testEdgePrivateKey } from './edge-auth-helpers.js';
 
-const configured = { ...env, EDGE_URL: 'https://edge.example', EDGE_ACCESS_CLIENT_ID: 'client', EDGE_ACCESS_CLIENT_SECRET: 'secret' };
+const configured = { ...env, EDGE_URL: 'https://edge.example', EDGE_JWT_PRIVATE_KEY: testEdgePrivateKey };
 const stub = () => env.EDGE_SYNC.get(env.EDGE_SYNC.idFromName('edge'));
 let goal, swipes, writes, fetchSpy;
 beforeEach(async () => {
   await reset();
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
   await runInDurableObject(stub(), instance => {
-    instance.env = { ...instance.env, EDGE_URL: 'https://edge.example', EDGE_ACCESS_CLIENT_ID: 'client', EDGE_ACCESS_CLIENT_SECRET: 'secret' };
+    instance.env = { ...instance.env, ...configured };
   });
   goal = null; swipes = []; writes = [];
   fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init = {}) => {
     if (String(url).startsWith('https://discord.com/')) return Response.json({ roles: [env.DISCORD_ADMIN_ROLE_ID] });
     expect(init.redirect).toBe('manual');
-    expect(init.headers['CF-Access-Client-Secret']).toBe('secret');
+    expect(init.headers.Authorization).toMatch(/^Bearer ey/);
+    expect(init.headers['CF-Access-Client-Secret']).toBeUndefined();
     if (String(url).endsWith('/api/swipes')) return Response.json(swipes);
     expect(String(url)).toBe('https://edge.example/api/goal');
     if (init.method === 'GET') return goal ? Response.json(goal) : new Response(null, { status: 503 });
