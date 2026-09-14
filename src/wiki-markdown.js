@@ -5,10 +5,11 @@ export const MAX_MARKDOWN = 128 * 1024;
 export const MAX_IMAGE = 5 * 1024 * 1024;
 export const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 export const IMAGE_PATH = /^\/wiki\/images\/([a-f0-9]{64})$/;
+export const FILE_PATH = /^\/wiki\/files\/([a-f0-9]{64})\/([a-zA-Z0-9._-]{1,120})$/;
 
 export function validSlug(slug) {
   return typeof slug === 'string' && slug.length <= 80 && SLUG.test(slug)
-    && !['new', 'images', 'preview'].includes(slug);
+    && !['new', 'images', 'files', 'preview', 'import'].includes(slug);
 }
 
 export function imageID(value, site) {
@@ -23,17 +24,39 @@ export function imageID(value, site) {
 export function renderMarkdown(markdown, site) {
   const md = new MarkdownIt({ html: false, linkify: false, typographer: false });
   const images = new Set();
+  const files = new Set();
+  function importedFile(value) {
+    try {
+      const url = new URL(value, `${site}/wiki/`), match = decodeURIComponent(url.pathname).match(FILE_PATH);
+      if (url.origin === site && match) { files.add(match[1]); return url.pathname; }
+    } catch { /* Invalid URL. */ }
+  }
+  // Explicit IDs retain incoming DokuWiki section links without allowing HTML.
+  md.core.ruler.push('heading_ids', state => {
+    for (let i = 0; i < state.tokens.length; i++) {
+      if (state.tokens[i].type !== 'heading_open') continue;
+      const inline = state.tokens[i + 1], last = inline.children?.at(-1);
+      const match = last?.type === 'text' && last.content.match(/\s+\{#([a-zA-Z0-9_:-]+)\}$/);
+      if (match) {
+        state.tokens[i].attrSet('id', match[1]);
+        last.content = last.content.slice(0, -match[0].length);
+      }
+    }
+  });
   const image = md.renderer.rules.image;
   md.renderer.rules.image = (tokens, index, options, env, renderer) => {
     const token = tokens[index], id = imageID(token.attrGet('src'), site);
-    if (!id) return escapeHTML(token.content || 'Unsupported image');
-    images.add(id);
-    token.attrSet('src', `/wiki/images/${id}`);
+    const file = importedFile(token.attrGet('src'));
+    if (!id && !file) return escapeHTML(token.content || 'Unsupported image');
+    if (id) images.add(id);
+    token.attrSet('src', file || `/wiki/images/${id}`);
     token.attrSet('loading', 'lazy');
     return image(tokens, index, options, env, renderer);
   };
   md.renderer.rules.link_open = (tokens, index, options, env, renderer) => {
     const token = tokens[index], id = imageID(token.attrGet('href'), site);
+    const file = importedFile(token.attrGet('href'));
+    if (file) token.attrSet('href', file);
     if (id) {
       images.add(id);
       token.attrSet('href', `/wiki/images/${id}`);
@@ -42,7 +65,7 @@ export function renderMarkdown(markdown, site) {
     return renderer.renderToken(tokens, index, options);
   };
   const html = md.render(markdown);
-  return { html, images: [...images] };
+  return { html, images: [...images], files: [...files] };
 }
 
 export function validatePage(input) {

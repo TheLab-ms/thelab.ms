@@ -1,12 +1,13 @@
 import { signedInMember, startLogin } from './auth.js';
 import { boundedBytes, boundedText, cookie, escapeHTML as e, hash, HttpError, json, origin, redirect } from './http.js';
 import { eligibleEditor, wikiCall } from './wiki-store.js';
-import { IMAGE_PATH, MAX_IMAGE, MAX_MARKDOWN, renderMarkdown, validSlug } from './wiki-markdown.js';
+import { FILE_PATH, IMAGE_PATH, MAX_IMAGE, MAX_MARKDOWN, renderMarkdown, validSlug } from './wiki-markdown.js';
+import { importRequest } from './wiki-import.js';
 import { wikiArticle, wikiEditor, wikiIndex, wikiPage } from './wiki-views.js';
 import { logError } from './logging.js';
 
 // Bump when changing published HTML/Markdown rendering so deploys cannot reuse it.
-const CACHE_VERSION = 'v1';
+const CACHE_VERSION = 'v2';
 
 async function cached(request, revision, render) {
 	const url = new URL(request.url);
@@ -51,17 +52,32 @@ async function readJSON(request) {
 export async function wikiRequest(request, env) {
 	const url = new URL(request.url), path = url.pathname, reading = ['GET', 'HEAD'].includes(request.method);
 	try {
+		if (path.startsWith('/wiki/import/')) return await importRequest(request, env);
 		if (path === '/wiki/' && reading) return redirect('/wiki');
 		const image = path.match(IMAGE_PATH);
+		const file = path.match(FILE_PATH);
 		const match = path.match(/^\/wiki\/([^/]+)(?:\/(edit|delete))?$/);
 		const slug = match?.[1], action = match?.[2];
 		const index = path === '/wiki', newPage = path === '/wiki/new';
 		const preview = path === '/wiki/preview', upload = path === '/wiki/images';
-		if (!index && !newPage && !preview && !upload && !image && !(validSlug(slug) && match)) throw new HttpError(404, 'Wiki page not found.');
-		const methods = image || index ? ['GET', 'HEAD'] : preview || upload || action === 'delete' ? ['POST'] : newPage || action === 'edit' ? ['GET'] : ['GET', 'HEAD', 'POST'];
+		if (!index && !newPage && !preview && !upload && !image && !file && !(validSlug(slug) && match)) throw new HttpError(404, 'Wiki page not found.');
+		const methods = image || file || index ? ['GET', 'HEAD'] : preview || upload || action === 'delete' ? ['POST'] : newPage || action === 'edit' ? ['GET'] : ['GET', 'HEAD', 'POST'];
 		if (!methods.includes(request.method)) return new Response('Method not allowed', { status: 405, headers: { Allow: methods.join(', '), 'Cache-Control': 'no-store' } });
 
 		if (reading && !newPage && action !== 'edit') {
+			if (file) {
+				const metadata = await wikiCall(env, 'file', { id: file[1] });
+				if (!metadata) throw new HttpError(404, 'Attachment not found.');
+				return await cached(request, metadata.id, async () => {
+					const object = await env.WIKI_BUCKET.get(`files/${metadata.id}`);
+					if (!object) throw new HttpError(404, 'Attachment not found.');
+					return new Response(object.body, { headers: {
+						'Content-Type': metadata.type, 'X-Content-Type-Options': 'nosniff',
+						'Content-Security-Policy': "default-src 'none'; sandbox",
+						'Content-Disposition': `${metadata.type.startsWith('image/') ? 'inline' : 'attachment'}; filename="${file[2]}"`,
+					} });
+				});
+			}
 			// Public reads deliberately never inspect membership cookies or D1.
 			if (index) {
 				const data = await wikiCall(env, 'index');
