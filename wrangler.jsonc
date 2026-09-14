@@ -21,8 +21,6 @@
 			"/kiosk",
 			"/kiosk/*",
 			"/keyfob/*",
-			"/wiki",
-			"/wiki/*",
 			"/webhooks/*"
 		]
 	},
@@ -34,12 +32,6 @@
 			"database_id": "3e4bca68-f6db-4ef5-8e92-c80a38f02aa1"
 		}
 	],
-	"r2_buckets": [
-		{
-			"binding": "WIKI_BUCKET",
-			"bucket_name": "thelab-wiki"
-		}
-	],
 	"durable_objects": {
 		"bindings": [
 			{
@@ -49,10 +41,6 @@
 			{
 				"name": "EDGE_SYNC",
 				"class_name": "EdgeSync"
-			},
-			{
-				"name": "WIKI",
-				"class_name": "Wiki"
 			}
 		]
 	},
@@ -67,6 +55,12 @@
 		{
 			"tag": "v2-wiki",
 			"new_sqlite_classes": [
+				"Wiki"
+			]
+		},
+		{
+			"tag": "v3-remove-wiki",
+			"deleted_classes": [
 				"Wiki"
 			]
 		}

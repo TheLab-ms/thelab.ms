@@ -8,9 +8,7 @@ import { logError, requestContext } from './logging.js';
 import { printerAccess } from './printers.js';
 import { edgeJWKS } from './edge-auth.js';
 import { waiverRequest } from './waiver.js';
-import { wikiRequest } from './wiki.js';
 import { bindFob, cleanupFobClaims, kioskClaims, kioskPage } from './kiosk.js';
-export { Wiki } from './wiki-store.js';
 export { Membership } from './membership.js';
 export { EdgeSync } from './edge-sync.js';
 import { edgeCall, edgeEnabled, nightlyDate } from './edge-sync.js';
@@ -148,9 +146,8 @@ export default {
     const context = requestContext(request);
     const route = routes.get(path);
     const isAdmin = path === '/admin' || path.startsWith('/admin/');
-    const isWiki = path === '/wiki' || path.startsWith('/wiki/');
     try {
-      if (!route && !isAdmin && !isWiki) {
+      if (!route && !isAdmin) {
         const response = await env.ASSETS.fetch(request);
         if (response.status >= 400) logError('assets.failed', new HttpError(response.status, 'Asset request failed.'), context, env);
         return response;
@@ -160,7 +157,6 @@ export default {
         return new Response('Method not allowed', { status: 405, headers: { Allow: route[0], 'Cache-Control': 'no-store' } });
       }
       if (url.origin !== origin(env)) throw new HttpError(400, 'Please use the configured membership site address.');
-      if (isWiki) return await wikiRequest(request, env);
       return route ? await route[1](request, env) : await adminRequest(request, env, context);
     } catch (error) {
       logError('request.failed', error, context, env);

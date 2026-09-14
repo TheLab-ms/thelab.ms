@@ -78,15 +78,14 @@ switch (action) {
     console.log(process.env.CLOUDFLARE_ACCOUNT_ID || config.account_id || '');
     break;
   case 'resources': {
-    const bucket = config.r2_buckets.find(bucket => bucket.binding === 'WIKI_BUCKET');
     const queues = [...new Set([
       ...config.queues.consumers.map(queue => queue.dead_letter_queue).filter(Boolean),
       ...config.queues.producers.map(queue => queue.queue),
       ...config.queues.consumers.map(queue => queue.queue),
     ])];
-    const values = [config.name, db.database_name, bucket.bucket_name, ...queues];
+    const values = [config.name, db.database_name, ...queues];
     if (values.some(value => typeof value !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(value))) {
-      throw new Error('Expected named Worker, DB, WIKI_BUCKET, and queues in wrangler.jsonc.');
+      throw new Error('Expected named Worker, DB, and queues in wrangler.jsonc.');
     }
     console.log(values.join('\n'));
     break;
@@ -102,12 +101,6 @@ switch (action) {
       }, false);
       console.log(match.uuid);
     }
-    break;
-  }
-  case 'bucket-exists': {
-    // Wrangler's bucket list is labelled text (it has no JSON option).
-    const names = [...fs.readFileSync(args[0], 'utf8').matchAll(/^name:\s*(\S+)\s*$/gm)].map(match => match[1]);
-    process.exitCode = names.includes(args[1]) ? 0 : 1;
     break;
   }
   case 'local-secrets': {
@@ -156,7 +149,6 @@ names=()
 while IFS= read -r name; do names+=("$name"); done <<< "$resources"
 worker=${names[0]}
 database=${names[1]}
-bucket=${names[2]}
 
 if [[ "$mode" == --local ]]; then
   helper local-secrets
@@ -180,12 +172,7 @@ if [[ -z "$database_id" ]]; then
   [[ -n "$database_id" ]] || { printf '%s\n' 'Created database was not found.' >&2; exit 1; }
 fi
 
-wrangler r2 bucket list > "$scratch/buckets.txt"
-if ! helper bucket-exists "$scratch/buckets.txt" "$bucket"; then
-  wrangler r2 bucket create "$bucket" --no-update-config </dev/null
-fi
-
-for queue in "${names[@]:3}"; do
+for queue in "${names[@]:2}"; do
   if output=$(wrangler queues info "$queue" 2>&1); then
     printf 'Using existing queue: %s\n' "$queue"
   elif [[ "$output" == *"Queue \"$queue\" does not exist."* ]]; then

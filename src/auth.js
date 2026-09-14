@@ -76,7 +76,6 @@ export function loginDestination(value, purpose) {
   }
   if (purpose === 'member' && value === '/waiver?signup=1') return value;
   if (purpose === 'member' && value.length < 1100 && /^\/keyfob\/bind\?token=[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/.test(value)) return value;
-  if (purpose === 'member' && (value === '/wiki/new' || /^\/wiki\/[a-z0-9]+(?:-[a-z0-9]+)*\/edit$/.test(value))) return value;
   return /^\/payment\/success\?session_id=cs_[A-Za-z0-9_]+$/.test(value) ? value : '/payment/resume';
 }
 

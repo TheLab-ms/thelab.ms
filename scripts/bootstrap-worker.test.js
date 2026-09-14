@@ -26,8 +26,6 @@ const fail = message => { console.error(message); process.exit(1); };
 if (state.fail && command.startsWith(state.fail)) fail('Authentication error');
 if (command === 'd1 list --json') console.log(JSON.stringify(state.databases));
 else if (command.startsWith('d1 create ')) state.databases.push({ name: args[2], uuid: '11111111-2222-4333-8444-555555555555' });
-else if (command === 'r2 bucket list') console.log(state.buckets.map(name => 'name:           ' + name + '\\ncreation_date:  2026-01-01').join('\\n\\n'));
-else if (command === 'r2 bucket create') state.buckets.push(args[3]);
 else if (command.startsWith('queues info ')) {
   if (!state.queues.includes(args[2])) fail('Queue "' + args[2] + '" does not exist. To create it, run: wrangler queues create ' + args[2]);
 } else if (command.startsWith('queues create ')) state.queues.push(args[2]);
@@ -58,7 +56,11 @@ function fixture(t) {
   const write = (file, value) => fs.writeFileSync(path.join(dir, file), value);
   const state = () => json('state.json');
   const setState = value => write('state.json', JSON.stringify(value));
-  setState({ databases: [], buckets: [], queues: [], secrets: {}, deployed: false, calls: [], uploads: [] });
+  // Model a fresh install independently of the deployed database ID in the repo.
+  const config = json('wrangler.jsonc');
+  delete config.d1_databases[0].database_id;
+  write('wrangler.jsonc', JSON.stringify(config));
+  setState({ databases: [], queues: [], secrets: {}, deployed: false, calls: [], uploads: [] });
   const run = (mode, env = {}) => {
     const environment = { ...process.env, ...env };
     for (const name of ['AUTH_SECRET', 'EDGE_JWT_PRIVATE_KEY', 'TURNSTILE_SECRET_KEY',
@@ -102,7 +104,6 @@ test('remote bootstrap creates resources, migrates before deployment, and preser
   success(f.run('--remote', { STRIPE_SECRET_KEY: 'sk_test_fixture' }));
   const initial = f.state();
   assert.equal(initial.databases.length, 1);
-  assert.deepEqual(initial.buckets, ['thelab-wiki']);
   assert.deepEqual(initial.queues, ['thelab-membership-failed', 'thelab-membership']);
   assert.equal(f.json('wrangler.jsonc').d1_databases[0].database_id, initial.databases[0].uuid);
   assert.equal(initial.secrets.STRIPE_SECRET_KEY, 'sk_test_fixture');
@@ -117,7 +118,6 @@ test('remote bootstrap creates resources, migrates before deployment, and preser
   assert.deepEqual(second.secrets, initial.secrets);
   assert.deepEqual(second.uploads[1], {});
   assert.equal(second.databases.length, 1);
-  assert.equal(second.buckets.length, 1);
   assert.equal(second.queues.length, 2);
 });
 
@@ -134,7 +134,7 @@ test('remote bootstrap reuses saved keys after a failed migration', t => {
 });
 
 test('authentication errors are not treated as missing resources or missing Worker', t => {
-  for (const fail of ['d1 list', 'r2 bucket list', 'queues info', 'secret list']) {
+  for (const fail of ['d1 list', 'queues info', 'secret list']) {
     const f = fixture(t);
     f.setState({ ...f.state(), fail });
     const result = f.run('--remote');
