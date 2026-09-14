@@ -634,7 +634,8 @@ describe('member administration', () => {
     for (const path of ['/admin', `/admin/members/${id}`]) {
       const html = await (await api(path, { headers: { Cookie: cookie } })).text();
       expect(html).toContain(`>${label}</span>`);
-      expect(html).toContain('1970-01-01 00:16:40 UTC');
+      if (path === '/admin') expect(html).not.toContain('1970-01-01 00:16:40 UTC');
+      else expect(html).toContain('1970-01-01 00:16:40 UTC');
       if (subscriptionID) expect(html).toContain('href="https://dashboard.stripe.com/test/subscriptions/sub_member" target="_blank" rel="noopener noreferrer"');
       else expect(html).not.toContain('dashboard.stripe.com');
     }

@@ -34,9 +34,8 @@
 .admin-member-table:has(.admin-empty) { min-width: 0; }
 .admin-member-table:has(.admin-empty) thead { display: none; }
 .admin-table table:not(.admin-member-table) { min-width: 560px; }
-.admin-member-table th:first-child { width: 44%; }
+.admin-member-table th:first-child { width: 65%; }
 .admin-member-table th:nth-child(2) { width: 35%; }
-.admin-member-table th:nth-child(3) { width: 21%; }
 .admin-member-name { display: inline-block; font-weight: 600; font-size: 1rem; padding-bottom: 0.15rem; }
 .admin-id { font-variant-numeric: tabular-nums; }
 .admin-table .admin-empty { padding: 3rem 1rem; text-align: center; }
