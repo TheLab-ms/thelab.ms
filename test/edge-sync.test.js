@@ -141,7 +141,7 @@ it('saves access checkboxes, records history, and immediately adds or removes fo
   expect(html).toMatch(checked('non_billable'));
   expect(html).toMatch(checked('legacy_billing'));
   expect(html).toContain('Disabled → Enabled');
-  const list = await get(`${env.SITE_URL}/admin`);
+  const list = await get(`${env.SITE_URL}/admin?waiver=all&discord=all`);
   expect(list).toContain('<small>Non-billable</small>');
   expect(list).toContain('<small>Legacy billing</small>');
 

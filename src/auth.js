@@ -1,6 +1,6 @@
 import { cookie, cookieHeader, discordID, hash, HttpError, now, opaque, origin, randomToken, redirect } from './http.js';
 import { encodeBase64URL as encode, decodeBase64URL as decode, encodeJSON as json } from './encoding.js';
-import { memberListParams } from './admin-search.js';
+import { memberFilters, memberListParams } from './admin-search.js';
 import { eventListParams } from './member-events.js';
 
 export const TOKEN_AGE = { member: 86400, admin: 8 * 3600, oauth: 600, fob: 300 };
@@ -69,7 +69,7 @@ export function loginDestination(value, purpose) {
       const params = new URLSearchParams(value.split('?')[1]);
       try {
         memberListParams(params);
-        if ([...params.keys()].every(key => key === 'page' || key === 'q')) return value;
+        if ([...params.keys()].every(key => key === 'page' || key === 'q' || memberFilters.some(filter => filter.name === key))) return value;
       } catch { /* Invalid list parameters fall back to the first page. */ }
     }
     return '/admin';

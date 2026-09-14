@@ -28,10 +28,20 @@ export async function finishAdminLogin(env, user, guildMember, destination) {
 }
 
 async function list(request, env, csrf) {
-  const { current, query } = memberListParams(new URL(request.url).searchParams);
+  const { current, query, filters } = memberListParams(new URL(request.url).searchParams);
   const columns = ['discord_user_id', 'discord_username', 'discord_email', 'billing_name', 'billing_email', 'name_override', 'email', 'waiver_name', 'fob_id'];
-  const filter = query ? ` WHERE ${columns.map(column => `${column} LIKE ? ESCAPE '\\'`).join(' OR ')}` : '';
+  const conditions = query ? [`(${columns.map(column => `${column} LIKE ? ESCAPE '\\'`).join(' OR ')})`] : [];
   const values = query ? columns.map(() => `%${query.replace(/[\\%_]/g, '\\$&')}%`) : [];
+  if (filters.waiver !== 'all') conditions.push(`${waiverSignedSQL} = ${filters.waiver === 'signed' ? 1 : 0}`);
+  if (filters.discord !== 'all') conditions.push(`discord_user_id IS ${filters.discord === 'linked' ? 'NOT ' : ''}NULL`);
+  if (filters.payment !== 'all') {
+    conditions.push(`(CASE WHEN non_billable = 1 THEN 'non_billable'
+      WHEN legacy_billing = 1 THEN 'legacy_billing'
+      WHEN stripe_subscription_state IN ('active', 'trialing') THEN 'stripe_active'
+      ELSE 'inactive' END) = ?`);
+    values.push(filters.payment);
+  }
+  const filter = conditions.length ? ` WHERE ${conditions.join(' AND ')}` : '';
   const [count, members] = await env.DB.batch([
     env.DB.prepare(`SELECT COUNT(*) AS total FROM members${filter}`).bind(...values),
     env.DB.prepare(`SELECT member_id, email, waiver_name, discord_user_id, discord_username, discord_email, created, bill_annually, discount_type, non_billable, legacy_billing,
@@ -39,8 +49,8 @@ async function list(request, env, csrf) {
       name_override, billing_name, stripe_subscription_id, stripe_subscription_state, stripe_synced_at FROM members${filter} ORDER BY created DESC, discord_user_id DESC, member_id DESC LIMIT ? OFFSET ?`).bind(...values, PAGE_SIZE, (current - 1) * PAGE_SIZE),
   ]);
   const total = count.results[0].total, pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  if (current > pages) return redirect(memberListURL(pages, query));
-  return memberList(members.results, { total, current, pages, query }, env, csrf);
+  if (current > pages) return redirect(memberListURL(pages, query, filters));
+  return memberList(members.results, { total, current, pages, query, filters }, env, csrf);
 }
 
 async function readForm(request, env, csrf) {

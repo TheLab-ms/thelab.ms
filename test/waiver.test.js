@@ -239,7 +239,7 @@ describe('waiver administration', () => {
   it('lists, searches, edits, and shows history/evidence for waiver-only members', async () => {
     human(); await submit(await form());
     const member = (await members()).results[0], headers = await admin();
-    const list = await (await api('/admin?q=Public', { headers })).text();
+    const list = await (await api('/admin?q=Public&discord=unlinked', { headers })).text();
     expect(list).toContain(`/admin/members/${member.member_id}`);
     expect(list).toContain('Waiver signed');
     const detail = await (await api(`/admin/members/${member.member_id}`, { headers })).text();

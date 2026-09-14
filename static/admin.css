@@ -20,6 +20,7 @@
 .admin-search { margin: 1.5rem 0; }
 .admin-search-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; }
 .admin-search-controls input, .admin-search-controls select { flex: 1 1 16rem; min-width: 0; }
+.admin-list-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0 1rem; margin-bottom: 1rem; }
 .admin-list-summary { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 0.25rem 1rem; overflow-wrap: anywhere; }
 .admin-list-summary p, .admin-list-summary .admin-help { margin: 0; }
 .admin-table { position: relative; overflow-x: auto; margin: 1rem 0; border: 1px solid var(--color-border); border-radius: var(--radius-md); }
