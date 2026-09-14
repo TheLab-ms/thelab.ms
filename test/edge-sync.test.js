@@ -219,28 +219,23 @@ it('deduplicates swipe backups and uses ownership at swipe time after reassignme
   expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM member_events WHERE event_type = 'FobSwipe'").first()).n).toBe(3);
 });
 
-it('waits for fresh swipes on admin history and reports failed refreshes', async () => {
-  const token = await issueToken(env, '333333333333333333', 'admin');
-  const request = () => new Request(`${env.SITE_URL}/admin/events?event_type=FobSwipe`, { headers: { Cookie: `thelab_admin=${token}` } });
-  let release, started;
-  const gate = new Promise(resolve => { release = resolve; });
-  const entered = new Promise(resolve => { started = resolve; });
-  // Keep the deferred UI boundary in the request context. Real D1 imports and
-  // DO RPC are exercised above; cross-context deferred fetch mocks violate
-  // workerd's stream ownership rules.
-  const execute = vi.fn(async operation => { expect(operation).toBe('swipes'); started(); await gate; return { ok: true }; });
-  const uiEnv = { ...configured, EDGE_SYNC: { idFromName: () => 'edge', get: () => ({ execute }) } };
-  let done = false;
-  const response = worker.fetch(request(), uiEnv).then(async value => { done = true; return value.text(); });
-  await entered; expect(done).toBe(false);
-  swipes = [{ id: 'fresh', fob: 42, allowed: false, controller: '192.168.1.2', time: new Date().toISOString() }];
+it('renders cached swipes across admin pages without contacting edgeproxy', async () => {
+  const m = await member();
+  await env.DB.prepare('UPDATE fob_assignments SET started = 1000 WHERE member_id = ?').bind(m.member_id).run();
+  swipes = [{ id: 'cached', fob: 7, allowed: true, controller: '192.168.1.2', time: new Date().toISOString() }];
   await edgeCall(configured, 'swipes');
-  release();
-  expect(await response).toContain('Fob 42');
-  execute.mockResolvedValue({ ok: false, error: 'Could not refresh swipes from edgeproxy. Reload this page to retry.' });
-  const failed = await worker.fetch(request(), uiEnv);
-  expect(failed.status).toBe(503);
-  expect(await failed.text()).toContain('Could not refresh swipes');
+  const token = await issueToken(env, '333333333333333333', 'admin');
+  const execute = vi.fn(async () => ({ ok: false, error: 'Edgeproxy is unavailable.' }));
+  const uiEnv = { ...configured, EDGE_SYNC: { idFromName: () => 'edge', get: () => ({ execute }) } };
+  for (const path of ['/admin', '/admin/events', '/admin/events?event_type=FobSwipe',
+    `/admin/members/${m.member_id}`, `/admin/members/${m.member_id}/events`, `/admin/members/${m.member_id}/events?event_type=FobSwipe`]) {
+    const response = await worker.fetch(new Request(`${env.SITE_URL}${path}`, { headers: { Cookie: `thelab_admin=${token}` } }), uiEnv);
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    if (path !== '/admin') expect(html).toContain('Fob 7');
+    expect(html).toMatch(/<header\b[^>]*>.*>Sync Cache<\/button>.*>Log Out<\/button>.*<\/header>/s);
+  }
+  expect(execute).not.toHaveBeenCalled();
 });
 
 it('protects manual full sync with live admin role and CSRF; sends a full snapshot', async () => {
@@ -248,15 +243,21 @@ it('protects manual full sync with live admin role and CSRF; sends a full snapsh
   const token = await issueToken(env, '333333333333333333', 'admin');
   const admin = await worker.fetch(new Request(`${env.SITE_URL}/admin`, { headers: { Cookie: `thelab_admin=${token}` } }), configured);
   expect(admin.headers.get('Referrer-Policy')).toBe('same-origin');
-  expect(await admin.text()).toContain('action="/admin/edge/resync"');
+  const html = await admin.text();
+  expect(html).toMatch(/<header\b[^>]*>.*action="\/admin\/edge\/resync".*>Sync Cache<\/button>.*action="\/admin\/logout".*<\/header>/s);
+  expect(html).not.toContain('<h2>Door access</h2>');
+  const disabled = await worker.fetch(new Request(`${env.SITE_URL}/admin`, { headers: { Cookie: `thelab_admin=${token}` } }), { ...configured, EDGE_URL: '' });
+  expect(await disabled.text()).not.toContain('Sync Cache');
   const request = csrf => new Request(`${env.SITE_URL}/admin/edge/resync`, { method: 'POST', headers: {
     Cookie: `thelab_admin=${token}`, Origin: env.SITE_URL, 'Content-Type': 'application/x-www-form-urlencoded',
   }, body: new URLSearchParams({ csrf }) });
   expect((await worker.fetch(request('wrong'), configured)).status).toBe(403);
   expect(writes).toHaveLength(0);
   const csrf = await hash(`admin-csrf:${token}`);
+  swipes = [{ id: 'manual', fob: 7, allowed: true, controller: '192.168.1.2', time: new Date().toISOString() }];
   expect((await worker.fetch(request(csrf), configured)).status).toBe(200);
   expect(writes[0]).toMatchObject({ method: 'PUT', fobs: [7] });
+  expect(await env.DB.prepare('SELECT id FROM edge_swipes').all()).toMatchObject({ results: [{ id: 'manual' }] });
   const normal = fetchSpy.getMockImplementation();
   fetchSpy.mockImplementation((url, init) => String(url).startsWith('https://discord.com/') ? Response.json({ roles: [] }) : normal(url, init));
   expect((await worker.fetch(request(csrf), configured)).status).toBe(403);
@@ -293,7 +294,7 @@ it.each([
   }
 });
 
-it('preserves rejected admin edits when the swipe refresh also fails', async () => {
+it('preserves rejected admin edits without refreshing swipes', async () => {
   const m = await member();
   const token = await issueToken(env, '333333333333333333', 'admin');
   const normal = fetchSpy.getMockImplementation();
@@ -309,7 +310,8 @@ it('preserves rejected admin edits when the swipe refresh also fails', async () 
   const html = await response.text();
   expect(html).toContain('value="Unsaved maker"');
   expect(html).toContain('Keep my draft &lt;please&gt;');
-  expect(html).toContain('Could not refresh swipes');
+  expect(html).not.toContain('Could not refresh swipes');
+  expect(fetchSpy.mock.calls.filter(([url]) => String(url).endsWith('/api/swipes'))).toHaveLength(0);
   expect((await env.DB.prepare('SELECT notes FROM members WHERE member_id = ?').bind(m.member_id).first()).notes).toBe('');
 });
 

@@ -9,7 +9,7 @@ import { eventListParams, eventListURL, queryEvents } from './member-events.js';
 import { eventList } from './event-views.js';
 import { memberName, memberPath } from './member-metadata.js';
 import { memberWaivers } from './waiver.js';
-import { edgeCall, edgeEnabled } from './edge-sync.js';
+import { edgeCall } from './edge-sync.js';
 import { fobEnabledSQL, waiverSignedSQL } from './fob-access.js';
 
 const PAGE_SIZE = 25;
@@ -68,10 +68,9 @@ async function readForm(request, env, csrf) {
 async function history(request, env, csrf, member) {
   const url = new URL(request.url);
   const params = eventListParams(url.searchParams);
-  if (edgeEnabled(env) && (!params.type || params.type === 'FobSwipe')) await edgeCall(env, 'swipes');
   const result = await queryEvents(env, { ...params, memberID: member?.member_id });
   if (result.current > result.pages) return redirect(eventListURL(url.pathname, result.pages, params.type));
-  return page(member ? `History for ${memberName(member)}` : 'Member history', eventList(result, url.pathname, member), csrf);
+  return page(member ? `History for ${memberName(member)}` : 'Member history', eventList(result, url.pathname, member), csrf, 200, env);
 }
 
 export async function adminRequest(request, env, context = requestContext(request)) {
@@ -108,7 +107,7 @@ export async function adminRequest(request, env, context = requestContext(reques
     requireRole(env, guildMember);
     if (path === '/admin/edge/resync') {
       await edgeCall(env, 'full');
-      return page('Full resync complete', '<p role="status">The complete authorized fob set was sent to edgeproxy and swipe history was backed up.</p><p><a href="/admin/events?event_type=FobSwipe">View swipes</a></p>', csrf);
+      return page('Cache sync complete', '<p role="status">The complete authorized fob set was sent to edgeproxy and swipe history was backed up.</p><p><a href="/admin/events?event_type=FobSwipe">View swipes</a></p>', csrf, 200, env);
     }
     if (path === '/admin/events') return await history(request, env, csrf);
     if (!match) return await list(request, env, csrf);
@@ -123,12 +122,10 @@ export async function adminRequest(request, env, context = requestContext(reques
         let message = error instanceof HttpError ? error.message : 'Saving failed. Please try again.';
         let events = [], waivers = '';
         try {
-          if (edgeEnabled(env)) await edgeCall(env, 'swipes');
           ({ events } = await queryEvents(env, { memberID: member.member_id, limit: 10 }));
           waivers = await memberWaivers(env, member);
         } catch (refreshError) {
-          // Keep the submitted draft even if ancillary reads fail. Never render
-          // stale history as though its required refresh succeeded.
+          // Keep the submitted draft even if ancillary reads fail.
           logError('admin.refresh_failed', refreshError, context, env);
           message += ` ${refreshError instanceof HttpError ? refreshError.message : 'Could not refresh member history. Reload to retry.'}`;
         }
@@ -136,14 +133,13 @@ export async function adminRequest(request, env, context = requestContext(reques
       }
       return redirect(`${memberPath({ ...member, discord_user_id: fields.discord_user_id.trim() })}?saved=1`);
     }
-    if (edgeEnabled(env)) await edgeCall(env, 'swipes');
     const { events } = await queryEvents(env, { memberID: member.member_id, limit: 10 });
     return editor(member, null, csrf, env, url.searchParams.get('saved') === '1' ? 'Member metadata saved.' : '', 200, events, await memberWaivers(env, member));
   } catch (error) {
     logError('admin.failed', error, context, env);
     if (path === '/admin/edge/resync' && csrf && error.status === 503) {
-      return page('Full resync pending', `<p role="alert">${e(error.message)}</p><form method="post" action="/admin/edge/resync"><input type="hidden" name="csrf" value="${e(csrf)}"><button class="btn btn-primary" type="submit">Retry full resync</button></form><p><a href="/admin">Return to members</a></p>`, csrf, 503);
+      return page('Cache sync pending', `<p role="alert">${e(error.message)}</p><p><a href="/admin">Return to members</a></p>`, csrf, 503, env);
     }
-    return page('Admin access', `<p role="alert">${e(error instanceof HttpError ? error.message : 'Admin is temporarily unavailable. Please try again.')}</p><p><a href="${e(path + url.search)}">Retry</a> · <a href="/admin">Return to members</a> · <a href="/admin/login">Sign in again</a></p>`, csrf, error instanceof HttpError ? error.status : 500);
+    return page('Admin access', `<p role="alert">${e(error instanceof HttpError ? error.message : 'Admin is temporarily unavailable. Please try again.')}</p><p><a href="${e(path + url.search)}">Retry</a> · <a href="/admin">Return to members</a> · <a href="/admin/login">Sign in again</a></p>`, csrf, error instanceof HttpError ? error.status : 500, env);
   }
 }

@@ -37,7 +37,7 @@ export class EdgeSync extends DurableObject {
   constructor(ctx, env) { super(ctx, env); this.tail = Promise.resolve(); this.swipeTail = Promise.resolve(); }
 
   async execute(operation, input) {
-    // Swipe viewing must not wait for goal delivery/retries.
+    // Swipe imports run independently of goal delivery/retries.
     const lane = operation === 'swipes' ? 'swipeTail' : 'tail';
     const work = this[lane].then(async () => {
       try {
@@ -56,7 +56,7 @@ export class EdgeSync extends DurableObject {
         return { ok: true };
       } catch (error) {
         logError('edge.failed', error, { operation }, this.env);
-        return { ok: false, error: operation === 'swipes' ? 'Could not refresh swipes from edgeproxy. Reload this page to retry.' : 'Edge resync failed; pending changes will retry automatically.' };
+        return { ok: false, error: operation === 'swipes' ? 'Could not refresh swipes from edgeproxy. Use Sync Cache to retry.' : 'Edge resync failed; pending changes will retry automatically.' };
       }
     });
     this[lane] = work.catch(() => {});

@@ -12,7 +12,7 @@
 .admin-header .membership-brand { margin: 0 0.5rem 0 0; font-size: 1.4rem; }
 .admin-header nav { gap: 1.25rem; }
 .admin-header nav a { color: var(--color-text); padding: 0.5rem 0; }
-.admin-header form { margin-left: auto; }
+.admin-toolbar-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-left: auto; }
 .admin-main .admin-help { color: var(--color-text-muted); font-size: 0.85rem; line-height: 1.5; margin: 0.5rem 0 0; }
 .admin-back { font-size: 0.9rem; }
 
