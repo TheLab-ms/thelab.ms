@@ -9,6 +9,8 @@ export default defineConfig(async () => ({
       compatibilityFlags: ['nodejs_compat'],
       bindings: {
         SITE_URL: 'https://thelab.example',
+        // Edge tests supply their own URL and signing key; other tests stay offline.
+        EDGE_URL: '',
         AUTH_SECRET: 'test-only-auth-secret-at-least-32-bytes',
         DISCORD_CLIENT_ID: 'test-client',
         DISCORD_CLIENT_SECRET: 'test-secret',

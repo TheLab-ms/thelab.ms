@@ -45,7 +45,20 @@ async function list(request, env, csrf) {
 }
 
 async function readForm(request, env, csrf) {
-  if (request.headers.get('Origin') !== origin(env)) throw new HttpError(403, 'We couldn’t submit your changes. Reload this page and try again.');
+  const submittedOrigin = request.headers.get('Origin'), expectedOrigin = origin(env);
+  if (submittedOrigin !== expectedOrigin) {
+    // Report only a parsed origin, never raw headers, credentials, or URL queries.
+    let received = submittedOrigin === null ? 'missing' : submittedOrigin === 'null' ? 'null (opaque origin; check the page Referrer-Policy)' : 'invalid';
+    if (submittedOrigin && submittedOrigin !== 'null') {
+      try {
+        const url = new URL(submittedOrigin);
+        if (['http:', 'https:'].includes(url.protocol)) received = url.origin;
+      } catch { /* Keep malformed header contents out of traces. */ }
+    }
+    const error = new HttpError(403, 'The form’s origin could not be verified. Reload the admin page from the configured site address and try again.');
+    error.cause = new Error(`Admin form Origin check failed: expected ${expectedOrigin}; received ${received}. Request rejected before performing the admin action.`);
+    throw error;
+  }
   if (request.headers.get('Content-Type')?.split(';')[0] !== 'application/x-www-form-urlencoded') throw new HttpError(415, 'Submit the member edit form.');
   const form = new URLSearchParams(await boundedText(request, 128 * 1024));
   if ([...form.keys()].some(key => form.getAll(key).length !== 1) || form.get('csrf') !== csrf) throw new HttpError(403, 'Your form expired. Reload this page and try again.');

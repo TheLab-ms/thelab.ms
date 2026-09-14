@@ -246,6 +246,9 @@ it('waits for fresh swipes on admin history and reports failed refreshes', async
 it('protects manual full sync with live admin role and CSRF; sends a full snapshot', async () => {
   await member();
   const token = await issueToken(env, '333333333333333333', 'admin');
+  const admin = await worker.fetch(new Request(`${env.SITE_URL}/admin`, { headers: { Cookie: `thelab_admin=${token}` } }), configured);
+  expect(admin.headers.get('Referrer-Policy')).toBe('same-origin');
+  expect(await admin.text()).toContain('action="/admin/edge/resync"');
   const request = csrf => new Request(`${env.SITE_URL}/admin/edge/resync`, { method: 'POST', headers: {
     Cookie: `thelab_admin=${token}`, Origin: env.SITE_URL, 'Content-Type': 'application/x-www-form-urlencoded',
   }, body: new URLSearchParams({ csrf }) });
@@ -258,6 +261,36 @@ it('protects manual full sync with live admin role and CSRF; sends a full snapsh
   fetchSpy.mockImplementation((url, init) => String(url).startsWith('https://discord.com/') ? Response.json({ roles: [] }) : normal(url, init));
   expect((await worker.fetch(request(csrf), configured)).status).toBe(403);
   expect(writes).toHaveLength(1);
+});
+
+it.each([
+  [null, 'missing'],
+  ['null', 'null (opaque origin; check the page Referrer-Policy)'],
+  ['https://elsewhere.example', 'https://elsewhere.example'],
+  ['https://private-user:private-password@elsewhere.example/private-path?code=private-code', 'https://elsewhere.example'],
+  ['malformed-private-header', 'invalid'],
+])('explains rejected full-sync origins in traces without exposing request secrets: %s', async (origin, received) => {
+  const token = await issueToken(env, '333333333333333333', 'admin');
+  const csrf = await hash(`admin-csrf:${token}`);
+  const log = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  const headers = new Headers({ Cookie: `thelab_admin=${token}`, 'Content-Type': 'application/x-www-form-urlencoded' });
+  if (origin !== null) headers.set('Origin', origin);
+  const response = await worker.fetch(new Request(`${env.SITE_URL}/admin/edge/resync?code=private-query`, {
+    method: 'POST', headers, body: new URLSearchParams({ csrf, notes: 'private-body' }),
+  }), configured);
+  expect(response.status).toBe(403);
+  expect(response.headers.get('Referrer-Policy')).toBe('same-origin');
+  expect(await response.text()).toContain('The form’s origin could not be verified');
+  expect(fetchSpy).not.toHaveBeenCalled();
+  expect(writes).toHaveLength(0);
+  expect(log).toHaveBeenCalledTimes(1);
+  const entry = JSON.parse(log.mock.calls[0][0]);
+  expect(entry).toMatchObject({ event: 'admin.failed', path: '/admin/edge/resync', method: 'POST', status: 403,
+    error: { cause: { message: `Admin form Origin check failed: expected ${env.SITE_URL}; received ${received}. Request rejected before performing the admin action.` } } });
+  const trace = JSON.stringify(entry);
+  for (const secret of [token, csrf, 'private-user', 'private-password', 'private-path', 'private-code', 'private-query', 'private-body', 'malformed-private-header']) {
+    expect(trace).not.toContain(secret);
+  }
 });
 
 it('preserves rejected admin edits when the swipe refresh also fails', async () => {
