@@ -1201,6 +1201,56 @@ describe('payment confirmation', () => {
 });
 
 describe('webhooks and queued Discord reconciliation', () => {
+  it.each([id, null])('preserves a linked legacy subscription on renewal with Discord identity %s', async discordID => {
+    await seed({ stripe_subscription_id: 'sub_legacy', stripe_subscription_state: 'active', discord_user_id: discordID });
+    const member = await env.DB.prepare('SELECT * FROM members WHERE stripe_customer_id = ?').bind(customer).first();
+    const before = await queryEvents(env, { memberID: member.member_id });
+    const legacy = { ...subscription('active', 'sub_legacy'), metadata: { etag: 'legacy-etag' },
+      items: { data: [{ price: { active: false, unit_amount: 4000 } }] } };
+    const send = vi.fn().mockResolvedValue(undefined);
+    expect((await api('/webhooks/stripe', await signedEvent('customer.subscription.updated', 'evt_renewal', legacy),
+      { ...env, MEMBERSHIP_QUEUE: { send } })).status).toBe(204);
+    expect(send).toHaveBeenCalledWith({ customer_id: customer });
+    mockBilling('', 'billing@example.com').times(2);
+    mockSubs([legacy]).times(2);
+    if (discordID) mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${discordID}/roles/${env.DISCORD_ROLE_ID}`, {}, 'PUT', 204).times(2);
+    for (let delivery = 0; delivery < 2; delivery++) await processMessage(send.mock.calls[0][0], env);
+    expect(await env.DB.prepare('SELECT * FROM members WHERE member_id = ?').bind(member.member_id).first())
+      .toMatchObject({ stripe_subscription_id: 'sub_legacy', stripe_subscription_state: 'active', billing_email: 'billing@example.com' });
+    const after = await queryEvents(env, { memberID: member.member_id });
+    expect(after.total).toBe(before.total + 1);
+    expect(after.events[0].event_type).toBe('BillingEmailChanged');
+  });
+
+  it.each(['past_due', 'canceled'])('updates a linked legacy subscription to its current %s status', async status => {
+    await seed({ stripe_subscription_id: 'sub_legacy', stripe_subscription_state: 'active' });
+    mockBilling();
+    mockSubs([{ ...subscription(status, 'sub_legacy'), metadata: {} }]);
+    mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, {}, 'DELETE', 204);
+    await processMessage({ customer_id: customer }, env);
+    expect(await readMember()).toMatchObject({ stripe_subscription_id: 'sub_legacy', stripe_subscription_state: status });
+  });
+
+  it.each([
+    { thelab_member_id: 'another-member', thelab_discord_id: id },
+    { thelab_discord_id: '555555555555555555' },
+  ])('does not override conflicting ownership on a linked subscription: %j', async metadata => {
+    await seed({ stripe_subscription_id: 'sub_legacy', stripe_subscription_state: 'active' });
+    mockBilling();
+    mockSubs([{ ...subscription('active', 'sub_legacy'), metadata }]);
+    mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, {}, 'DELETE', 204);
+    await processMessage({ customer_id: customer }, env);
+    expect(await readMember()).toMatchObject({ stripe_subscription_id: null, stripe_subscription_state: null });
+  });
+
+  it('routes a linked legacy subscriber to the billing portal instead of another checkout', async () => {
+    await seed({ stripe_subscription_id: 'sub_legacy', stripe_subscription_state: 'active' });
+    mockSubs([{ ...subscription('active', 'sub_legacy'), metadata: {} }]);
+    mockStripe('/billing_portal/sessions', { url: 'https://billing.stripe.com/p/session/legacy' }, { method: 'POST' });
+    const response = await api('/payment/resume', { headers: { Cookie: await loginCookie() } });
+    expect(response.headers.get('Location')).toBe('https://billing.stripe.com/p/session/legacy');
+  });
+
   it('rejects a customer mapping changed after queue routing', async () => {
     await seed();
     const member = await readMember();

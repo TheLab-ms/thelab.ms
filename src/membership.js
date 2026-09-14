@@ -74,7 +74,13 @@ export class Membership extends DurableObject {
   async subscriptions(member) {
     if (!member.stripe_customer_id) return [];
     return (await stripeList(this.env, '/subscriptions', { customer: member.stripe_customer_id, status: 'all' }))
-      .filter(sub => sub.metadata?.thelab_member_id ? sub.metadata.thelab_member_id === member.member_id : sub.metadata?.thelab_discord_id === member.discord_user_id);
+      .filter(sub => {
+        if (sub.metadata?.thelab_member_id) return sub.metadata.thelab_member_id === member.member_id;
+        if (sub.metadata?.thelab_discord_id) return sub.metadata.thelab_discord_id === member.discord_user_id;
+        // Imported subscriptions predate our ownership metadata. Their saved ID
+        // is a trusted link within this customer's list, not an unrelated plan.
+        return sub.id === member.stripe_subscription_id;
+      });
   }
 
   async checkout(member, { user }) {
