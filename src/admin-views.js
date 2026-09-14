@@ -71,13 +71,13 @@ export function editor(member, fields, csrf, env, message = '', status = 200, ev
 	];
 	const dates = [['Registered', member.created], ['Stripe last synced', member.stripe_synced_at], ['Discord last synced', member.discord_last_synced]];
 	return page(`Edit ${memberName(member)}`, `<p class="admin-back"><a href="/admin">← All members</a></p>${message ? `<p class="admin-notice${status >= 400 ? ' admin-notice--error' : ''}" role="${status >= 400 ? 'alert' : 'status'}">${e(message)}</p>` : ''}
-    <section class="admin-member-summary" aria-label="Subscription summary"><div class="admin-summary-line">${statusBadge(member)}${subscriptionLink(member, env)}</div><p class="admin-help">Stored subscription state. Active and trialing qualify for membership; Stripe changes appear after sync.</p></section>
+    <section class="admin-member-summary" aria-label="Subscription summary"><div class="admin-summary-line">${statusBadge(member)}${subscriptionLink(member, env)}</div></section>
     <div class="admin-editor-layout"><form method="post" action="${e(memberPath(member))}" class="admin-form admin-editor">
     <input type="hidden" name="csrf" value="${e(csrf)}"><input type="hidden" name="metadata_version" value="${e(f.metadata_version)}">
     <section class="admin-section" aria-labelledby="member-settings"><h2 id="member-settings">Member settings</h2>
     ${input('name_override', 'Name override', f.name_override, 160, 'Leave blank to use the Stripe billing name, then Discord username.')}
     <div class="admin-field" aria-label="Saved fob status"><span class="admin-status admin-status--${member.fob_enabled ? 'active' : 'inactive'}">Fob ${member.fob_enabled ? 'enabled' : 'disabled'}</span><p class="admin-help">${member.fob_id ? `Fob ID ${e(member.fob_id)}. ` : 'No fob assigned. '}Based on saved member settings and waiver eligibility. Door changes take effect after synchronization.</p></div>
-    ${input('fob_id', 'Fob ID', f.fob_id, 10, 'One unique ID from 1 through 4294967295. Leave blank to remove. By default, door access requires an active Stripe subscription and a linked signed waiver or imported Conway waiver eligibility; trialing does not qualify.')}
+    ${input('fob_id', 'Fob ID', f.fob_id, 10, 'One unique ID from 1 through 4294967295. Leave blank to remove. By default, door access requires an active or trialing Stripe subscription and a linked signed waiver or imported Conway waiver eligibility.')}
     ${checkbox('non_billable', 'Non-billable', f.non_billable, 'Activates the assigned fob regardless of payment or waiver status. Takes precedence over legacy billing.')}
     ${checkbox('legacy_billing', 'Legacy billing', f.legacy_billing, 'Activates the assigned fob with a linked signed waiver or imported Conway waiver eligibility, regardless of Stripe status.')}
     <fieldset class="admin-billing"><legend>Billing preferences</legend><p class="admin-help">For future checkout only. Manage existing subscriptions and invoices in Stripe. Changing these preferences expires open checkout links.</p><div class="admin-field-grid">

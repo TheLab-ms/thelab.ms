@@ -42,22 +42,22 @@ async function member(fob = 7, status = 'active', waiver = true) {
   return row;
 }
 
-it('requires active AND a signed waiver; pushes diffs for changes and empty revocation', async () => {
-  const active = await member();
-  await member(8, 'trialing');
-  const unsigned = await member(9, 'active', false);
+it.each(['active', 'trialing'])('allows %s with a signed waiver; pushes diffs for changes and empty revocation', async status => {
+  const subscribed = await member(7, status);
+  await member(8, 'past_due');
+  const unsigned = await member(9, status, false);
   await edgeCall(configured, 'changes');
   expect(goal.fobs).toEqual([7]);
   await edgeCall(configured, 'changes');
   expect(writes).toHaveLength(1);
-  await env.DB.prepare(`UPDATE members SET stripe_subscription_state = 'past_due' WHERE member_id = ?`).bind(active.member_id).run();
+  await env.DB.prepare(`UPDATE members SET stripe_subscription_state = 'past_due' WHERE member_id = ?`).bind(subscribed.member_id).run();
   await edgeCall(configured, 'changes');
   expect(writes[1]).toMatchObject({ method: 'PATCH', add: [], remove: [7] });
   expect(goal.fobs).toEqual([]);
   await env.DB.prepare(`INSERT INTO waivers(member_id, version, content, name, email, agreements) VALUES (?, 1, 'Terms', 'Maker', 'maker@example.com', '[]')`).bind(unsigned.member_id).run();
   await edgeCall(configured, 'changes');
   expect(goal.fobs).toEqual([9]);
-  await expect(env.DB.prepare('UPDATE members SET fob_id = 9 WHERE member_id = ?').bind(active.member_id).run()).rejects.toThrow();
+  await expect(env.DB.prepare('UPDATE members SET fob_id = 9 WHERE member_id = ?').bind(subscribed.member_id).run()).rejects.toThrow();
 });
 
 it('shows the same admin fob status as edge eligibility across Stripe states, waivers, and overrides', async () => {
@@ -70,7 +70,7 @@ it('shows the same admin fob status as edge eligibility across Stripe states, wa
         members.push(m);
         await env.DB.prepare('UPDATE members SET non_billable = ?, legacy_billing = ?, legacy_waiver_signed = ? WHERE member_id = ?')
           .bind(nonBillable, legacyBilling, Number(signed === 'legacy'), m.member_id).run();
-        if (nonBillable || (signed && (legacyBilling || status === 'active'))) expected.push(m.fob_id);
+        if (nonBillable || (signed && (legacyBilling || status === 'active' || status === 'trialing'))) expected.push(m.fob_id);
       }
     }
   }
