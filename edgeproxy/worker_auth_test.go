@@ -125,6 +125,82 @@ func TestWorkerAuthRoutes(t *testing.T) {
 	}
 }
 
+func TestWorkerJWTClockSkew(t *testing.T) {
+	const issued = int64(1800000000)
+	for _, tc := range []struct {
+		name      string
+		now, nbf  int64
+		wantValid bool
+	}{
+		{"edge clock one second behind", issued - 1, 0, true},
+		{"edge clock at skew limit", issued - 5, 0, true},
+		{"edge clock beyond skew limit", issued - 6, 0, false},
+		{"not before at skew limit", issued, issued + 5, true},
+		{"not before beyond skew limit", issued, issued + 6, false},
+		{"before expiration", issued + 59, 0, true},
+		{"at expiration", issued + 60, 0, false},
+		{"after expiration", issued + 61, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := testWorkerAuth()
+			claims := testWorkerClaims()
+			claims["iat"], claims["exp"], claims["nbf"] = issued, issued+60, tc.nbf
+			r := httptest.NewRequest("GET", "/api/swipes", nil)
+			r.Header.Set("Authorization", "Bearer "+workerTestToken(claims))
+			if got := a.verifyAt(r, tc.now); got != tc.wantValid {
+				t.Fatalf("verifyAt(%d) = %t, want %t", tc.now, got, tc.wantValid)
+			}
+		})
+	}
+}
+
+func TestWorkerAuthRejectionLogging(t *testing.T) {
+	output := captureLogs(t)
+	e := testEdge(t)
+	_, cloud := e.routes()
+	for _, tc := range []struct {
+		name, claim string
+		value       any
+		reason      string
+	}{
+		{"issuer", "iss", "https://alias.example", `issuer mismatch: got \"https://alias.example\", want CONWAYEDGE_WORKER_ISSUER=\"https://thelab.example\"`},
+		{"audience", "aud", "https://other-edge.example", `audience mismatch: got \"https://other-edge.example\", want CONWAYEDGE_PUBLIC_URL=\"https://edge.example\"`},
+		{"clock behind", "iat", time.Now().Unix() + 10, "JWT is not yet valid; check edge clock"},
+		{"clock ahead", "exp", time.Now().Unix(), "JWT expired; check edge clock or request delay"},
+		{"scope", "scope", "private-scope", "invalid JWT subject or scope"},
+		{"lifetime", "exp", time.Now().Unix() + 61, "invalid JWT lifetime"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			output.Reset()
+			claims := testWorkerClaims()
+			// Keep the expired token's lifetime valid so expiration is diagnosed.
+			claims["iat"] = time.Now().Unix() - 1
+			claims["exp"] = time.Now().Unix() + 59
+			claims[tc.claim] = tc.value
+			token := workerTestToken(claims)
+			response := request(cloud, "GET", "/api/swipes?token=query-secret", "", "Authorization", "Bearer "+token)
+			text := output.String()
+			if response.Code != 401 || response.Body.String() != "unauthorized\n" || !strings.Contains(text, tc.reason) {
+				t.Fatalf("unexpected response or diagnostic: %d %q %s", response.Code, response.Body.String(), text)
+			}
+			for _, secret := range []string{token, "query-secret", "private-scope"} {
+				if strings.Contains(text, secret) {
+					t.Fatalf("authentication log exposed %q", secret)
+				}
+			}
+		})
+	}
+	output.Reset()
+	claims := testWorkerClaims()
+	claims["iss"] = "unverified-issuer-secret"
+	token := workerTestToken(claims)
+	e.workerAuth.keys["test"] = ed25519.NewKeyFromSeed(make([]byte, 32)).Public().(ed25519.PublicKey)
+	response := request(cloud, "GET", "/api/swipes", "", "Authorization", "Bearer "+token)
+	if response.Code != 401 || !strings.Contains(output.String(), "invalid JWT signature") || strings.Contains(output.String(), "unverified-issuer-secret") {
+		t.Fatalf("unverified claims were logged or signature failure was not diagnosed: %s", output)
+	}
+}
+
 func TestWorkerKeyRefreshAndRotation(t *testing.T) {
 	kid, calls, status := "first", 0, 200
 	key := base64.RawURLEncoding.EncodeToString(testWorkerKey.Public().(ed25519.PublicKey))

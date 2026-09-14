@@ -19,6 +19,7 @@ const workerKeyRefresh = 5 * time.Minute
 const workerKeyMaxAge = time.Hour
 const workerKeyRetry = 5 * time.Second
 const workerKeyRetryMax = time.Minute
+const workerClockSkew = int64(5) // Seconds; expiration and the 60-second lifetime remain strict.
 
 type workerAuth struct {
 	issuer, audience   string
@@ -155,37 +156,45 @@ func (a *workerAuth) verify(r *http.Request) bool {
 }
 
 func (a *workerAuth) verifyAt(r *http.Request, now int64) bool {
-	if a == nil {
+	if err := a.validateAt(r, now); err != nil {
+		log.Printf("Worker authentication rejected method=%q path=%q reason=%q", r.Method, r.URL.EscapedPath(), err)
 		return false
+	}
+	return true
+}
+
+func (a *workerAuth) validateAt(r *http.Request, now int64) error {
+	if a == nil {
+		return fmt.Errorf("Worker authentication is not configured")
 	}
 	values := r.Header.Values("Authorization")
 	if len(values) != 1 || len(values[0]) > 4096 || !strings.HasPrefix(values[0], "Bearer ") {
-		return false
+		return fmt.Errorf("missing or invalid Bearer authorization")
 	}
 	parts := strings.Split(strings.TrimPrefix(values[0], "Bearer "), ".")
 	if len(parts) != 3 {
-		return false
+		return fmt.Errorf("malformed JWT")
 	}
 	decode := base64.RawURLEncoding.Strict().DecodeString
 	header, err := decode(parts[0])
 	if err != nil {
-		return false
+		return fmt.Errorf("malformed JWT header encoding")
 	}
 	var metadata struct{ Alg, Typ, Kid string }
 	if decodeJSON(header, &metadata) != nil || metadata.Alg != "EdDSA" || metadata.Typ != "JWT" || metadata.Kid == "" {
-		return false
+		return fmt.Errorf("unsupported or malformed JWT header")
 	}
 	key := a.key(r.Context(), metadata.Kid)
 	if key == nil {
-		return false
+		return fmt.Errorf("signing key unavailable (unknown key ID or expired JWKS cache)")
 	}
 	sig, err := decode(parts[2])
 	if err != nil || !ed25519.Verify(key, []byte(parts[0]+"."+parts[1]), sig) {
-		return false
+		return fmt.Errorf("invalid JWT signature")
 	}
 	payload, err := decode(parts[1])
 	if err != nil {
-		return false
+		return fmt.Errorf("malformed JWT payload encoding")
 	}
 	var claims struct {
 		Issuer    string `json:"iss"`
@@ -197,8 +206,26 @@ func (a *workerAuth) verifyAt(r *http.Request, now int64) bool {
 		NotBefore int64  `json:"nbf"`
 	}
 	if json.Unmarshal(payload, &claims) != nil {
-		return false
+		return fmt.Errorf("malformed JWT claims")
 	}
-	return claims.Issuer == a.issuer && claims.Audience == a.audience && claims.Subject == "edge-sync" && claims.Scope == "edge:api" &&
-		claims.Issued > 0 && claims.Issued <= now && claims.NotBefore <= now && claims.Expires > now && claims.Expires > claims.Issued && claims.Expires-claims.Issued <= 60
+	// Only report claim values after signature verification. Never log the token.
+	if claims.Issuer != a.issuer {
+		return fmt.Errorf("issuer mismatch: got %q, want CONWAYEDGE_WORKER_ISSUER=%q (Worker SITE_URL)", claims.Issuer, a.issuer)
+	}
+	if claims.Audience != a.audience {
+		return fmt.Errorf("audience mismatch: got %q, want CONWAYEDGE_PUBLIC_URL=%q (Worker EDGE_URL)", claims.Audience, a.audience)
+	}
+	if claims.Subject != "edge-sync" || claims.Scope != "edge:api" {
+		return fmt.Errorf("invalid JWT subject or scope")
+	}
+	if claims.Issued <= 0 || claims.Expires <= claims.Issued || claims.Expires-claims.Issued > 60 {
+		return fmt.Errorf("invalid JWT lifetime: iat=%d exp=%d", claims.Issued, claims.Expires)
+	}
+	if claims.Issued > now+workerClockSkew || claims.NotBefore > now+workerClockSkew {
+		return fmt.Errorf("JWT is not yet valid; check edge clock: now=%d iat=%d nbf=%d skew_allowance=%ds", now, claims.Issued, claims.NotBefore, workerClockSkew)
+	}
+	if claims.Expires <= now {
+		return fmt.Errorf("JWT expired; check edge clock or request delay: now=%d exp=%d", now, claims.Expires)
+	}
+	return nil
 }
