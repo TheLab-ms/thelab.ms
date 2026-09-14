@@ -6,6 +6,7 @@ import { memberName, validateMetadata } from './member-metadata.js';
 import { logError } from './logging.js';
 import { armEdge, kickEdge } from './edge-sync.js';
 import { linkFob } from './fob-claims.js';
+import { waiverSignedSQL } from './fob-access.js';
 
 // Checkout, admin edits, and queue work share a stable membership instance.
 // A promise chain is needed because external fetches allow DO requests to interleave.
@@ -110,7 +111,7 @@ export class Membership extends DurableObject {
     }
 
     // Enforce this inside the same lock as checkout, including direct resume calls.
-    if (!await this.env.DB.prepare('SELECT id FROM waivers WHERE member_id = ? LIMIT 1').bind(member.member_id).first()) {
+    if (!await this.env.DB.prepare(`SELECT member_id FROM members WHERE member_id = ? AND ${waiverSignedSQL}`).bind(member.member_id).first()) {
       return `${origin(this.env)}/waiver?signup=1`;
     }
 

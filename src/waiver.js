@@ -126,5 +126,6 @@ export async function waiverRequest(request, env) {
 
 export async function memberWaivers(env, member) {
   const { results } = await env.DB.prepare('SELECT * FROM waivers WHERE member_id = ? ORDER BY id DESC').bind(member.member_id).all();
-  return `<section class="card admin-section"><h2>Signed waivers</h2>${results.length ? results.map(w => `<details><summary>Signature #${w.id} · Version ${w.version} · ${e(new Date(w.created * 1000).toISOString())}</summary><p>${e(w.name)} · ${e(w.email)}</p>${text({ ...w, ...parseWaiver(w.content) })}<ul>${JSON.parse(w.agreements).map(a => `<li>${e(a)}</li>`).join('')}</ul></details>`).join('') : '<p>No linked waiver.</p>'}</section>`;
+  const legacy = member.legacy_waiver_signed ? '<p>Conway recorded a signed waiver. The original signature record was not included in the export; imported waiver eligibility is retained.</p>' : '';
+  return `<section class="card admin-section"><h2>Signed waivers</h2>${legacy}${results.length ? results.map(w => `<details><summary>Signature #${w.id} · Version ${w.version} · ${e(new Date(w.created * 1000).toISOString())}</summary><p>${e(w.name)} · ${e(w.email)}</p>${text({ ...w, ...parseWaiver(w.content) })}<ul>${JSON.parse(w.agreements).map(a => `<li>${e(a)}</li>`).join('')}</ul></details>`).join('') : legacy ? '' : '<p>No linked waiver.</p>'}</section>`;
 }

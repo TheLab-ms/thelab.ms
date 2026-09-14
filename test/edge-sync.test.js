@@ -64,12 +64,12 @@ it('shows the same admin fob status as edge eligibility across Stripe states, wa
   const expected = [], members = [];
   let fob = 100;
   for (const status of [null, 'active', 'trialing', 'past_due', 'canceled']) {
-    for (const signed of [false, true]) {
+    for (const signed of [false, true, 'legacy']) {
       for (const [nonBillable, legacyBilling] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
-        const m = await member(fob++, status, signed);
+        const m = await member(fob++, status, signed === true);
         members.push(m);
-        await env.DB.prepare('UPDATE members SET non_billable = ?, legacy_billing = ? WHERE member_id = ?')
-          .bind(nonBillable, legacyBilling, m.member_id).run();
+        await env.DB.prepare('UPDATE members SET non_billable = ?, legacy_billing = ?, legacy_waiver_signed = ? WHERE member_id = ?')
+          .bind(nonBillable, legacyBilling, Number(signed === 'legacy'), m.member_id).run();
         if (nonBillable || (signed && (legacyBilling || status === 'active'))) expected.push(m.fob_id);
       }
     }
@@ -90,6 +90,24 @@ it('shows the same admin fob status as edge eligibility across Stripe states, wa
     expect(html).toContain(`admin-status--${enabled ? 'active' : 'inactive'}">Fob ${enabled ? 'enabled' : 'disabled'}</span>`);
     if (!m.fob_id) expect(html).toContain('No fob assigned.');
   }
+});
+
+it('synchronizes imported waiver eligibility changes without creating signature records', async () => {
+  const m = await member(7, 'active', false);
+  await edgeCall(configured, 'full');
+  expect(goal.fobs).toEqual([]);
+  await env.DB.prepare('UPDATE members SET legacy_waiver_signed = 1 WHERE member_id = ?').bind(m.member_id).run();
+  await edgeCall(configured, 'changes');
+  expect(goal.fobs).toEqual([7]);
+  expect(await env.DB.prepare('SELECT count(*) AS count FROM waivers').first()).toEqual({ count: 0 });
+  const token = await issueToken(env, '333333333333333333', 'admin');
+  const response = await worker.fetch(new Request(`${env.SITE_URL}/admin/members/${m.member_id}`, {
+    headers: { Cookie: `thelab_admin=${token}` },
+  }), configured);
+  expect(await response.text()).toContain('Conway recorded a signed waiver.');
+  await env.DB.prepare('UPDATE members SET legacy_waiver_signed = 0 WHERE member_id = ?').bind(m.member_id).run();
+  await edgeCall(configured, 'changes');
+  expect(goal.fobs).toEqual([]);
 });
 
 it('saves access checkboxes, records history, and immediately adds or removes fobs', async () => {

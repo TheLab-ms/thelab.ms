@@ -10,7 +10,7 @@ import { eventList } from './event-views.js';
 import { memberName, memberPath } from './member-metadata.js';
 import { memberWaivers } from './waiver.js';
 import { edgeCall, edgeEnabled } from './edge-sync.js';
-import { fobEnabledSQL } from './fob-access.js';
+import { fobEnabledSQL, waiverSignedSQL } from './fob-access.js';
 
 const PAGE_SIZE = 25;
 
@@ -36,7 +36,7 @@ async function list(request, env, csrf) {
   const [count, members] = await env.DB.batch([
     env.DB.prepare(`SELECT COUNT(*) AS total FROM members${filter}`).bind(...values),
     env.DB.prepare(`SELECT member_id, email, waiver_name, discord_user_id, discord_username, discord_email, created, bill_annually, discount_type, non_billable, legacy_billing,
-      EXISTS(SELECT 1 FROM waivers WHERE waivers.member_id = members.member_id) AS waiver_signed,
+      ${waiverSignedSQL} AS waiver_signed,
       name_override, billing_name, stripe_subscription_id, stripe_subscription_state, stripe_synced_at FROM members${filter} ORDER BY created DESC, discord_user_id DESC, member_id DESC LIMIT ? OFFSET ?`).bind(...values, PAGE_SIZE, (current - 1) * PAGE_SIZE),
   ]);
   const total = count.results[0].total, pages = Math.max(1, Math.ceil(total / PAGE_SIZE));

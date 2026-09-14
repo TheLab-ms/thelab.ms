@@ -30,10 +30,16 @@
 		{
 			"binding": "DB",
 			"database_name": "thelab-membership",
-			"migrations_dir": "migrations"
+			"migrations_dir": "migrations",
+			"database_id": "3e4bca68-f6db-4ef5-8e92-c80a38f02aa1"
 		}
 	],
-	"r2_buckets": [{ "binding": "WIKI_BUCKET", "bucket_name": "thelab-wiki" }],
+	"r2_buckets": [
+		{
+			"binding": "WIKI_BUCKET",
+			"bucket_name": "thelab-wiki"
+		}
+	],
 	"durable_objects": {
 		"bindings": [
 			{
@@ -54,12 +60,22 @@
 		{
 			"tag": "v1",
 			"new_sqlite_classes": [
-				"Membership", "EdgeSync"
+				"Membership",
+				"EdgeSync"
 			]
 		},
-		{ "tag": "v2-wiki", "new_sqlite_classes": ["Wiki"] }
+		{
+			"tag": "v2-wiki",
+			"new_sqlite_classes": [
+				"Wiki"
+			]
+		}
 	],
-	"triggers": { "crons": ["0 6,7 * * *"] },
+	"triggers": {
+		"crons": [
+			"0 6,7 * * *"
+		]
+	},
 	"queues": {
 		"producers": [
 			{

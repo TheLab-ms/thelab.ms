@@ -32,22 +32,29 @@ Scope and mapping:
     Imports every member and waiver, plus events and swipes within the inclusive
     90 * 24 hour window ending at --as-of (default: now). Printed counts include
     excluded history, unknown member links, and legacy billing/family/discount
-    cases. Invalid rows, conflicting identities, or missing linked waivers stop
-    generation before the output is written.
+    cases. Invalid rows or conflicting identities stop generation before the
+    output is written. Missing waiver references are counted and kept in notes.
+    They preserve Conway's signed-waiver eligibility as legacy_waiver_signed,
+    without creating signature records or inventing signature evidence.
 
-    PayPal subscriptions become legacy billing. Pending discounts and unsupported
+    Stripe subscription IDs and states are copied from the snapshot. PayPal
+    subscriptions become legacy billing; both use the imported waiver eligibility
+    for fob access. Pending/unsupported discounts and
     metadata, including family relationships, are preserved in notes; the new
     app does not implement Conway's family dependency rules. Review those cases
     before cutover. Waivers link by Conway's explicit member.waiver reference;
     their missing original text/checkbox evidence is labeled, never fabricated.
     Retain Conway's waiver_content database for the original versioned text.
+    Unsupported discounts import as no discount, with their original type and
+    status preserved in notes for review. Invalid or shared Discord IDs are kept
+    in every affected member's notes instead of linking an ambiguous account.
 
     SQL does not call Stripe, Discord, queues, or Durable Objects. After cutover,
     use Full resync in /admin to deliver the imported fob eligibility to edgeproxy.
-    See scripts/import-conway.md for full mappings and count-verification SQL.
 """
 
 import argparse
+from collections import Counter
 import csv
 import hashlib
 import json
@@ -115,10 +122,18 @@ def build_import(directory, as_of):
     events = rows(directory, "member_events", ("id", "created", "member", "event", "details"))
     swipes = rows(directory, "fob_swipes", ("uid", "timestamp", "fob_id", "member", "allowed"))
     cutoff = as_of - 90 * 86400
+    discord_counts = Counter(row["discord_user_id"].strip() for row in members if row["discord_user_id"].strip())
     member_ids, waiver_owners, waiver_ids = {}, {}, set()
+    for row in waivers:
+        source_id = str(integer(row["id"], "waivers.id", minimum=1))
+        if source_id in waiver_ids:
+            raise ValueError(f"Duplicate Conway waiver ID {source_id}")
+        waiver_ids.add(source_id)
     stats = {"members": 0, "waivers": 0, "events": 0, "swipes": 0, "events_outside_window": 0,
              "swipes_outside_window": 0, "orphan_events": 0, "orphan_swipes": 0,
-             "legacy_billing": 0, "family_relationships": 0, "pending_discounts": 0}
+             "legacy_billing": 0, "family_relationships": 0, "pending_discounts": 0,
+             "unsupported_discounts": 0, "missing_waiver_links": 0, "invalid_discord_ids": 0,
+             "shared_discord_links": 0}
 
     # Validate against the real schema, including unique constraints and triggers,
     # before writing any output or contacting D1.
@@ -154,13 +169,17 @@ def build_import(directory, as_of):
         waiver = row["waiver"]
         if waiver:
             waiver = str(integer(waiver, f"member {source_id} waiver", minimum=1))
+        missing_waiver = bool(waiver and waiver not in waiver_ids)
+        if waiver and not missing_waiver:
             if waiver in waiver_owners:
                 raise ValueError(f"Waiver {waiver} is linked to multiple members")
             waiver_owners[waiver] = member_id
 
         discord = row["discord_user_id"].strip() or None
-        if discord and not re.fullmatch(r"[1-9][0-9]{16,19}", discord):
-            raise ValueError(f"Member {source_id}: invalid Discord ID")
+        invalid_discord = bool(discord and not re.fullmatch(r"[1-9][0-9]{16,19}", discord))
+        shared_discord = bool(discord and discord_counts[discord] > 1)
+        if invalid_discord or shared_discord:
+            discord = None
         customer = row["stripe_customer_id"].strip() or None
         subscription = row["stripe_subscription_id"].strip() or None
         if customer and not re.fullmatch(r"cus_[A-Za-z0-9]+", customer):
@@ -169,8 +188,7 @@ def build_import(directory, as_of):
             raise ValueError(f"Member {source_id}: invalid Stripe subscription/customer link")
         pending = row["discount_status"] == "requested"
         discount = row["discount_type"].strip().lower()
-        if not pending and discount not in DISCOUNTS:
-            raise ValueError(f"Member {source_id}: unsupported discount_type")
+        unsupported_discount = discount not in DISCOUNTS
         # Preserve source-only metadata without inventing new application behavior.
         mapped = {"id", "created", "email", "name", "name_override", "admin_notes", "waiver", "fob_id",
                   "non_billable", "bill_annually", "discount_type", "discount_status", "discord_user_id",
@@ -178,8 +196,13 @@ def build_import(directory, as_of):
                   "stripe_subscription_id", "stripe_subscription_state", "identifier", "access_status", "payment_status"}
         legacy = {key: value for key, value in row.items() if key not in mapped and value != ""}
         legacy["id"] = source_id
-        if pending:
+        if pending or unsupported_discount:
             legacy.update(discount_type=row["discount_type"], discount_status=row["discount_status"])
+        if missing_waiver:
+            legacy.update(waiver=row["waiver"], waiver_import_status="missing_from_export")
+        if invalid_discord or shared_discord:
+            legacy.update(discord_user_id=row["discord_user_id"],
+                          discord_import_status="invalid_id" if invalid_discord else "shared_id")
         notes = row["admin_notes"]
         notes += ("\n\n" if notes else "") + "Conway source metadata: " + json.dumps(legacy, ensure_ascii=False)
         legacy_billing = int(bool(row["paypal_subscription_id"].strip()))
@@ -190,7 +213,8 @@ def build_import(directory, as_of):
             "fob_id": (integer(row["fob_id"], "members.fob_id", maximum=4294967295) or None) if row["fob_id"] else None,
             "non_billable": flag(row["non_billable"], "members.non_billable"),
             "legacy_billing": legacy_billing, "bill_annually": flag(row["bill_annually"], "members.bill_annually"),
-            "discount_type": "" if pending else DISCOUNTS[discount],
+            "legacy_waiver_signed": int(missing_waiver),
+            "discount_type": "" if pending or unsupported_discount else DISCOUNTS[discount],
             "discord_user_id": discord, "discord_username": row["discord_username"],
             "discord_email": row["discord_email"].strip().lower(),
             "discord_last_synced": integer(row["discord_last_synced"], "members.discord_last_synced") if row["discord_last_synced"] else None,
@@ -201,10 +225,13 @@ def build_import(directory, as_of):
         stats["legacy_billing"] += legacy_billing
         stats["family_relationships"] += bool(row.get("root_family_member"))
         stats["pending_discounts"] += pending
+        stats["unsupported_discounts"] += unsupported_discount
+        stats["missing_waiver_links"] += missing_waiver
+        stats["invalid_discord_ids"] += invalid_discord
+        stats["shared_discord_links"] += shared_discord
 
     for row in waivers:
         source_id = integer(row["id"], "waivers.id", minimum=1)
-        waiver_ids.add(str(source_id))
         insert("waivers", {
             "id": source_id, "member_id": waiver_owners.get(str(source_id)),
             "version": integer(row["version"], "waivers.version", minimum=1), "content": LEGACY_WAIVER,
@@ -212,8 +239,6 @@ def build_import(directory, as_of):
             "email": row["email"], "agreements": "[]",
         })
         stats["waivers"] += 1
-    if missing := waiver_owners.keys() - waiver_ids:
-        raise ValueError("Missing linked waivers: " + ", ".join(sorted(missing)))
 
     # The empty-target guard makes it safe to remove the synthetic registration
     # and signing events generated above. Keep only actual source history.
