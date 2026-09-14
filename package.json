@@ -6,6 +6,7 @@
     "node": ">=22.12.0"
   },
   "scripts": {
+    "bootstrap": "bash scripts/bootstrap-worker.sh",
     "images:hero": "node scripts/generate-hero-images.js",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
