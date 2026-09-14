@@ -96,13 +96,13 @@
 	"vars": {
 		"SITE_URL": "https://thelab.ms",
 		"KIOSK_HOSTNAME": "space.thelab.ms",
-		"TURNSTILE_SITE_KEY": "",
-		"PRINTER_EDGE_URL": "",
-		"EDGE_URL": "",
+		"TURNSTILE_SITE_KEY": "0x4AAAAAAA-xMVuWzfkR2PKz",
+		"PRINTER_EDGE_URL": "https://edgeproxy.thelab.ms/machines",
+		"EDGE_URL": "https://edgeproxy.thelab.ms",
 		"EDGE_JWT_PUBLIC_KEYS": "[]",
 		"DISCORD_GUILD_ID": "690314626289631294",
 		"DISCORD_ROLE_ID": "1252789548073619458",
-		"DISCORD_ADMIN_ROLE_ID": "",
+		"DISCORD_ADMIN_ROLE_ID": "814154862777335876",
 		"DISCORD_CLIENT_ID": "1121532987486523503"
 	}
 }
