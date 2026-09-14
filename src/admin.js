@@ -29,7 +29,7 @@ export async function finishAdminLogin(env, user, guildMember, destination) {
 
 async function list(request, env, csrf) {
   const { current, query } = memberListParams(new URL(request.url).searchParams);
-  const columns = ['discord_user_id', 'discord_username', 'discord_email', 'billing_name', 'billing_email', 'name_override', 'email', 'waiver_name'];
+  const columns = ['discord_user_id', 'discord_username', 'discord_email', 'billing_name', 'billing_email', 'name_override', 'email', 'waiver_name', 'fob_id'];
   const filter = query ? ` WHERE ${columns.map(column => `${column} LIKE ? ESCAPE '\\'`).join(' OR ')}` : '';
   const values = query ? columns.map(() => `%${query.replace(/[\\%_]/g, '\\$&')}%`) : [];
   const [count, members] = await env.DB.batch([

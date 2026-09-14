@@ -485,6 +485,8 @@ describe('member administration', () => {
     ['billing_name', 'Stripe Billing Person', 'BILLING per'],
     ['billing_email', 'stripe-contact@example.com', 'IPE-contact@'],
     ['name_override', 'Preferred Member Name', 'FERRED mem'],
+    ['fob_id', 4294967295, '4294967295'],
+    ['fob_id', 4294967295, '949672'],
   ])('searches partial values in %s', async (column, value, query) => {
     await seed({ [column]: value });
     const otherID = '555555555555555555';
@@ -620,10 +622,10 @@ describe('member administration', () => {
   });
 
   it.each([
-    ['active', 'sub_member', 'Active — active'],
-    ['trialing', 'sub_member', 'Active — trialing'],
-    ['past_due', 'sub_member', 'Inactive — past_due'],
-    ['canceled', 'sub_member', 'Inactive — canceled'],
+    ['active', 'sub_member', 'Active'],
+    ['trialing', 'sub_member', 'Trialing'],
+    ['past_due', 'sub_member', 'Past due'],
+    ['canceled', 'sub_member', 'Canceled'],
     [null, 'sub_member', 'Unknown — not yet synced'],
     [null, null, 'No subscription'],
   ])('shows stored subscription status and dashboard links: %s / %s', async (state, subscriptionID, label) => {
@@ -631,7 +633,7 @@ describe('member administration', () => {
     await authenticate();
     for (const path of ['/admin', `/admin/members/${id}`]) {
       const html = await (await api(path, { headers: { Cookie: cookie } })).text();
-      expect(html).toContain(label);
+      expect(html).toContain(`>${label}</span>`);
       expect(html).toContain('1970-01-01 00:16:40 UTC');
       if (subscriptionID) expect(html).toContain('href="https://dashboard.stripe.com/test/subscriptions/sub_member" target="_blank" rel="noopener noreferrer"');
       else expect(html).not.toContain('dashboard.stripe.com');
