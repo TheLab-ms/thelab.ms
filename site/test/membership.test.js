@@ -139,6 +139,144 @@ describe('Membership', () => {
     vi.restoreAllMocks();
   });
 
+  describe('GitHub onboarding', () => {
+    const teamPath = '/orgs/TheLab-ms/teams/members/memberships/octomaker';
+    const mockGithub = (path, data, method = 'GET', status = 200) =>
+      fetchMock.get('https://api.github.com').intercept({ path, method }).reply(status, data);
+
+    async function begin() {
+      const session = await loginCookie();
+      const response = await api('/github', { headers: { Cookie: session } });
+      expect(response.status).toBe(303);
+      const target = new URL(response.headers.get('Location'));
+      expect(target.origin + target.pathname).toBe('https://github.com/login/oauth/authorize');
+      expect(target.searchParams.get('scope')).toBe('');
+      expect(target.searchParams.get('code_challenge_method')).toBe('S256');
+      const browser = response.headers.get('Set-Cookie').split(';')[0];
+      return { target, browser, cookie: `${session}; ${browser}`,
+        path: `/login/github/callback?state=${target.searchParams.get('state')}&code=github-code` };
+    }
+
+    function identity(flow, accountID = 12345) {
+      fetchMock.get('https://github.com').intercept({ path: '/login/oauth/access_token', method: 'POST' })
+        .reply(200, async options => {
+          const form = new URLSearchParams(options.body);
+          expect(form.get('client_secret')).toBe(env.GITHUB_CLIENT_SECRET);
+          expect(form.get('redirect_uri')).toBe(`${env.SITE_URL}/login/github/callback`);
+          expect(form.get('code')).toBe('github-code');
+          const verifier = flow.browser.split('=')[1];
+          expect(form.get('code_verifier')).toBe(verifier);
+          const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+          expect(flow.target.searchParams.get('code_challenge')).toBe(btoa(String.fromCharCode(...new Uint8Array(digest))).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', ''));
+          return { access_token: 'github-user-token', token_type: 'bearer' };
+        });
+      mockGithub('/user', options => {
+        expect(options.headers.Authorization).toBe('Bearer github-user-token');
+        return { id: accountID, login: 'octomaker', type: 'User' };
+      });
+    }
+
+    it('returns unsigned members through Discord login to GitHub onboarding', async () => {
+      await seed({ stripe_subscription_state: 'active' });
+      const response = await api('/github');
+      const target = new URL(response.headers.get('Location'));
+      expect(target.hostname).toBe('discord.com');
+      const state = target.searchParams.get('state');
+      expect(await verifyToken(env, state, 'oauth')).toMatchObject({ purpose: 'member', return_to: '/github' });
+      oauthMock();
+      const callback = await api(`/login/discord/callback?state=${state}&code=test-code`, {
+        headers: { Cookie: response.headers.get('Set-Cookie').split(';')[0] },
+      });
+      expect(callback.status).toBe(303);
+      expect(callback.headers.get('Location')).toBe(`${env.SITE_URL}/github`);
+    });
+
+    it.each([{ stripe_subscription_state: 'active' }, { stripe_subscription_state: 'trialing' }, { non_billable: 1 }, { legacy_billing: 1 }])
+      ('allows eligible members: %j', async fields => { await seed(fields); await begin(); });
+
+    it('rejects inactive members and missing configuration before GitHub OAuth', async () => {
+      await seed({ stripe_subscription_state: 'canceled' });
+      expect((await api('/github', { headers: { Cookie: await loginCookie() } })).status).toBe(403);
+      expect((await api('/github', {}, { ...env, GITHUB_TEAM_TOKEN: '' })).status).toBe(503);
+    });
+
+    it.each(['active', 'pending'])('saves identity and grants %s team membership', async state => {
+      await seed({ stripe_subscription_state: 'active' });
+      const flow = await begin();
+      identity(flow);
+      mockGithub(teamPath, {}, 'GET', 404);
+      mockGithub(teamPath, options => {
+        expect(options.headers.Authorization).toBe(`Bearer ${env.GITHUB_TEAM_TOKEN}`);
+        expect(JSON.parse(options.body)).toEqual({ role: 'member' });
+        return { state, role: 'member' };
+      }, 'PUT');
+      const response = await api(flow.path, { headers: { Cookie: flow.cookie } });
+      expect(response.status).toBe(state === 'active' ? 303 : 200);
+      if (state === 'active') expect(response.headers.get('Location')).toBe('https://github.com/TheLab-ms/wiki/wiki');
+      else {
+        const html = await response.text();
+        expect(html).toContain('https://github.com/orgs/TheLab-ms/invitation');
+        expect(html).toContain('https://github.com/TheLab-ms/wiki/wiki');
+      }
+      expect(response.headers.get('Set-Cookie')).toContain('thelab_github_oauth=;');
+      expect(await readMember()).toMatchObject({ github_user_id: '12345', github_username: 'octomaker' });
+      expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM member_events WHERE event_type = 'GitHubAccountChanged'").first()).toEqual({ count: 1 });
+    });
+
+    it('preserves maintainers and retries a failed team grant with the saved account', async () => {
+      await seed({ non_billable: 1 });
+      const first = await begin();
+      identity(first);
+      mockGithub(teamPath, {}, 'GET', 404);
+      mockGithub(teamPath, {}, 'PUT', 503);
+      expect((await api(first.path, { headers: { Cookie: first.cookie } })).status).toBe(502);
+      expect((await readMember()).github_user_id).toBe('12345');
+      const retry = await begin();
+      identity(retry);
+      mockGithub(teamPath, { state: 'active', role: 'maintainer' });
+      expect((await api(retry.path, { headers: { Cookie: retry.cookie } })).status).toBe(303);
+      expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM member_events WHERE event_type = 'GitHubAccountChanged'").first()).toEqual({ count: 1 });
+    });
+
+    it.each(['missing cookie', 'changed session', 'revoked session', 'expired', 'bad state', 'duplicate state', 'denied', 'inactive'])
+      ('rejects %s before contacting GitHub', async scenario => {
+        await seed({ stripe_subscription_state: 'active' });
+        const flow = await begin();
+        let path = flow.path, cookie = flow.cookie;
+        if (scenario === 'missing cookie') cookie = await loginCookie();
+        if (scenario === 'changed session') cookie = `${await loginCookie()}; ${flow.browser}`;
+        if (scenario === 'revoked session') await env.DB.prepare('UPDATE members SET auth_version = auth_version + 1').run();
+        if (scenario === 'expired') vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 601000);
+        if (scenario === 'bad state') path = '/login/github/callback?state=invalid&code=test';
+        if (scenario === 'duplicate state') path += '&state=another';
+        if (scenario === 'denied') path += '&error=access_denied';
+        if (scenario === 'inactive') await env.DB.prepare("UPDATE members SET stripe_subscription_state = 'canceled'").run();
+        const response = await api(path, { headers: { Cookie: cookie } });
+        expect(response.status).toBe(scenario === 'inactive' ? 403 : 400);
+        expect(response.headers.get('Set-Cookie')).toContain('Max-Age=0');
+        expect((await readMember()).github_user_id).toBeNull();
+      });
+
+    it.each(['another member', 'different account'])('rejects linking an account belonging to %s', async scenario => {
+      await seed({ non_billable: 1, ...(scenario === 'different account' ? { github_user_id: '999' } : {}) });
+      if (scenario === 'another member') await env.DB.prepare("INSERT INTO members (github_user_id) VALUES ('12345')").run();
+      const flow = await begin();
+      identity(flow);
+      expect((await api(flow.path, { headers: { Cookie: flow.cookie } })).status).toBe(409);
+      expect((await readMember()).github_user_id).toBe(scenario === 'different account' ? '999' : null);
+    });
+
+    it('rechecks membership authorization inside the coordinator', async () => {
+      await seed({ non_billable: 1 });
+      const member = await readMember();
+      const input = { user: { id: '12345', username: 'octomaker' }, discord_user_id: id, auth_version: member.auth_version };
+      await env.DB.prepare('UPDATE members SET auth_version = auth_version + 1').run();
+      await expect(coordinated(env, member.member_id, 'linkGithub', input)).rejects.toMatchObject({ status: 401 });
+      await env.DB.prepare('UPDATE members SET auth_version = auth_version - 1, non_billable = 0').run();
+      await expect(coordinated(env, member.member_id, 'linkGithub', input)).rejects.toMatchObject({ status: 403 });
+    });
+  });
+
   describe('JWT authentication', () => {
     it.each(['admin', 'member', 'oauth'])('validates %s JWT signatures, audiences, issuers, and expiry', async audience => {
       const subject = audience === 'oauth' ? await hash('browser') : id;

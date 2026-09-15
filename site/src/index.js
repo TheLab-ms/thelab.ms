@@ -4,6 +4,7 @@ import {
   hash, json, logError, opaque, origin, randomToken, redirect, requestContext,
   finishLogin, issueToken, loginDestination, memberToken, signedInMember, startLogin,
   verifyOAuthState, verifyToken, discord, discordIdentity, edgeJWKS, provider, stripe, verifyStripe,
+  githubConfigured, githubIdentity, requireGithubMember, startGithub,
   discounts, fobEnabledSQL, grantsMembership, memberName, memberPath, waiverSignedSQL,
   MAX_SEARCH_LENGTH, defaultMemberFilters, memberFilters, memberListParams, memberListURL,
   eventListParams, eventListURL, eventTypes, queryEvents, recentMemberEvents,
@@ -97,6 +98,7 @@ export function editor(member, fields, csrf, env, message = '', status = 200, ev
 	const account = [
 		['Member email', member.email], ['Waiver name', member.waiver_name],
 		['Discord username', member.discord_username], ['Discord email', member.discord_email],
+		['GitHub account ID', member.github_user_id], ['GitHub username', member.github_username],
 		['Billing name (Stripe)', member.billing_name], ['Billing email (Stripe)', member.billing_email],
 	];
 	const dates = [['Registered', member.created], ['Stripe last synced', member.stripe_synced_at], ['Discord last synced', member.discord_last_synced]];
@@ -546,6 +548,47 @@ export function printerAccess(_request, env) {
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// GitHub member onboarding
+// ────────────────────────────────────────────────────────────────────────
+
+const wikiURL = 'https://github.com/TheLab-ms/wiki/wiki';
+
+async function githubOnboarding(request, env) {
+  githubConfigured(env);
+  const member = await signedInMember(request, env);
+  if (!member) return startLogin(request, env, 'member');
+  requireGithubMember(member);
+  return startGithub(request, env, member);
+}
+
+async function githubCallback(request, env) {
+  githubConfigured(env);
+  const params = new URL(request.url).searchParams;
+  const browser = cookie(request, 'thelab_github_oauth');
+  const pending = await verifyToken(env, params.get('state'), 'oauth');
+  const member = await signedInMember(request, env);
+  if (params.getAll('state').length !== 1 || !opaque.test(browser || '') || !pending || pending.purpose !== 'github'
+    || pending.sub !== await hash(browser) || !member || pending.member_id !== member.member_id
+    || pending.session !== await hash(cookie(request, 'thelab_member'))) {
+    throw new HttpError(400, 'Invalid or expired GitHub sign-in. Please start again at /github.');
+  }
+  requireGithubMember(member);
+  const code = params.get('code');
+  if (params.has('error') || params.getAll('code').length !== 1 || !code || code.length > 2048 || /[^\x21-\x7e]/.test(code)) {
+    throw new HttpError(400, 'GitHub sign-in was not authorized. Please start again at /github.');
+  }
+  const user = await githubIdentity(env, code, browser);
+  const result = await coordinated(env, member.member_id, 'linkGithub', {
+    user, discord_user_id: member.discord_user_id, auth_version: member.auth_version,
+  });
+  const response = result.state === 'active' ? redirect(wikiURL) : fobPage('Accept your GitHub invitation',
+    `<p>Your GitHub account <strong>${e(user.username)}</strong> is linked. Accept the organization invitation to join the members team and access the wiki.</p>
+    <p><a class="btn btn-primary" href="https://github.com/orgs/${e(env.GITHUB_ORG)}/invitation">Accept invitation</a></p><p>Then <a href="${wikiURL}">open the wiki</a>.</p>`);
+  response.headers.append('Set-Cookie', cookieHeader(env, 'thelab_github_oauth', '', 0));
+  return response;
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // Public routes, payments, and Worker entrypoints
 // ────────────────────────────────────────────────────────────────────────
 
@@ -668,6 +711,8 @@ const routes = new Map([
   ['/signup', ['GET', signup]],
   ['/waiver', ['GET, POST', waiverRequest]],
   ['/login/discord/callback', ['GET', callback]],
+  ['/github', ['GET', githubOnboarding]],
+  ['/login/github/callback', ['GET', githubCallback]],
   ['/payment/success', ['GET', success]],
   ['/payment/resume', ['GET', resume]],
   ['/machines', ['GET', printerAccess]],
@@ -706,6 +751,11 @@ export default {
       logError('request.failed', error, context, env);
       if (path === '/webhooks/stripe') return json({ error: 'Webhook could not be accepted.' }, error instanceof HttpError ? error.status : 500);
       const response = errorPage(error);
+      if (path === '/github' || path === '/login/github/callback') {
+        const retry = fobPage('GitHub onboarding', `<p role="alert">${e(error instanceof HttpError ? error.message : 'GitHub onboarding failed. Please try again.')}</p><p><a href="/github">Try again</a> · <a href="/signup">Manage billing</a></p>`);
+        retry.headers.append('Set-Cookie', `thelab_github_oauth=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${request.url.startsWith('https:') ? '; Secure' : ''}`);
+        return new Response(retry.body, { status: error instanceof HttpError ? error.status : 500, headers: retry.headers });
+      }
       if (path === '/login/discord/callback') {
         // Clearing an OAuth cookie must still work when SITE_URL itself is invalid.
         response.headers.append('Set-Cookie', `thelab_oauth=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${request.url.startsWith('https:') ? '; Secure' : ''}`);

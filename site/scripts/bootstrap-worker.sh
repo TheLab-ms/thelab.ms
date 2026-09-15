@@ -53,7 +53,7 @@ const { rawConfig: config } = readConfig({ config: configPath });
 const db = config.d1_databases.find(db => db.binding === 'DB');
 const generated = ['AUTH_SECRET', 'EDGE_JWT_PRIVATE_KEY'];
 const providers = ['TURNSTILE_SECRET_KEY', 'DISCORD_CLIENT_SECRET', 'DISCORD_BOT_TOKEN',
-  'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET'];
+  'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET', 'GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET', 'GITHUB_TEAM_TOKEN'];
 const readJSON = file => JSON.parse(fs.readFileSync(file, 'utf8'));
 const saveJSON = (file, value) => {
   fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 });
