@@ -84,9 +84,9 @@ async function history(request, env, csrf, member) {
 
 export async function adminRequest(request, env, context = requestContext(request)) {
   const url = new URL(request.url), path = url.pathname;
-  const match = path.match(/^\/admin\/members\/([1-9][0-9]{16,19}|[a-f0-9]{32})(\/events|\/checkout)?$/);
+  const match = path.match(/^\/admin\/members\/([1-9][0-9]{16,19}|[a-f0-9]{32})(\/events|\/checkout|\/delete)?$/);
   const creating = path === '/admin/members/new';
-  const methods = path === '/admin' || path === '/admin/' || path === '/admin/events' || match?.[2] === '/events' ? ['GET'] : path === '/admin/logout' || path === '/admin/edge/resync' || match?.[2] === '/checkout' ? ['POST'] : match || creating ? ['GET', 'POST'] : [];
+  const methods = path === '/admin' || path === '/admin/' || path === '/admin/events' || match?.[2] === '/events' ? ['GET'] : path === '/admin/logout' || path === '/admin/edge/resync' || ['/checkout', '/delete'].includes(match?.[2]) ? ['POST'] : match || creating ? ['GET', 'POST'] : [];
   if (!methods.length) {
     logError('admin.rejected', new HttpError(404, 'Admin page not found.'), context, env);
     return page('Not found', '<p>This admin page does not exist. <a href="/admin">Return to members</a>.</p>', null, 404);
@@ -129,6 +129,10 @@ export async function adminRequest(request, env, context = requestContext(reques
     const member = await env.DB.prepare(`SELECT *, COALESCE(${fobEnabledSQL}, 0) AS fob_enabled
       FROM members WHERE ${match[1].length === 32 ? 'member_id' : 'discord_user_id'} = ?`).bind(match[1]).first();
     if (!member) throw new HttpError(404, 'Member not found.');
+    if (match[2] === '/delete') {
+      await coordinated(env, member.member_id, 'deleteMember');
+      return redirect('/admin');
+    }
     if (match[2] === '/events') return await history(request, env, csrf, member);
     if (match[2] === '/checkout') {
       let checkoutURL = '', message = 'Checkout link ready to share.', status = 200;

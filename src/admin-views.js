@@ -11,7 +11,7 @@ export function page(title, content, csrf, status = 200, env = {}) {
 		headers: {
 			// no-referrer can turn the Origin of a native form POST into "null".
 			'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Referrer-Policy': 'same-origin',
-			'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+			'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
 		},
 	});
 }
@@ -108,7 +108,8 @@ export function editor(member, fields, csrf, env, message = '', status = 200, ev
     ${input('discord_user_id', 'Discord ID', f.discord_user_id, 20, 'Changing this ID transfers membership to that Discord account. Its email appears after it signs in. Waiver-only members can leave it blank.', Boolean(member.discord_user_id))}
     ${input('stripe_customer_id', 'Stripe customer ID', f.stripe_customer_id, 255)}
     ${input('stripe_subscription_id', 'Stripe subscription ID', f.stripe_subscription_id, 255, 'Must belong to the customer above. Stripe sync selects the current membership subscription and may replace this ID.')}
-    </div></details><div class="admin-actions"><button class="btn btn-primary" type="submit">Save changes</button><a href="${e(memberPath(member))}">Reload member</a></div></form>
+    </div></details><div class="admin-actions"><button class="btn btn-primary" type="submit">Save changes</button><a href="${e(memberPath(member))}">Reload member</a><button class="btn btn-outline admin-delete" type="submit" form="delete-member" disabled>Delete member</button></div></form>
     <aside class="admin-section admin-account" aria-labelledby="account-details"><h2 id="account-details">Account details</h2><p class="admin-help">Read-only · Updated from Discord sign-in and Stripe sync.</p><dl class="admin-account-fields">${account.map(([label, value]) => `<div><dt>${e(label)}</dt><dd>${e(value || '—')}</dd></div>`).join('')}</dl><dl class="admin-account-dates">${dates.map(([label, value]) => `<div><dt>${e(label)}</dt><dd>${timestamp(value)}</dd></div>`).join('')}</dl></aside></div>
-    <form id="generate-checkout" method="post" action="${e(memberPath(member))}/checkout"><input type="hidden" name="csrf" value="${e(csrf)}"></form>${waivers}${recentHistory(member, events)}`, csrf, status, env);
+    <form id="generate-checkout" method="post" action="${e(memberPath(member))}/checkout"><input type="hidden" name="csrf" value="${e(csrf)}"></form>
+    <form id="delete-member" method="post" action="/admin/members/${e(member.member_id)}/delete" data-confirm="${e(`Delete ${memberName(member)}? This cannot be undone. Existing Stripe subscriptions must be canceled separately in Stripe.`)}"><input type="hidden" name="csrf" value="${e(csrf)}"></form><script src="/admin.js" defer></script><noscript><p class="admin-help">Enable JavaScript to delete a member with confirmation.</p></noscript>${waivers}${recentHistory(member, events)}`, csrf, status, env);
 }

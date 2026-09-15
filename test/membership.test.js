@@ -431,16 +431,66 @@ describe('member administration', () => {
     expect((await env.DB.prepare('SELECT COUNT(*) AS count FROM members').first()).count).toBe(1);
   });
 
-  it('protects creation and checkout generation with admin authentication, CSRF, and POST-only checkout', async () => {
+  it('protects member actions with admin authentication, CSRF, and POST-only checkout/deletion', async () => {
     await seed(); await authenticate();
-    for (const path of ['/admin/members/new', `/admin/members/${id}/checkout`]) {
+    for (const path of ['/admin/members/new', `/admin/members/${id}/checkout`, `/admin/members/${id}/delete`]) {
       expect((await adminPost(path, newFields(), { Cookie: '' })).status).toBe(303);
       expect((await adminPost(path, { ...newFields(), csrf: 'wrong' })).status).toBe(403);
       expect((await adminPost(path, newFields(), { Origin: 'https://other.example' })).status).toBe(403);
       expect((await adminPost(path, newFields(), { Cookie: `thelab_admin=${await memberToken(env, await readMember())}` })).status).toBe(303);
     }
     expect((await api(`/admin/members/${id}/checkout`, { headers: { Cookie: cookie } })).status).toBe(405);
+    expect((await api(`/admin/members/${id}/delete`, { headers: { Cookie: cookie } })).status).toBe(405);
+    expect(await readMember()).not.toBeNull();
     expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it('deletes a member, revokes their session and role, and retains waiver and fob history', async () => {
+    await seed({ fob_id: 123, non_billable: 1 }); await authenticate();
+    const member = await readMember(), memberCookie = await loginCookie();
+    await seedWaiver(member);
+    const page = await api(`/admin/members/${id}`, { headers: { Cookie: cookie } });
+    expect(page.headers.get('Content-Security-Policy')).toContain("script-src 'self'");
+    const html = await page.text();
+    expect(html).toContain(`action="/admin/members/${member.member_id}/delete"`);
+    expect(html).toContain('form="delete-member" disabled>Delete member');
+    expect(html).toContain('<script src="/admin.js" defer></script>');
+    mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, {}, 'DELETE', 204);
+    const revision = await env.DB.prepare('SELECT revision FROM edge_changes').first();
+    const response = await adminPost(`/admin/members/${member.member_id}/delete`);
+    expect(response.status).toBe(303);
+    expect(response.headers.get('Location')).toBe('/admin');
+    expect(await readMember()).toBeNull();
+    expect(await env.DB.prepare('SELECT member_id, name FROM waivers').first()).toEqual({ member_id: null, name: 'Test Maker' });
+    const assignment = await env.DB.prepare('SELECT member_id, ended FROM fob_assignments WHERE fob = 123').first();
+    expect(assignment.member_id).toBeNull();
+    expect(assignment.ended).not.toBeNull();
+    expect((await env.DB.prepare('SELECT revision FROM edge_changes').first()).revision).toBeGreaterThan(revision.revision);
+    const events = (await queryEvents(env)).events;
+    expect(events.length).toBeGreaterThan(0);
+    expect(events.every(event => event.member_id === null)).toBe(true);
+    expect((await api('/payment/resume', { headers: { Cookie: memberCookie } })).headers.get('Location')).toContain('discord.com/oauth2/authorize');
+    await expect(coordinated(env, member.member_id, 'sync')).resolves.toBeUndefined();
+  });
+
+  it('deletes an unlinked member without provider calls', async () => {
+    await authenticate();
+    const created = await adminPost('/admin/members/new', newFields());
+    const path = created.headers.get('Location').split('?')[0];
+    expect((await adminPost(`${path}/delete`)).status).toBe(303);
+    expect((await env.DB.prepare('SELECT COUNT(*) AS count FROM members').first()).count).toBe(0);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it('keeps the member when role removal fails and allows retry if they have left Discord', async () => {
+    await seed(); await authenticate();
+    const path = `/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`;
+    mockDiscord(path, {}, 'DELETE', 403);
+    expect((await adminPost(`/admin/members/${id}/delete`)).status).toBe(502);
+    expect(await readMember()).not.toBeNull();
+    mockDiscord(path, {}, 'DELETE', 404);
+    expect((await adminPost(`/admin/members/${id}/delete`)).status).toBe(303);
+    expect(await readMember()).toBeNull();
   });
 
   it('generates and reuses a shareable checkout without Discord or a waiver, then syncs payment to that member', async () => {
@@ -540,6 +590,18 @@ describe('member administration', () => {
       return { id: 'cs_replacement', url: 'https://checkout.stripe.com/c/pay/replacement' };
     }, { method: 'POST' });
     expect(await (await adminPost(`/admin/members/${id}/checkout`)).text()).toContain('/pay/replacement');
+  });
+
+  it('expires an open checkout link before deleting the member', async () => {
+    await seed(); await authenticate();
+    mockSubs(); mockPrice(); mockCheckoutEmail();
+    mockStripe('/checkout/sessions', { id: 'cs_shared', url: 'https://checkout.stripe.com/c/pay/shared' }, { method: 'POST' });
+    expect((await adminPost(`/admin/members/${id}/checkout`)).status).toBe(200);
+    mockStripe('/checkout/sessions/cs_shared', { id: 'cs_shared', status: 'open' });
+    mockStripe('/checkout/sessions/cs_shared/expire', { status: 'expired' }, { method: 'POST' });
+    mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, {}, 'DELETE', 204);
+    expect((await adminPost(`/admin/members/${id}/delete`)).status).toBe(303);
+    expect(await readMember()).toBeNull();
   });
 
   it('records committed admin edits once and leaves history intact on stale or invalid saves', async () => {

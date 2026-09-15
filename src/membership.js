@@ -34,6 +34,7 @@ export class Membership extends DurableObject {
           case 'refreshIdentity': value = await this.refreshIdentity(member, input.user); break;
           case 'sync': await this.sync(member, input); break;
           case 'updateMetadata': await this.updateMetadata(member, input); break;
+          case 'deleteMember': await this.deleteMember(member); break;
           case 'linkFob': await linkFob(this.env, member, input); break;
           default: throw new HttpError(404, 'Unknown membership operation.');
         }
@@ -204,6 +205,20 @@ export class Membership extends DurableObject {
       if (current.status !== 'expired') throw error;
     }
     await this.ctx.storage.delete('checkout');
+  }
+
+  async deleteMember(member) {
+    const prior = await this.loadTrackedCheckout();
+    if (prior?.session.status === 'open') await this.expireTrackedCheckout(prior.session);
+    if (member.discord_user_id) {
+      try { await discord(this.env, `/guilds/${this.env.DISCORD_GUILD_ID}/members/${member.discord_user_id}/roles/${this.env.DISCORD_ROLE_ID}`, 'DELETE'); }
+      catch (error) { if (error.providerStatus !== 404) throw error; }
+    }
+    await armEdge(this.env);
+    // Foreign keys retain waivers/history; triggers close fob assignments and
+    // mark the access cache for synchronization.
+    await this.env.DB.prepare('DELETE FROM members WHERE member_id = ?').bind(member.member_id).run();
+    await kickEdge(this.env);
   }
 
   async updateMetadata(member, { fields }) {
