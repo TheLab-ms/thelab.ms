@@ -12,7 +12,7 @@ import { bindFob } from './keyfob.js';
 import { cleanupFobClaims, fobClaimStatus } from './fob-claims.js';
 export { Membership } from './membership.js';
 export { EdgeSync } from './edge-sync.js';
-import { edgeCall, edgeEnabled, nightlyDate } from './edge-sync.js';
+import { edgeCall, edgeEnabled, nightlyDate, swipeWebhook } from './edge-sync.js';
 
 const events = new Set([
   'customer.updated',
@@ -132,6 +132,7 @@ const routes = new Map([
   ['/keyfob/bind', ['GET, POST', bindFob]],
   ['/keyfob/status', ['GET', fobClaimStatus]],
   ['/webhooks/stripe', ['POST', webhook]],
+  ['/webhooks/edge/swipes', ['POST', swipeWebhook]],
   ['/admin/login', ['GET', (request, env) => signup(request, env, true)]],
 ]);
 

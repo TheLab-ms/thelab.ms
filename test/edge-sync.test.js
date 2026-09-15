@@ -22,19 +22,34 @@ beforeEach(async () => {
     expect(init.redirect).toBe('manual');
     expect(init.headers.Authorization).toMatch(/^Bearer ey/);
     expect(init.headers['CF-Access-Client-Secret']).toBeUndefined();
-    if (String(url).endsWith('/api/swipes')) return Response.json(swipes);
     expect(String(url)).toBe('https://edge.example/api/goal');
     if (init.method === 'GET') return goal ? Response.json(goal) : new Response(null, { status: 503 });
     const body = JSON.parse(init.body); writes.push({ method: init.method, ...body });
     if (init.method === 'PUT') goal = body;
     else {
       expect(body.base_version).toBe(goal.version);
-      goal = { version: body.version, fobs: [...goal.fobs.filter(id => !body.remove.includes(id)), ...body.add].sort((a, b) => a - b) };
+      goal = { ...goal, version: body.version, fobs: [...goal.fobs.filter(id => !body.remove.includes(id)), ...body.add].sort((a, b) => a - b) };
     }
     return new Response(null, { status: 204 });
   });
 });
 afterEach(() => vi.restoreAllMocks());
+
+async function signedRequest(text = JSON.stringify(swipes), options = {}) {
+  if (!goal) await edgeCall(configured, 'changes');
+  const timestamp = String(options.timestamp ?? Math.floor(Date.now() / 1000));
+  const secret = options.key || goal.event_signing_key;
+  const key = await crypto.subtle.importKey('raw', Uint8Array.from(secret.match(/../g), byte => parseInt(byte, 16)), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const signature = Array.from(new Uint8Array(await crypto.subtle.sign('HMAC', key,
+    new TextEncoder().encode(`POST\n/webhooks/edge/swipes\n${timestamp}\n${text}`))), n => n.toString(16).padStart(2, '0')).join('');
+  return new Request(`${env.SITE_URL}/webhooks/edge/swipes`, { method: 'POST', body: text,
+    headers: { 'X-Edge-Timestamp': timestamp, 'X-Edge-Signature': signature, 'Content-Type': 'application/json' } });
+}
+
+async function pushSwipes() {
+  const response = await worker.fetch(await signedRequest(), configured);
+  if (response.status !== 204) throw Object.assign(new Error('Swipe push failed'), { status: response.status });
+}
 
 async function member(fob = 7, status = 'active', waiver = true) {
   const row = await env.DB.prepare('INSERT INTO members(fob_id, stripe_subscription_state) VALUES (?, ?) RETURNING *').bind(fob, status).first();
@@ -203,7 +218,7 @@ it('recovers ambiguous delivery from edge state and keeps later revisions pendin
   expect(goal.version).toBeGreaterThan(writes[1].version);
 });
 
-it('deduplicates swipe backups and uses ownership at swipe time after reassignment', async () => {
+it('deduplicates pushed swipes and uses ownership at swipe time after reassignment', async () => {
   const first = await member();
   await env.DB.prepare('UPDATE fob_assignments SET started = 1000 WHERE member_id = ?').bind(first.member_id).run();
   await env.DB.prepare('UPDATE members SET fob_id = NULL WHERE member_id = ?').bind(first.member_id).run();
@@ -212,8 +227,8 @@ it('deduplicates swipe backups and uses ownership at swipe time after reassignme
   await env.DB.prepare('UPDATE fob_assignments SET started = 2000 WHERE member_id = ?').bind(second.member_id).run();
   swipes = [1500, 2500].map((time, i) => ({ id: `swipe-${i}`, time: new Date(time * 1000).toISOString(), fob: 7, allowed: true, controller: '192.168.1.2' }));
   swipes.push({ ...swipes[0], id: 'unknown', fob: 99, allowed: false });
-  await edgeCall(configured, 'swipes');
-  await edgeCall(configured, 'swipes');
+  await pushSwipes();
+  await pushSwipes();
   const { results } = await env.DB.prepare('SELECT id, member_id FROM edge_swipes ORDER BY id').all();
   expect(results).toEqual([{ id: 'swipe-0', member_id: first.member_id }, { id: 'swipe-1', member_id: second.member_id }, { id: 'unknown', member_id: null }]);
   expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM member_events WHERE event_type = 'FobSwipe'").first()).n).toBe(3);
@@ -223,7 +238,7 @@ it('renders cached swipes across admin pages without contacting edgeproxy', asyn
   const m = await member();
   await env.DB.prepare('UPDATE fob_assignments SET started = 1000 WHERE member_id = ?').bind(m.member_id).run();
   swipes = [{ id: 'cached', fob: 7, allowed: true, controller: '192.168.1.2', time: new Date().toISOString() }];
-  await edgeCall(configured, 'swipes');
+  await pushSwipes();
   const token = await issueToken(env, '333333333333333333', 'admin');
   const execute = vi.fn(async () => ({ ok: false, error: 'Edgeproxy is unavailable.' }));
   const uiEnv = { ...configured, EDGE_SYNC: { idFromName: () => 'edge', get: () => ({ execute }) } };
@@ -257,7 +272,8 @@ it('protects manual full sync with an admin session and CSRF; sends a full snaps
   swipes = [{ id: 'manual', fob: 7, allowed: true, controller: '192.168.1.2', time: new Date().toISOString() }];
   expect((await worker.fetch(request(csrf), configured)).status).toBe(200);
   expect(writes[0]).toMatchObject({ method: 'PUT', fobs: [7] });
-  expect(await env.DB.prepare('SELECT id FROM edge_swipes').all()).toMatchObject({ results: [{ id: 'manual' }] });
+  expect(await env.DB.prepare('SELECT id FROM edge_swipes').all()).toMatchObject({ results: [] });
+  expect(fetchSpy.mock.calls.some(([url]) => String(url).endsWith('/api/swipes'))).toBe(false);
   expect(fetchSpy.mock.calls.some(([url]) => String(url).startsWith('https://discord.com/'))).toBe(false);
   const invalid = request(csrf);
   invalid.headers.set('Cookie', `thelab_admin=${await issueToken(env, '333333333333333333', 'member')}`);
@@ -316,7 +332,7 @@ it('preserves rejected admin edits without refreshing swipes', async () => {
   expect((await env.DB.prepare('SELECT notes FROM members WHERE member_id = ?').bind(m.member_id).first()).notes).toBe('');
 });
 
-it('backs up nightly once per Central date, including the repeated fall-back hour', async () => {
+it('syncs goals nightly once per Central date, including the repeated fall-back hour', async () => {
   expect(nightlyDate(Date.parse('2026-01-15T07:00:00Z'))).toBe('2026-01-15');
   expect(nightlyDate(Date.parse('2026-07-15T06:00:00Z'))).toBe('2026-07-15');
   expect(nightlyDate(Date.parse('2026-07-15T07:00:00Z'))).toBeNull();
@@ -325,25 +341,25 @@ it('backs up nightly once per Central date, including the repeated fall-back hou
     await worker.scheduled({ scheduledTime: Date.parse(time) }, configured);
   }
   expect(writes).toHaveLength(1);
-  expect(fetchSpy.mock.calls.filter(([url]) => String(url).endsWith('/api/swipes'))).toHaveLength(1);
+  expect(fetchSpy.mock.calls.filter(([url]) => String(url).endsWith('/api/swipes'))).toHaveLength(0);
 });
 
 it('retries partially imported batches without duplicating swipe history', async () => {
   swipes = Array.from({ length: 101 }, (_, i) => ({ id: `batch-${i}`, time: new Date().toISOString(), controller: '192.168.1.2', fob: 7, allowed: true }));
   await env.DB.exec(`CREATE TRIGGER fail_swipe BEFORE INSERT ON edge_swipes WHEN NEW.id = 'batch-100' BEGIN SELECT RAISE(ABORT, 'injected failure'); END`);
-  await expect(edgeCall(configured, 'swipes')).rejects.toThrow();
+  await expect(pushSwipes()).rejects.toMatchObject({ status: 500 });
   expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM edge_swipes').first()).n).toBe(100);
   await env.DB.exec('DROP TRIGGER fail_swipe');
-  await edgeCall(configured, 'swipes');
+  await pushSwipes();
   expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM member_events WHERE event_type = 'FobSwipe'").first()).n).toBe(101);
 });
 
-it('keeps nightly work pending after failure and retries both operations', async () => {
+it('keeps nightly goal work pending after failure and retries', async () => {
   await member();
   const normal = fetchSpy.getMockImplementation();
-  fetchSpy.mockImplementation((url, init) => String(url).endsWith('/api/swipes') ? new Response(null, { status: 502 }) : normal(url, init));
+  fetchSpy.mockImplementation(() => new Response(null, { status: 502 }));
   await expect(edgeCall(configured, 'nightly', '2026-09-13')).rejects.toThrow();
-  expect(goal.fobs).toEqual([7]);
+  expect(goal).toBeNull();
   await runInDurableObject(stub(), async (_instance, ctx) => {
     expect(await ctx.storage.get('nightlyDone')).toBeUndefined();
     expect(await ctx.storage.get('fullPending')).toEqual({ date: '2026-09-13' });
@@ -359,7 +375,7 @@ it('keeps nightly work pending after failure and retries both operations', async
 it('rejects malformed swipe payloads before importing any rows', async () => {
   swipes = [{ id: 'valid', time: new Date().toISOString(), controller: '192.168.1.2', fob: 7, allowed: true },
     { id: 'invalid', time: 'yesterday', controller: '192.168.1.2', fob: 0, allowed: 'yes' }];
-  await expect(edgeCall(configured, 'swipes')).rejects.toThrow();
+  await expect(pushSwipes()).rejects.toMatchObject({ status: 400 });
   expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM edge_swipes').first()).n).toBe(0);
 });
 
@@ -378,11 +394,61 @@ it('delivers all 512 authorized fobs and rejects overflow without truncating the
   expect(goal.fobs).toEqual(Array.from({ length: 512 }, (_, i) => i + 2));
 });
 
-it('rejects an oversized swipe response before importing and recovers on retry', async () => {
-  const normal = fetchSpy.getMockImplementation();
-  fetchSpy.mockImplementation(async () => new Response('[]', { headers: { 'Content-Length': String(32 * 1024 * 1024 + 1) } }));
-  await expect(edgeCall(configured, 'swipes')).rejects.toMatchObject({ status: 503 });
+it('rejects oversized requests and batches before importing and recovers on retry', async () => {
+  const request = await signedRequest();
+  request.headers.set('Content-Length', String(256 * 1024 + 1));
+  expect((await worker.fetch(request, configured)).status).toBe(413);
+  swipes = Array.from({ length: 513 }, (_, i) => ({ id: `large-${i}`, time: new Date().toISOString(), controller: 'door', fob: 7, allowed: true }));
+  await expect(pushSwipes()).rejects.toMatchObject({ status: 400 });
   expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM edge_swipes').first()).n).toBe(0);
-  fetchSpy.mockImplementation(normal);
-  expect(await edgeCall(configured, 'swipes')).toEqual({ fetched: 0 });
+  swipes = [];
+  await pushSwipes();
+});
+
+it('provisions a key on upgrade with no membership changes and preserves it through diffs and full sync', async () => {
+  const m = await member();
+  const revision = (await env.DB.prepare('SELECT revision FROM edge_changes').first()).revision;
+  goal = { version: 10, fobs: [7] };
+  await runInDurableObject(stub(), async (_instance, ctx) => ctx.storage.put('syncedRevision', revision));
+  await edgeCall(configured, 'changes');
+  const secret = goal.event_signing_key;
+  expect(secret).toMatch(/^[a-f0-9]{64}$/);
+  expect(writes[0]).toMatchObject({ method: 'PUT', version: 11, fobs: [7] });
+  await env.DB.prepare('UPDATE members SET fob_id = 8 WHERE member_id = ?').bind(m.member_id).run();
+  await edgeCall(configured, 'changes');
+  expect(writes[1].method).toBe('PATCH');
+  expect(goal.event_signing_key).toBe(secret);
+  await edgeCall(configured, 'full');
+  expect(goal.event_signing_key).toBe(secret);
+});
+
+it('authenticates exact bodies and rejects missing, wrong, stale, and future signatures', async () => {
+  swipes = [{ id: 'authenticated', time: new Date().toISOString(), controller: 'door', fob: 7, allowed: true }];
+  expect((await worker.fetch(new Request(`${env.SITE_URL}/webhooks/edge/swipes`, { method: 'POST', body: '[]' }), configured)).status).toBe(401);
+  for (const options of [{ key: 'ff'.repeat(32) }, { timestamp: Math.floor(Date.now() / 1000) - 301 }, { timestamp: Math.floor(Date.now() / 1000) + 301 }]) {
+    expect((await worker.fetch(await signedRequest(undefined, options), configured)).status).toBe(401);
+  }
+  const signed = await signedRequest();
+  expect((await worker.fetch(new Request(signed, { body: '[]' }), configured)).status).toBe(401);
+  const withBOM = await signedRequest();
+  expect((await worker.fetch(new Request(withBOM, { body: '\uFEFF' + JSON.stringify(swipes) }), configured)).status).toBe(401);
+  expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM edge_swipes').first()).n).toBe(0);
+  await pushSwipes();
+  expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM edge_swipes').first()).n).toBe(1);
+});
+
+it('accepts the shared Go HMAC test vector and ingests while goal delivery is pending', async () => {
+  await edgeCall(configured, 'changes');
+  await runInDurableObject(stub(), async (instance, ctx) => {
+    await ctx.storage.put('eventSigningKey', '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f');
+    let release;
+    instance.tail = new Promise(resolve => { release = resolve; });
+    vi.spyOn(Date, 'now').mockReturnValue(1800000000000);
+    try {
+      const response = await instance.fetch(new Request(`${env.SITE_URL}/webhooks/edge/swipes`, { method: 'POST', body: '[]', headers: {
+        'X-Edge-Timestamp': '1800000000', 'X-Edge-Signature': 'a0f5b2711c0fa2ef9d3b0f61e05be1205bba0eaf03e10e7d98cdbc0840355842',
+      } }));
+      expect(response.status).toBe(204);
+    } finally { release(); vi.restoreAllMocks(); }
+  });
 });

@@ -2,11 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,10 +19,12 @@ import (
 	"time"
 )
 
+const testEventKey = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+
 func pushVersion(t *testing.T, e *edge, version int, fobs string, want int) {
 	t.Helper()
 	_, cloud := e.routes()
-	w := jwtRequest(cloud, "PUT", "/api/goal", fmt.Sprintf(`{"version":%d,"fobs":%s}`, version, fobs))
+	w := jwtRequest(cloud, "PUT", "/api/goal", fmt.Sprintf(`{"version":%d,"fobs":%s,"event_signing_key":%q}`, version, fobs, testEventKey))
 	if w.Code != want {
 		t.Fatalf("version %d: got %d, want %d: %s", version, w.Code, want, w.Body.String())
 	}
@@ -60,7 +62,7 @@ func TestGoalDiff(t *testing.T) {
 		}
 	}
 	w := jwtRequest(cloud, "GET", "/api/goal", "")
-	if w.Code != 200 || w.Body.String() != "{\"version\":2,\"fobs\":[8,9]}\n" {
+	if w.Code != 200 || w.Body.String() != fmt.Sprintf("{\"version\":2,\"fobs\":[8,9],\"event_signing_key\":%q}\n", testEventKey) {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	if got := jwtRequest(cloud, "PATCH", "/api/goal", `{"base_version":2,"version":3,"add":[],"remove":[8,9]}`).Code; got != 204 {
@@ -74,11 +76,9 @@ func TestGoalDiff(t *testing.T) {
 
 func readSwipes(t *testing.T, e *edge) []swipe {
 	t.Helper()
-	_, cloud := e.routes()
-	w := jwtRequest(cloud, "GET", "/api/swipes", "")
-	var events []swipe
-	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &events) != nil || events == nil {
-		t.Fatalf("swipe fetch: %d %s", w.Code, w.Body.String())
+	events, err := e.retainedSwipes(context.Background())
+	if err != nil {
+		t.Fatal(err)
 	}
 	return events
 }
@@ -129,8 +129,8 @@ func TestAPIValidationAndRoutes(t *testing.T) {
 		method, path, body string
 		want               int
 	}{
-		{"PUT", "/api/goal", `{"version":1,"fobs":[1]}`, 204},
-		{"GET", "/api/swipes", "", 200},
+		{"PUT", "/api/goal", `{"version":1,"fobs":[1],"event_signing_key":"` + testEventKey + `"}`, 204},
+		{"GET", "/api/swipes", "", 404},
 		{"POST", "/api/swipes/ack", `{"ids":[]}`, 404},
 		{"GET", "/api/printers", "", 404},
 		{"GET", "/api/printers/missing/snapshot.jpg", "", 404},
@@ -165,6 +165,9 @@ func TestAPIValidationAndRoutes(t *testing.T) {
 		`{"version":2,"fobs":[]} {}`, strings.Repeat(" ", 16385),
 		`{"version":2,"fobs":[` + strings.Repeat("1,", 512) + `1]}`,
 	} {
+		if strings.HasPrefix(body, "{") {
+			body = strings.Replace(body, "{", `{"event_signing_key":"`+testEventKey+`",`, 1)
+		}
 		if w := jwtRequest(cloud, "PUT", "/api/goal", body); w.Code != 400 {
 			t.Fatalf("accepted invalid goal: %q: %d", body, w.Code)
 		}

@@ -116,7 +116,8 @@ func TestWorkerAuthRoutes(t *testing.T) {
 	if err := e.db.QueryRow("SELECT count(*) FROM goal").Scan(&count); err != nil || count != 0 {
 		t.Fatal("unauthorized mutation")
 	}
-	if request(cloud, "GET", "/api/swipes", "", "Authorization", valid).Code != 200 {
+	pushVersion(t, e, 1, "[]", 204)
+	if request(cloud, "GET", "/api/goal", "", "Authorization", valid).Code != 200 {
 		t.Fatal("valid token rejected")
 	}
 	e.workerAuth = nil

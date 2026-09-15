@@ -112,7 +112,7 @@ export async function adminRequest(request, env, context = requestContext(reques
     // authorization until the signed session expires, without a Discord round trip.
     if (path === '/admin/edge/resync') {
       await edgeCall(env, 'full');
-      return page('Cache sync complete', '<p role="status">The complete authorized fob set was sent to edgeproxy and swipe history was backed up.</p><p><a href="/admin/events?event_type=FobSwipe">View swipes</a></p>', csrf, 200, env);
+      return page('Cache sync complete', '<p role="status">The complete authorized fob set and event signing key were sent to edgeproxy. Swipe events are pushed automatically.</p><p><a href="/admin/events?event_type=FobSwipe">View swipes</a></p>', csrf, 200, env);
     }
     if (path === '/admin/events') return await history(request, env, csrf);
     if (creating) {

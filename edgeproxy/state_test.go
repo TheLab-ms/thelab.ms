@@ -106,9 +106,9 @@ func TestSQLiteSetupAndCorruptStartup(t *testing.T) {
 					t.Fatal(err)
 				}
 				if corrupt == "goal" {
-					execSQL(t, e, "INSERT INTO goal VALUES (1, 1, '[0]')")
+					execSQL(t, e, "INSERT INTO goal(singleton,version,fobs) VALUES (1, 1, '[0]')")
 				} else if corrupt == "noncanonical goal" {
-					execSQL(t, e, "INSERT INTO goal VALUES (1, 1, '[2,1,2]')")
+					execSQL(t, e, "INSERT INTO goal(singleton,version,fobs) VALUES (1, 1, '[2,1,2]')")
 				} else {
 					execSQL(t, e, "UPDATE printer_config SET config = 'null'")
 				}
@@ -173,7 +173,7 @@ func TestSwipeRetention(t *testing.T) {
 			}{
 				{"old", old}, {"recent", recent},
 			} {
-				execSQL(t, e, "INSERT INTO swipes(id,time,controller,fob,allowed) VALUES (?,?,'test',1,1)", item.id, item.timestamp)
+				execSQL(t, e, "INSERT INTO swipes(id,time,controller,fob,allowed,delivered) VALUES (?,?,'test',1,1,1)", item.id, item.timestamp)
 			}
 			wantCount := 1
 			switch cleanup {
@@ -192,7 +192,7 @@ func TestSwipeRetention(t *testing.T) {
 			if countSwipes(t, e) != wantCount || readSwipes(t, e)[0].ID != "recent" {
 				t.Fatal("cleanup lost retained events or kept expired history")
 			}
-			execSQL(t, e, "UPDATE swipes SET time = ?", old)
+			execSQL(t, e, "UPDATE swipes SET time = ?, delivered = 1", old)
 			if len(readSwipes(t, e)) != 0 || countSwipes(t, e) != 0 {
 				t.Fatal("expired events were not collected")
 			}
@@ -203,7 +203,10 @@ func TestSwipeRetention(t *testing.T) {
 func TestSwipeStoreUpgrade(t *testing.T) {
 	e := testEdge(t)
 	// Recreate the previous schema, including its acknowledgment-dependent indexes.
-	execSQL(t, e, `ALTER TABLE swipes ADD COLUMN acknowledged INTEGER NOT NULL DEFAULT 0 CHECK (acknowledged IN (0, 1));
+	execSQL(t, e, `DROP INDEX swipe_outbox;
+ALTER TABLE swipes DROP COLUMN delivered;
+ALTER TABLE goal DROP COLUMN event_signing_key;
+ALTER TABLE swipes ADD COLUMN acknowledged INTEGER NOT NULL DEFAULT 0 CHECK (acknowledged IN (0, 1));
 CREATE INDEX pending_swipes ON swipes(sequence) WHERE acknowledged = 0;
 CREATE INDEX swipe_history ON swipes(time) WHERE acknowledged = 1;`)
 	now := time.Now()
@@ -215,7 +218,7 @@ CREATE INDEX swipe_history ON swipes(time) WHERE acknowledged = 1;`)
 	}
 	e = restartEdge(t, e)
 	events := readSwipes(t, e)
-	if len(events) != 2 || events[0].ID != "event-0-6" || events[1].ID != "event-1-6" {
+	if len(events) != 4 || events[0].ID != "event-0-6" || events[3].ID != "event-1-8" {
 		t.Fatalf("upgrade lost retained history: %+v", events)
 	}
 	var columns int
@@ -227,7 +230,7 @@ CREATE INDEX swipe_history ON swipes(time) WHERE acknowledged = 1;`)
 		t.Fatal(err)
 	}
 	e = restartEdge(t, e)
-	if events := readSwipes(t, e); len(events) != 3 || events[2].Fob != 8 {
+	if events := readSwipes(t, e); len(events) != 5 || events[4].Fob != 8 {
 		t.Fatal("upgraded store cannot append or restart")
 	}
 }
@@ -253,7 +256,7 @@ func TestConcurrentGoalSwipesAndFetch(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 1; i <= 40; i++ {
 		wg.Go(func() {
-			w := jwtRequest(cloud, "PUT", "/api/goal", fmt.Sprintf(`{"version":%d,"fobs":[%d]}`, i, i))
+			w := jwtRequest(cloud, "PUT", "/api/goal", fmt.Sprintf(`{"version":%d,"fobs":[%d],"event_signing_key":%q}`, i, i, testEventKey))
 			if w.Code != 204 && w.Code != 409 {
 				t.Errorf("concurrent version: %d", w.Code)
 			}
@@ -292,7 +295,7 @@ func TestCancelledTransaction(t *testing.T) {
 	e := testEdge(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	err := e.transaction(ctx, func(tx *sql.Tx) error {
-		_, err := tx.Exec("INSERT INTO goal VALUES (1, 0, '[]')")
+		_, err := tx.Exec("INSERT INTO goal(singleton,version,fobs) VALUES (1, 0, '[]')")
 		cancel()
 		return err
 	})

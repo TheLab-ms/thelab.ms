@@ -33,6 +33,7 @@ type edge struct {
 	printers   printerSet
 	signingKey ed25519.PrivateKey
 	workerAuth *workerAuth
+	swipeWake  chan struct{}
 }
 
 const schema = `
@@ -91,7 +92,7 @@ func openEdge(dir string) (*edge, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	e := &edge{db: db, csrf: rand.Text()}
+	e := &edge{db: db, csrf: rand.Text(), swipeWake: make(chan struct{}, 1)}
 	if err := e.initialize(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("open edge database: %w", err)
@@ -114,6 +115,24 @@ func (e *edge) initialize() error {
 			if _, err := tx.Exec("ALTER TABLE swipes DROP COLUMN acknowledged"); err != nil {
 				return err
 			}
+		}
+		// New and upgraded stores enqueue all retained history for idempotent delivery.
+		for _, column := range []struct{ table, name, definition string }{
+			{"goal", "event_signing_key", "TEXT NOT NULL DEFAULT ''"},
+			{"swipes", "delivered", "INTEGER NOT NULL DEFAULT 0 CHECK (delivered IN (0, 1))"},
+		} {
+			var count int
+			if err := tx.QueryRow("SELECT count(*) FROM pragma_table_info(?) WHERE name = ?", column.table, column.name).Scan(&count); err != nil {
+				return err
+			}
+			if count == 0 {
+				if _, err := tx.Exec("ALTER TABLE " + column.table + " ADD COLUMN " + column.name + " " + column.definition); err != nil {
+					return err
+				}
+			}
+		}
+		if _, err := tx.Exec("CREATE INDEX IF NOT EXISTS swipe_outbox ON swipes(sequence) WHERE delivered = 0"); err != nil {
+			return err
 		}
 		var data []byte
 		if err := tx.QueryRow("SELECT config FROM printer_config WHERE singleton = 1").Scan(&data); err != nil {
@@ -160,16 +179,19 @@ func (e *edge) transaction(ctx context.Context, fn func(*sql.Tx) error) error {
 	return tx.Commit()
 }
 
-func (e *edge) storeGoal(ctx context.Context, version int64, body []byte) error {
-	result, err := e.db.ExecContext(ctx, `INSERT INTO goal VALUES (1, ?, ?)
-ON CONFLICT(singleton) DO UPDATE SET version = excluded.version, fobs = excluded.fobs
-WHERE excluded.version > goal.version OR (excluded.version = goal.version AND excluded.fobs = goal.fobs)`, version, string(body))
+func (e *edge) storeGoal(ctx context.Context, version int64, body []byte, eventKey string) error {
+	result, err := e.db.ExecContext(ctx, `INSERT INTO goal(singleton, version, fobs, event_signing_key) VALUES (1, ?, ?, ?)
+ON CONFLICT(singleton) DO UPDATE SET version = excluded.version, fobs = excluded.fobs, event_signing_key = excluded.event_signing_key
+WHERE excluded.version > goal.version OR (excluded.version = goal.version AND excluded.fobs = goal.fobs AND excluded.event_signing_key = goal.event_signing_key)`, version, string(body), eventKey)
 	if err != nil {
 		return err
 	}
 	n, err := result.RowsAffected()
 	if err == nil && n == 0 {
 		return errGoalConflict
+	}
+	if err == nil {
+		e.wakeSwipes()
 	}
 	return err
 }
@@ -188,7 +210,7 @@ type swipe struct {
 }
 
 func pruneSwipes(tx *sql.Tx) error {
-	_, err := tx.Exec("DELETE FROM swipes WHERE time < ?", time.Now().Add(-swipeRetention).UnixNano())
+	_, err := tx.Exec("DELETE FROM swipes WHERE delivered = 1 AND time < ?", time.Now().Add(-swipeRetention).UnixNano())
 	return err
 }
 
@@ -219,6 +241,9 @@ func (e *edge) controllerPoll(ctx context.Context, ip string, events []controlle
 		}
 		return pruneSwipes(tx)
 	})
+	if err == nil && len(events) > 0 {
+		e.wakeSwipes()
+	}
 	return body, err
 }
 

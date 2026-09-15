@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -77,8 +78,9 @@ func controllerETag(body []byte) (string, error) {
 
 func (e *edge) goal(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Version *int64          `json:"version"`
-		Fobs    json.RawMessage `json:"fobs"`
+		Version  *int64          `json:"version"`
+		Fobs     json.RawMessage `json:"fobs"`
+		EventKey string          `json:"event_signing_key"`
 	}
 	if !readJSON(w, r, &input) {
 		return
@@ -87,12 +89,17 @@ func (e *edge) goal(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "version must be a nonnegative safe integer", http.StatusBadRequest)
 		return
 	}
+	key, err := hex.DecodeString(input.EventKey)
+	if err != nil || len(key) != 32 || hex.EncodeToString(key) != input.EventKey {
+		http.Error(w, "event_signing_key must be 32 bytes encoded as lowercase hex", http.StatusBadRequest)
+		return
+	}
 	body, err := normalizeGoal(input.Fobs)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := e.storeGoal(r.Context(), *input.Version, body); err != nil {
+	if err := e.storeGoal(r.Context(), *input.Version, body, input.EventKey); err != nil {
 		storageError(w, err)
 		return
 	}
@@ -103,7 +110,8 @@ func (e *edge) goal(w http.ResponseWriter, r *http.Request) {
 func (e *edge) getGoal(w http.ResponseWriter, r *http.Request) {
 	var version int64
 	var fobs []byte
-	err := e.db.QueryRowContext(r.Context(), "SELECT version, fobs FROM goal WHERE singleton = 1").Scan(&version, &fobs)
+	var eventKey string
+	err := e.db.QueryRowContext(r.Context(), "SELECT version, fobs, event_signing_key FROM goal WHERE singleton = 1").Scan(&version, &fobs, &eventKey)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = errNoGoal
 	}
@@ -113,9 +121,10 @@ func (e *edge) getGoal(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(struct {
-		Version int64           `json:"version"`
-		Fobs    json.RawMessage `json:"fobs"`
-	}{version, fobs})
+		Version  int64           `json:"version"`
+		Fobs     json.RawMessage `json:"fobs"`
+		EventKey string          `json:"event_signing_key,omitempty"`
+	}{version, fobs, eventKey})
 }
 
 func (e *edge) patchGoal(w http.ResponseWriter, r *http.Request) {
@@ -247,16 +256,6 @@ func (e *edge) fobs(w http.ResponseWriter, r *http.Request) {
 	// Firmware does not decode chunked transfer encoding.
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	_, _ = w.Write(body)
-}
-
-func (e *edge) getSwipes(w http.ResponseWriter, r *http.Request) {
-	events, err := e.retainedSwipes(r.Context())
-	if err != nil {
-		storageError(w, err)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(events)
 }
 
 func loadSigningSeed(path string) (ed25519.PrivateKey, error) {

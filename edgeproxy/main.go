@@ -45,6 +45,12 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go e.workerAuth.run(ctx)
+	senderDone := make(chan struct{})
+	go func() {
+		defer close(senderDone)
+		e.runSwipeSender(ctx)
+	}()
+	defer func() { stop(); <-senderDone }()
 	local, err := net.Listen("tcp", *lan)
 	if err != nil {
 		return err
@@ -110,7 +116,6 @@ func (e *edge) routes() (http.Handler, http.Handler) {
 	tunnel.HandleFunc("PUT /api/goal", e.goal)
 	tunnel.HandleFunc("GET /api/goal", e.getGoal)
 	tunnel.HandleFunc("PATCH /api/goal", e.patchGoal)
-	tunnel.HandleFunc("GET /api/swipes", e.getSwipes)
 	tunnel.HandleFunc("GET /api/kiosk/claim", e.getKioskClaim)
 	tunnel.HandleFunc("GET /machines", e.printers.dashboard)
 	tunnel.HandleFunc("GET /machines/content", e.printers.dashboard)
