@@ -714,10 +714,10 @@ func decodeJSON(data []byte, value any) error {
 	return nil
 }
 
-func readJSON(w http.ResponseWriter, r *http.Request, value any) bool {
-	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 16<<10))
+func readJSON(w http.ResponseWriter, r *http.Request, value any, limit int64) bool {
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
 	if err != nil || decodeJSON(data, value) != nil {
-		http.Error(w, "invalid JSON (limit 16 KiB)", http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("invalid JSON (limit %d KiB)", limit>>10), http.StatusBadRequest)
 		return false
 	}
 	return true
@@ -765,7 +765,7 @@ func (e *edge) goal(w http.ResponseWriter, r *http.Request) {
 		Fobs     json.RawMessage `json:"fobs"`
 		EventKey string          `json:"event_signing_key"`
 	}
-	if !readJSON(w, r, &input) {
+	if !readJSON(w, r, &input, 16<<10) {
 		return
 	}
 	if input.Version == nil || *input.Version < 0 || *input.Version > 9007199254740991 {
@@ -817,7 +817,7 @@ func (e *edge) patchGoal(w http.ResponseWriter, r *http.Request) {
 		Add     []uint32 `json:"add"`
 		Remove  []uint32 `json:"remove"`
 	}
-	if !readJSON(w, r, &input) {
+	if !readJSON(w, r, &input, 16<<10) {
 		return
 	}
 	if input.Base == nil || input.Version == nil || *input.Base < 0 || *input.Version <= *input.Base || *input.Version > 9007199254740991 ||
@@ -897,7 +897,8 @@ func (e *edge) fobs(w http.ResponseWriter, r *http.Request) {
 		Fob     uint32 `json:"fob"`
 		Allowed *bool  `json:"allowed"`
 	}
-	if !readJSON(w, r, &input) {
+	// A compact batch of 512 swipes with maximum uint32 IDs exceeds 16 KiB.
+	if !readJSON(w, r, &input, 32<<10) {
 		return
 	}
 	if input == nil || len(input) > 512 {

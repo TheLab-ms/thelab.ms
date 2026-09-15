@@ -85,6 +85,224 @@ func TestGoalDiff(t *testing.T) {
 	}
 }
 
+func TestGoalDiffValidation(t *testing.T) {
+	e := testEdge(t)
+	_, cloud := e.routes()
+	valid := `{"base_version":0,"version":1,"add":[],"remove":[]}`
+	if w := jwtRequest(cloud, "PATCH", "/api/goal", valid); w.Code != 503 {
+		t.Fatalf("uninitialized PATCH: %d %s", w.Code, w.Body.String())
+	}
+	pushVersion(t, e, 0, "[7]", 204)
+	before := jwtRequest(cloud, "GET", "/api/goal", "").Body.String()
+	check := func(t *testing.T, body string) {
+		t.Helper()
+		if w := jwtRequest(cloud, "PATCH", "/api/goal", body); w.Code != 400 {
+			t.Fatalf("invalid PATCH accepted: %d %s", w.Code, w.Body.String())
+		}
+		if got := jwtRequest(cloud, "GET", "/api/goal", "").Body.String(); got != before {
+			t.Fatalf("invalid PATCH changed goal: %s", got)
+		}
+		var count int
+		if err := e.db.QueryRow("SELECT count(*) FROM goal_patch").Scan(&count); err != nil || count != 0 {
+			t.Fatalf("invalid PATCH recorded: %d %v", count, err)
+		}
+	}
+	for _, body := range []string{"{", "null", "[]", "{}", valid + " {}", valid + strings.Repeat(" ", 16<<10)} {
+		check(t, body)
+	}
+	for _, tc := range []struct {
+		field  string
+		values []string
+	}{
+		{"base_version", []string{"", "null", "-1", "1", "2", "1.5", `"0"`, "9007199254740992"}},
+		{"version", []string{"", "null", "-1", "0", "1.5", `"1"`, "9007199254740992"}},
+		{"add", []string{"", "null", "{}", "[0]", "[-1]", "[4294967296]", "[1.5]", `["7"]`, "[" + strings.Repeat("1,", 512) + "1]"}},
+		{"remove", []string{"", "null", "{}", "[0]", "[-1]", "[4294967296]", "[1.5]", `["7"]`, "[" + strings.Repeat("1,", 512) + "1]"}},
+		{"extra", []string{"true"}},
+	} {
+		for i, value := range tc.values {
+			t.Run(fmt.Sprintf("%s/%d", tc.field, i), func(t *testing.T) {
+				var input map[string]json.RawMessage
+				if err := json.Unmarshal([]byte(valid), &input); err != nil {
+					t.Fatal(err)
+				}
+				if value == "" {
+					delete(input, tc.field)
+				} else {
+					input[tc.field] = json.RawMessage(value)
+				}
+				body, err := json.Marshal(input)
+				if err != nil {
+					t.Fatal(err)
+				}
+				check(t, string(body))
+			})
+		}
+	}
+	// Both ends of the safe-integer range are usable, including an empty diff.
+	for _, body := range []string{valid, `{"base_version":1,"version":9007199254740991,"add":[4294967295],"remove":[7]}`} {
+		if w := jwtRequest(cloud, "PATCH", "/api/goal", body); w.Code != 204 {
+			t.Fatalf("valid boundary rejected: %d %s", w.Code, w.Body.String())
+		}
+	}
+	assertGoal(t, restartEdge(t, e), 9007199254740991, "[4294967295]\n")
+}
+
+func TestGoalDiffCapacity(t *testing.T) {
+	e := testEdge(t)
+	_, cloud := e.routes()
+	pushVersion(t, e, 0, "[]", 204)
+	ids := make([]uint32, 512)
+	for i := range ids {
+		ids[i] = uint32(i + 1)
+	}
+	encoded, err := json.Marshal(ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial := fmt.Sprintf(`{"base_version":0,"version":1,"add":%s,"remove":[]}`, encoded)
+	if w := jwtRequest(cloud, "PATCH", "/api/goal", initial); w.Code != 204 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	overflow := `{"base_version":1,"version":2,"add":[513],"remove":[]}`
+	if w := jwtRequest(cloud, "PATCH", "/api/goal", overflow); w.Code != 400 || !strings.Contains(w.Body.String(), "512") {
+		t.Fatalf("overflow accepted: %d %s", w.Code, w.Body.String())
+	}
+	e = restartEdge(t, e)
+	assertGoal(t, e, 1, string(encoded)+"\n")
+	_, cloud = e.routes()
+	if w := jwtRequest(cloud, "PATCH", "/api/goal", initial); w.Code != 204 {
+		t.Fatal("overflow replaced the prior replay record", w.Code)
+	}
+	// Capacity is checked after removals and deduplication, not before.
+	patch := `{"base_version":1,"version":2,"add":[513,512,513],"remove":[1,1]}`
+	canonical := `{"base_version":1,"version":2,"add":[512,513],"remove":[1]}`
+	for _, body := range []string{patch, canonical} {
+		if w := jwtRequest(cloud, "PATCH", "/api/goal", body); w.Code != 204 {
+			t.Fatalf("capacity-preserving diff/replay rejected: %d %s", w.Code, w.Body.String())
+		}
+	}
+	for i := range ids {
+		ids[i]++
+	}
+	encoded, _ = json.Marshal(ids)
+	assertGoal(t, e, 2, string(encoded)+"\n")
+	// A single diff can replace all 512 entries.
+	remove := string(encoded)
+	for i := range ids {
+		ids[i] += 512
+	}
+	encoded, _ = json.Marshal(ids)
+	patch = fmt.Sprintf(`{"base_version":2,"version":3,"add":%s,"remove":%s}`, encoded, remove)
+	if w := jwtRequest(cloud, "PATCH", "/api/goal", patch); w.Code != 204 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	assertGoal(t, restartEdge(t, e), 3, string(encoded)+"\n")
+}
+
+func TestGoalDiffRollback(t *testing.T) {
+	for _, failure := range []string{"goal update", "patch insert", "patch update"} {
+		t.Run(failure, func(t *testing.T) {
+			e := testEdge(t)
+			pushVersion(t, e, 0, "[7]", 204)
+			_, cloud := e.routes()
+			previous := `{"base_version":0,"version":1,"add":[8],"remove":[7]}`
+			if w := jwtRequest(cloud, "PATCH", "/api/goal", previous); w.Code != 204 {
+				t.Fatal(w.Code)
+			}
+			before := jwtRequest(cloud, "GET", "/api/goal", "").Body.String()
+			var priorPatch string
+			if err := e.db.QueryRow("SELECT patch FROM goal_patch").Scan(&priorPatch); err != nil {
+				t.Fatal(err)
+			}
+			operation := map[string]string{"goal update": "UPDATE ON goal", "patch insert": "INSERT ON goal_patch", "patch update": "UPDATE ON goal_patch"}[failure]
+			execSQL(t, e, "CREATE TRIGGER reject_diff BEFORE "+operation+" BEGIN SELECT RAISE(ABORT, 'injected diff failure'); END")
+			patch := `{"base_version":1,"version":2,"add":[9],"remove":[8]}`
+			if w := jwtRequest(cloud, "PATCH", "/api/goal", patch); w.Code != 500 {
+				t.Fatalf("failed write acknowledged: %d %s", w.Code, w.Body.String())
+			}
+			e = restartEdge(t, e)
+			_, cloud = e.routes()
+			if got := jwtRequest(cloud, "GET", "/api/goal", "").Body.String(); got != before {
+				t.Fatalf("failed diff changed persisted goal/key: %s", got)
+			}
+			var storedPatch string
+			if err := e.db.QueryRow("SELECT patch FROM goal_patch").Scan(&storedPatch); err != nil || storedPatch != priorPatch {
+				t.Fatalf("failed diff changed replay record: %q %v", storedPatch, err)
+			}
+			if w := jwtRequest(cloud, "PATCH", "/api/goal", previous); w.Code != 204 {
+				t.Fatal("previous diff no longer replayable", w.Code)
+			}
+			execSQL(t, e, "DROP TRIGGER reject_diff")
+			for range 2 {
+				if w := jwtRequest(cloud, "PATCH", "/api/goal", patch); w.Code != 204 {
+					t.Fatal("retry failed", w.Code, w.Body.String())
+				}
+			}
+			assertGoal(t, e, 2, "[9]\n")
+		})
+	}
+}
+
+func TestConcurrentGoalDiffsAndFullUpdates(t *testing.T) {
+	for _, mode := range []string{"competing diffs", "same-version full", "newer full"} {
+		t.Run(mode, func(t *testing.T) {
+			e := testEdge(t)
+			pushVersion(t, e, 1, "[7]", 204)
+			_, cloud := e.routes()
+			patch := `{"base_version":1,"version":2,"add":[8],"remove":[7]}`
+			method, other := "PATCH", `{"base_version":1,"version":2,"add":[9],"remove":[7]}`
+			version := 2
+			rotated := strings.Repeat("ab", 32)
+			if mode != "competing diffs" {
+				if mode == "newer full" {
+					version = 3
+				}
+				method, other = "PUT", fmt.Sprintf(`{"version":%d,"fobs":[9],"event_signing_key":%q}`, version, rotated)
+			}
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			var results [2]*httptest.ResponseRecorder
+			wg.Go(func() { <-start; results[0] = jwtRequest(cloud, "PATCH", "/api/goal", patch) })
+			wg.Go(func() { <-start; results[1] = jwtRequest(cloud, method, "/api/goal", other) })
+			close(start)
+			wg.Wait()
+			wantFobs, wantKey := "[9]\n", testEventKey
+			if mode == "newer full" {
+				if results[1].Code != 204 || (results[0].Code != 204 && results[0].Code != 409) {
+					t.Fatalf("unexpected statuses: %d, %d", results[0].Code, results[1].Code)
+				}
+				wantKey = rotated
+			} else {
+				if !((results[0].Code == 204 && results[1].Code == 409) || (results[0].Code == 409 && results[1].Code == 204)) {
+					t.Fatalf("expected exactly one winner: %d, %d", results[0].Code, results[1].Code)
+				}
+				if results[0].Code == 204 {
+					wantFobs = "[8]\n"
+				} else if mode == "same-version full" {
+					wantKey = rotated
+				}
+			}
+			e = restartEdge(t, e)
+			assertGoal(t, e, int64(version), wantFobs)
+			_, cloud = e.routes()
+			var key string
+			if err := e.db.QueryRow("SELECT event_signing_key FROM goal").Scan(&key); err != nil || key != wantKey {
+				t.Fatalf("concurrent update changed signing key: %q %v", key, err)
+			}
+			for i, req := range []struct{ method, body string }{{"PATCH", patch}, {method, other}} {
+				want := results[i].Code
+				if mode == "newer full" && i == 0 {
+					want = 409
+				}
+				if w := jwtRequest(cloud, req.method, "/api/goal", req.body); w.Code != want {
+					t.Fatalf("replay %d: got %d, want %d", i, w.Code, want)
+				}
+			}
+		})
+	}
+}
+
 func readSwipes(t *testing.T, e *edge) []swipe {
 	t.Helper()
 	events, err := e.retainedSwipes(context.Background())
@@ -187,7 +405,7 @@ func TestAPIValidationAndRoutes(t *testing.T) {
 	for _, body := range []string{"null", "[null]", "[{}]", "[] []", `[{"fob":-1}]`, `[{"fob":4294967296}]`,
 		`[{"fob":7}]`, `[{"fob":7,"allowed":null}]`, `[{"fob":7,"allowed":"false"}]`,
 		`[{"fob":7,"allowed":true},{"fob":8}]`,
-		"[" + strings.Repeat(`{"fob":1},`, 512) + `{"fob":1}]`, strings.Repeat(" ", 16385)} {
+		"[" + strings.Repeat(`{"fob":1},`, 512) + `{"fob":1}]`, strings.Repeat(" ", (32<<10)+1)} {
 		if w := request(lan, "POST", "/api/fobs", body); w.Code != 400 {
 			t.Fatalf("invalid swipes accepted: %q", body)
 		}
@@ -222,6 +440,54 @@ func TestSwipeDelivery(t *testing.T) {
 	e = restartEdge(t, e)
 	if !reflect.DeepEqual(first, readSwipes(t, e)) {
 		t.Fatal("restart changed event IDs or order")
+	}
+}
+
+func TestControllerBatchLimits(t *testing.T) {
+	events := make([]controllerSwipe, 512)
+	for i := range events {
+		events[i] = controllerSwipe{Fob: 4294967295 - uint32(i), Allowed: false}
+	}
+	encoded, err := json.Marshal(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(encoded)
+	for _, tc := range []struct {
+		name, body    string
+		conditional   bool
+		status, count int
+	}{
+		{"maximum IDs", body, false, 200, 512},
+		{"conditional poll", body, true, 304, 512},
+		{"at byte limit", body + strings.Repeat(" ", (32<<10)-len(body)), false, 200, 512},
+		{"over byte limit", body + strings.Repeat(" ", (32<<10)+1-len(body)), false, 400, 0},
+		{"over event limit", strings.TrimSuffix(body, "]") + `,{"fob":1,"allowed":true}]`, false, 400, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := testEdge(t)
+			pushVersion(t, e, 1, "[7]", 204)
+			lan, _ := e.routes()
+			var headers []string
+			if tc.conditional {
+				etag := request(lan, "POST", "/api/fobs", "[]").Header().Get("ETag")
+				headers = []string{"If-None-Match", etag}
+			}
+			w := request(lan, "POST", "/api/fobs", tc.body, headers...)
+			if w.Code != tc.status {
+				t.Fatalf("got %d, want %d: %s", w.Code, tc.status, w.Body.String())
+			}
+			e = restartEdge(t, e)
+			stored := readSwipes(t, e)
+			if len(stored) != tc.count || pendingCount(t, e) != tc.count {
+				t.Fatalf("persisted %d swipes, want %d", len(stored), tc.count)
+			}
+			for i, event := range stored {
+				if event.Fob != events[i].Fob || event.Allowed != events[i].Allowed {
+					t.Fatalf("swipe %d changed: %+v", i, event)
+				}
+			}
+		})
 	}
 }
 

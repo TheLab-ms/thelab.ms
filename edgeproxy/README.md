@@ -44,6 +44,7 @@ screen with “Fob linked.”
 Controllers post swipe events to the LAN `POST /api/fobs` endpoint. Edgeproxy
 commits the entire batch to SQLite before replying, then asynchronously pushes
 events to `${CONWAYEDGE_WORKER_ISSUER}/webhooks/edge/swipes`.
+Controller requests accept up to 512 swipes within a 32 KiB JSON body.
 
 - The first batch after idle is sent immediately. During activity, accumulated
   events flush every 30 seconds; arrivals do not reset the deadline.

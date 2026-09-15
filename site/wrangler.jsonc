@@ -92,7 +92,7 @@
 	"vars": {
 		"SITE_URL": "https://thelab.ms",
 		"TURNSTILE_SITE_KEY": "0x4AAAAAAA-xMVuWzfkR2PKz",
-		"PRINTER_EDGE_URL": "https://edgeproxy.thelab.ms/machines",
+		"PRINTER_EDGE_URL": "https://edgeproxy.thelab.ms",
 		"EDGE_URL": "https://edgeproxy.thelab.ms",
 		"EDGE_JWT_PUBLIC_KEYS": "[]",
 		"DISCORD_GUILD_ID": "690314626289631294",

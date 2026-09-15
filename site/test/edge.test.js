@@ -333,6 +333,73 @@ describe('Edge synchronization', () => {
     expect(await runDurableObjectAlarm(stub())).toBe(false);
   });
 
+  it.each([
+    'not-json', 'null', '{}',
+    JSON.stringify({ version: -1, fobs: [] }),
+    JSON.stringify({ version: 1.5, fobs: [] }),
+    JSON.stringify({ version: 1, fobs: [7, 7] }),
+    JSON.stringify({ version: 1, fobs: [0] }),
+    JSON.stringify({ version: 1, fobs: [4294967296] }),
+    JSON.stringify({ version: 1, fobs: ['7'] }),
+    JSON.stringify({ version: 1, fobs: [], event_signing_key: 'invalid' }),
+  ])('keeps full work pending when the remote goal is invalid: %s', async text => {
+    await member();
+    const normal = fetchSpy.getMockImplementation();
+    fetchSpy.mockResolvedValue(new Response(text));
+    await expect(edgeCall(configured, 'nightly', '2026-09-13')).rejects.toMatchObject({ status: 503 });
+    expect(writes).toEqual([]);
+    await runInDurableObject(stub(), async (_instance, ctx) => {
+      expect(await ctx.storage.get('syncedRevision')).toBeUndefined();
+      expect(await ctx.storage.get('nightlyDone')).toBeUndefined();
+      expect(await ctx.storage.get('fullPending')).toEqual({ date: '2026-09-13' });
+      expect(await ctx.storage.getAlarm()).not.toBeNull();
+    });
+    fetchSpy.mockImplementation(normal);
+    expect(await runDurableObjectAlarm(stub())).toBe(true);
+    expect(goal.fobs).toEqual([7]);
+    await runInDurableObject(stub(), async (_instance, ctx) => {
+      expect(await ctx.storage.get('nightlyDone')).toBe('2026-09-13');
+      expect(await ctx.storage.get('fullPending')).toBeUndefined();
+    });
+    expect(await runDurableObjectAlarm(stub())).toBe(false);
+  });
+
+  it('rejects exhausted remote versions without acknowledging the local revision', async () => {
+    await member();
+    goal = { version: Number.MAX_SAFE_INTEGER, fobs: [] };
+    await expect(edgeCall(configured, 'changes')).rejects.toMatchObject({ status: 503 });
+    expect(writes).toEqual([]);
+    await runInDurableObject(stub(), async (_instance, ctx) => {
+      expect(await ctx.storage.get('syncedRevision')).toBeUndefined();
+      expect(await ctx.storage.get('version')).toBeUndefined();
+      expect(await ctx.storage.getAlarm()).not.toBeNull();
+    });
+    goal = { version: 10, fobs: [] };
+    expect(await runDurableObjectAlarm(stub())).toBe(true);
+    expect(goal).toMatchObject({ version: 11, fobs: [7] });
+    expect(await runDurableObjectAlarm(stub())).toBe(false);
+  });
+
+  it('rereads remote state after a PATCH conflict and retries with a fresh base version', async () => {
+    const m = await member();
+    await edgeCall(configured, 'changes');
+    await env.DB.prepare('UPDATE members SET fob_id = 8 WHERE member_id = ?').bind(m.member_id).run();
+    const normal = fetchSpy.getMockImplementation(), previous = goal.version;
+    fetchSpy.mockImplementation(async (url, init) => {
+      if (init.method !== 'PATCH') return normal(url, init);
+      expect(JSON.parse(init.body).base_version).toBe(previous);
+      goal = { ...goal, version: previous + 10, fobs: [7, 9] };
+      return new Response(null, { status: 409 });
+    });
+    await expect(edgeCall(configured, 'changes')).rejects.toMatchObject({ status: 503 });
+    expect(writes).toHaveLength(1);
+    fetchSpy.mockImplementation(normal);
+    expect(await runDurableObjectAlarm(stub())).toBe(true);
+    expect(writes.at(-1)).toMatchObject({ method: 'PATCH', base_version: previous + 10, version: previous + 11, add: [8], remove: [7, 9] });
+    expect(goal.fobs).toEqual([8]);
+    expect(await runDurableObjectAlarm(stub())).toBe(false);
+  });
+
   it('deduplicates pushed swipes and uses ownership at swipe time after reassignment', async () => {
     const first = await member();
     await env.DB.prepare('UPDATE fob_assignments SET started = 1000 WHERE member_id = ?').bind(first.member_id).run();
@@ -545,6 +612,20 @@ describe('Edge synchronization', () => {
     await expect(pushSwipes()).rejects.toMatchObject({ status: 400 });
     expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM edge_swipes').first()).n).toBe(0);
     swipes = [];
+    await pushSwipes();
+  });
+
+  it('rejects oversized streamed swipe requests without trusting a Content-Length header', async () => {
+    const signed = await signedRequest();
+    const body = new ReadableStream({ start(controller) {
+      controller.enqueue(new Uint8Array(256 * 1024));
+      controller.enqueue(new Uint8Array(1));
+      controller.close();
+    } });
+    const request = new Request(signed, { body });
+    expect(request.headers.has('Content-Length')).toBe(false);
+    expect((await worker.fetch(request, configured)).status).toBe(413);
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM edge_swipes').first()).n).toBe(0);
     await pushSwipes();
   });
 

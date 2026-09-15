@@ -993,6 +993,71 @@ describe('Membership', () => {
       await runInDurableObject(stub, async (_instance, state) => { expect(await state.storage.get('customer')).toBeUndefined(); });
     });
 
+    it.each(['customer write', 'role removal', 'queue send', 'D1 commit'])('recovers an identity transfer after failure at %s', async stage => {
+      await seed({ stripe_subscription_id: 'sub_member', stripe_subscription_state: 'active' });
+      const before = await readMember(), replacement = '555555555555555555';
+      const oldToken = await memberToken(env, before);
+      const roles = new Set([id]), keys = new Map();
+      let remoteSubscription = subscription(), failed = false;
+      const failOnce = point => {
+        if (stage === point && !failed) { failed = true; throw new Error(`Injected ${point} failure`); }
+      };
+      vi.mocked(globalThis.fetch).mockImplementation(async (url, init = {}) => {
+        const path = new URL(url).pathname, method = init.method || 'GET';
+        if (path === `/api/v10/guilds/${env.DISCORD_GUILD_ID}/members/${replacement}`) return Response.json({ user: { id: replacement, username: 'new-maker' } });
+        if (path.endsWith(`/roles/${env.DISCORD_ROLE_ID}`)) {
+          const target = path.split('/members/')[1].split('/')[0];
+          if (method === 'DELETE') { failOnce('role removal'); roles.delete(target); }
+          else { expect(method).toBe('PUT'); roles.add(target); }
+          return new Response(null, { status: 204 });
+        }
+        if (method === 'GET' && path === '/v1/subscriptions') return Response.json({ data: [remoteSubscription], has_more: false });
+        if (method === 'GET' && path === '/v1/subscriptions/sub_member') return Response.json(remoteSubscription);
+        if (method === 'GET' && path === `/v1/customers/${customer}`) return Response.json({ id: customer, name: 'Billing Maker' });
+        if (method === 'POST' && ['/v1/subscriptions/sub_member', `/v1/customers/${customer}`].includes(path)) {
+          const key = new Headers(init.headers).get('Idempotency-Key');
+          expect(key).toBeTruthy();
+          if (keys.has(path)) expect(key).toBe(keys.get(path));
+          keys.set(path, key);
+          const form = new URLSearchParams(init.body);
+          expect(form.get('metadata[thelab_member_id]')).toBe(before.member_id);
+          expect(form.get('metadata[thelab_discord_id]')).toBe(replacement);
+          if (path.includes('/subscriptions/')) remoteSubscription = { ...remoteSubscription, metadata: { thelab_member_id: before.member_id, thelab_discord_id: replacement } };
+          else failOnce('customer write'); // Subscription metadata already committed remotely.
+          return Response.json({});
+        }
+        throw new Error(`Unexpected provider request: ${method} ${url}`);
+      });
+      const queued = [], send = vi.fn(async body => { failOnce('queue send'); queued.push(body); });
+      const stub = await memberStub();
+      await runInDurableObject(stub, async (instance, ctx) => {
+        const original = instance.env;
+        instance.env = { ...original, MEMBERSHIP_QUEUE: { send } };
+        try {
+          await ctx.storage.put('customer', { result: { id: customer } });
+          if (stage === 'D1 commit') await env.DB.exec("CREATE TRIGGER fail_transfer BEFORE UPDATE ON members WHEN NEW.discord_user_id != OLD.discord_user_id BEGIN SELECT RAISE(ABORT, 'injected commit failure'); END");
+          const input = { fields: fields({ discord_user_id: replacement, stripe_subscription_id: 'sub_member' }) };
+          const first = await instance.execute({ member_id: before.member_id, operation: 'updateMetadata', input });
+          expect(first.ok).toBe(false);
+          expect(await readMember()).toMatchObject({ member_id: before.member_id, auth_version: before.auth_version, metadata_version: before.metadata_version });
+          expect((await queryEvents(env)).events.some(event => event.event_type === 'DiscordAccountChanged')).toBe(false);
+          if (stage === 'D1 commit') await env.DB.exec('DROP TRIGGER fail_transfer');
+          expect(await instance.execute({ member_id: before.member_id, operation: 'updateMetadata', input })).toMatchObject({ ok: true });
+          expect(await ctx.storage.get('customer')).toBeUndefined();
+        } finally { instance.env = original; }
+      });
+      expect(await readMember()).toBeNull();
+      const updated = await env.DB.prepare('SELECT * FROM members WHERE member_id = ?').bind(before.member_id).first();
+      expect(updated).toMatchObject({ discord_user_id: replacement, auth_version: before.auth_version + 1, metadata_version: before.metadata_version + 1 });
+      expect((await api('/payment/resume', { headers: { Cookie: `thelab_member=${oldToken}` } })).headers.get('Location')).toContain('discord.com/oauth2/authorize');
+      expect(queued.length).toBeGreaterThan(0);
+      for (const message of queued) await processMessage(message, env);
+      expect([...roles]).toEqual([replacement]);
+      expect((await env.DB.prepare('SELECT * FROM members WHERE member_id = ?').bind(before.member_id).first()))
+        .toMatchObject({ stripe_subscription_state: 'active', stripe_subscription_id: 'sub_member', discord_last_synced: expect.any(Number) });
+      expect((await queryEvents(env)).events.filter(event => event.event_type === 'DiscordAccountChanged')).toHaveLength(1);
+    });
+
     it('rejects duplicate identities and mismatched Stripe subscriptions before changing the member', async () => {
       await seed(); await authenticate();
       const other = '555555555555555555';
@@ -1283,6 +1348,51 @@ describe('Membership', () => {
   });
 
   describe('billing safeguards', () => {
+    it('finds an ongoing subscription on a later page before opening another checkout', async () => {
+      await seed();
+      mockStripe(`/subscriptions?customer=${customer}&status=all&limit=100`, {
+        data: [{ ...subscription('canceled', 'sub_other'), metadata: {} }], has_more: true,
+      });
+      mockStripe(`/subscriptions?customer=${customer}&status=all&limit=100&starting_after=sub_other`, {
+        data: [subscription()], has_more: false,
+      });
+      mockStripe('/billing_portal/sessions', { url: 'https://billing.stripe.com/p/session/existing' }, { method: 'POST' });
+      expect((await checkout()).url).toBe('https://billing.stripe.com/p/session/existing');
+    });
+
+    it('finds the recurring price and applicable coupon on later pages', async () => {
+      await seed({ discount_type: 'student' });
+      mockSubs(); mockCheckoutEmail();
+      mockStripe('/prices?active=true&lookup_keys%5B%5D=monthly&limit=100', {
+        data: [{ id: 'price_other', type: 'one_time' }], has_more: true,
+      });
+      mockStripe('/prices?active=true&lookup_keys%5B%5D=monthly&limit=100&starting_after=price_other', {
+        data: [{ id: 'price_monthly', product: { id: 'prod_membership' }, type: 'recurring', recurring: { interval: 'month', interval_count: 1 } }], has_more: false,
+      });
+      mockStripe('/coupons?limit=100', {
+        data: [{ id: 'coupon_other', valid: true, metadata: { discountTypes: 'student' }, applies_to: { products: ['prod_other'] } }], has_more: true,
+      });
+      mockStripe('/coupons?limit=100&starting_after=coupon_other', {
+        data: [{ id: 'coupon_student', valid: true, metadata: { discountTypes: 'student' }, applies_to: { products: ['prod_membership'] } }], has_more: false,
+      });
+      mockStripe('/checkout/sessions', options => {
+        const form = new URLSearchParams(options.body);
+        expect(form.get('line_items[0][price]')).toBe('price_monthly');
+        expect(form.get('discounts[0][coupon]')).toBe('coupon_student');
+        return { id: 'cs_pages', url: 'https://checkout.stripe.com/c/pay/pages' };
+      }, { method: 'POST' });
+      expect((await checkout()).url).toContain('/pay/pages');
+    });
+
+    it.each([{ data: null }, { data: [], has_more: true }])('fails closed on a broken later subscription page: %j', async page => {
+      await seed({ stripe_subscription_state: 'active', stripe_subscription_id: 'sub_member' });
+      mockBilling();
+      mockStripe(`/subscriptions?customer=${customer}&status=all&limit=100`, { data: [subscription('canceled')], has_more: true });
+      mockStripe(`/subscriptions?customer=${customer}&status=all&limit=100&starting_after=sub_member`, page);
+      await expect(processMessage({ customer_id: customer }, env)).rejects.toMatchObject({ status: 502 });
+      expect(await readMember()).toMatchObject({ stripe_subscription_state: 'active', stripe_subscription_id: 'sub_member', stripe_synced_at: null });
+    });
+
     it('lets a returning customer choose a billing email independently of Discord', async () => {
       await seed({ billing_email: user.email });
       mockSubs(); mockPrice(); mockCheckoutEmail();
@@ -1449,6 +1559,82 @@ describe('Membership', () => {
   });
 
   describe('payment confirmation', () => {
+    const completedSession = () => ({ mode: 'subscription', customer, client_reference_id: id,
+      metadata: { thelab_discord_id: id }, status: 'complete', payment_status: 'paid', subscription: 'sub_member' });
+
+    it.each([
+      { mode: 'payment' }, { customer: 'cus_other' }, { client_reference_id: '555555555555555555' },
+      { metadata: {} }, { metadata: { thelab_discord_id: '555555555555555555' } },
+    ])('independently validates checkout ownership fields before fetching its subscription: %j', async extra => {
+      await seed();
+      mockStripe('/checkout/sessions/cs_member', { ...completedSession(), ...extra });
+      const send = vi.fn();
+      const response = await api('/payment/success?session_id=cs_member', { headers: { Cookie: await loginCookie() } },
+        { ...env, MEMBERSHIP_QUEUE: { send } });
+      expect(response.status).toBe(403);
+      expect(response.headers.get('Location')).toBeNull();
+      expect(send).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { customer: 'cus_other' }, { metadata: { thelab_discord_id: '555555555555555555' } },
+    ])('rejects a foreign subscription even when the checkout belongs to the member: %j', async extra => {
+      await seed();
+      mockStripe('/checkout/sessions/cs_member', completedSession());
+      mockStripe('/subscriptions/sub_member', { ...subscription(), ...extra });
+      const send = vi.fn();
+      expect((await api('/payment/success?session_id=cs_member', { headers: { Cookie: await loginCookie() } },
+        { ...env, MEMBERSHIP_QUEUE: { send } })).status).toBe(403);
+      expect(send).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { status: 'open' }, { subscription: null }, { subscription: 'invalid' }, { subscription: {} },
+    ])('does not confirm a checkout that is not ready: %j', async extra => {
+      await seed();
+      mockStripe('/checkout/sessions/cs_member', { ...completedSession(), ...extra });
+      const send = vi.fn();
+      const response = await api('/payment/success?session_id=cs_member', { headers: { Cookie: await loginCookie() } },
+        { ...env, MEMBERSHIP_QUEUE: { send } });
+      expect(response.status).toBe(409);
+      expect(response.headers.get('Location')).toBeNull();
+      expect(send).not.toHaveBeenCalled();
+    });
+
+    it.each(['past_due', 'canceled', 'incomplete'])('does not confirm a %s subscription', async status => {
+      await seed();
+      mockStripe('/checkout/sessions/cs_member', completedSession());
+      mockStripe('/subscriptions/sub_member', subscription(status));
+      const send = vi.fn();
+      expect((await api('/payment/success?session_id=cs_member', { headers: { Cookie: await loginCookie() } },
+        { ...env, MEMBERSHIP_QUEUE: { send } })).status).toBe(409);
+      expect(send).not.toHaveBeenCalled();
+    });
+
+    it('confirms no-payment-required trials with expanded subscriptions', async () => {
+      await seed();
+      mockStripe('/checkout/sessions/cs_member', { ...completedSession(), payment_status: 'no_payment_required', subscription: { id: 'sub_member' } });
+      mockStripe('/subscriptions/sub_member', subscription('trialing'));
+      const send = vi.fn().mockResolvedValue(undefined);
+      const response = await api('/payment/success?session_id=cs_member', { headers: { Cookie: await loginCookie() } },
+        { ...env, MEMBERSHIP_QUEUE: { send } });
+      expect(response.headers.get('Location')).toBe(`${env.SITE_URL}/welcome`);
+      expect(send).toHaveBeenCalledExactlyOnceWith({ customer_id: customer });
+    });
+
+    it('allows confirmation to retry after queue publication fails', async () => {
+      await seed();
+      mockStripe('/checkout/sessions/cs_member', completedSession()).times(2);
+      mockStripe('/subscriptions/sub_member', subscription()).times(2);
+      const send = vi.fn().mockRejectedValueOnce(new Error('Queue unavailable')).mockResolvedValue(undefined);
+      const bindings = { ...env, MEMBERSHIP_QUEUE: { send } }, headers = { Cookie: await loginCookie() };
+      const failed = await api('/payment/success?session_id=cs_member', { headers }, bindings);
+      expect(failed.status).toBe(500);
+      expect(failed.headers.get('Location')).toBeNull();
+      expect((await api('/payment/success?session_id=cs_member', { headers }, bindings)).headers.get('Location')).toBe(`${env.SITE_URL}/welcome`);
+      expect(send).toHaveBeenCalledTimes(2);
+    });
+
     it.each(['unpaid', 'paid'])('checks payment status before showing welcome (%s)', async paymentStatus => {
       await seed();
       const cookie = await loginCookie();
@@ -1895,6 +2081,26 @@ describe('Waivers', () => {
       expect((await members()).results).toHaveLength(2);
     });
 
+    it('rejects an ambiguous email match instead of choosing either member', async () => {
+      const first = await registerMember(env, user);
+      const second = await registerMember(env, { ...user, id: '555555555555555555', email: 'other@example.com' });
+      await env.DB.prepare('UPDATE members SET discord_email = ? WHERE member_id = ?').bind(user.email, second.member_id).run();
+      const f = await form();
+      human();
+      const response = await submit(f);
+      expect(response.status).toBe(409);
+      expect(await response.text()).toContain('couldn’t link your waiver');
+      expect((await members()).results.map(member => member.member_id).sort()).toEqual([first.member_id, second.member_id].sort());
+      expect((await waivers()).results).toEqual([]);
+      expect((await env.DB.prepare("SELECT * FROM member_events WHERE event_type = 'WaiverSigned'").all()).results).toEqual([]);
+      // Resolving the ambiguity permits a new verification and the intended link.
+      await env.DB.prepare("UPDATE members SET discord_email = 'other@example.com' WHERE member_id = ?").bind(second.member_id).run();
+      human();
+      expect((await submit(f)).status).toBe(200);
+      expect((await waivers()).results).toHaveLength(1);
+      expect((await waivers()).results[0].member_id).toBe(first.member_id);
+    });
+
     it('claims a waiver-only member on first login and keeps its discounts and history', async () => {
       human();
       await submit(await form());
@@ -1921,6 +2127,33 @@ describe('Waivers', () => {
   });
 
   describe('signup waiver gate', () => {
+    it.each(['auth version', 'Discord identity', 'deletion'])('rejects a signup signature when %s changes during verification', async change => {
+      const member = await registerMember(env, user);
+      const f = await form('/waiver?signup=1', `thelab_member=${await memberToken(env, member)}`);
+      let release, entered;
+      const blocked = new Promise(resolve => { release = resolve; });
+      const verifying = new Promise(resolve => { entered = resolve; });
+      http.mockImplementationOnce(async url => {
+        expect(url).toBe('https://challenges.cloudflare.com/turnstile/v0/siteverify');
+        entered();
+        await blocked;
+        return Response.json({ success: true, hostname: 'thelab.example', action: 'waiver' });
+      });
+      const signing = submit(f);
+      await verifying;
+      try {
+        if (change === 'auth version') await env.DB.prepare('UPDATE members SET auth_version = auth_version + 1 WHERE member_id = ?').bind(member.member_id).run();
+        else if (change === 'Discord identity') await env.DB.prepare("UPDATE members SET discord_user_id = '555555555555555555' WHERE member_id = ?").bind(member.member_id).run();
+        else await env.DB.prepare('DELETE FROM members WHERE member_id = ?').bind(member.member_id).run();
+      } finally { release(); }
+      const response = await signing;
+      expect(response.status).toBe(409);
+      expect(response.headers.get('Location')).toBeNull();
+      expect((await waivers()).results).toEqual([]);
+      expect((await env.DB.prepare("SELECT * FROM member_events WHERE event_type = 'WaiverSigned'").all()).results).toEqual([]);
+      expect(http).toHaveBeenCalledOnce();
+    });
+
     it('gates checkout, preserves admin-assigned annual billing, and resumes after signing with a different email', async () => {
       const member = await registerMember(env, user);
       await env.DB.prepare('UPDATE members SET bill_annually = 1 WHERE member_id = ?').bind(member.member_id).run();
