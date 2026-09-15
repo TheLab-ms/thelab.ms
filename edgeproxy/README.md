@@ -118,6 +118,8 @@ alarms.
 
 ## Operator full sync
 
+Run the Wrangler commands below from the repository's `site/` directory.
+
 Manual sync is available through the Cloudflare management API, rather than the
 admin website. It sends the complete current authorized fob set and event signing
 key; it does not re-fetch billing state or re-import delivered swipes.
