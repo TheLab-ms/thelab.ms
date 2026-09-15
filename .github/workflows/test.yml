@@ -1,0 +1,119 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  schedule:
+    # Nightly at 06:17 UTC, away from the busy start of the hour.
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  site:
+    name: Site and operational scripts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: site
+    env:
+      WRANGLER_SEND_METRICS: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: npm ci
+      - name: Test Worker, membership, and edge integration
+        run: npm test
+      - name: Test bootstrap scripts
+        run: node --test scripts/*.test.js
+      - name: Test data import and migrations
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+      - name: Check Worker bundle
+        run: npx wrangler deploy --dry-run --outdir "$RUNNER_TEMP/worker-build"
+
+  edgeproxy:
+    name: Edge proxy, browser, and packaging
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: edgeproxy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: edgeproxy/go.mod
+          cache-dependency-path: edgeproxy/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test Go services with race detection
+        run: go test -race -count=1 ./...
+      - name: Vet Go services
+        run: go vet ./...
+      - name: Test browser dashboard and kiosk
+        run: node --test *_test.mjs
+      - name: Test image packaging
+        run: python3 -m unittest discover -p '*_test.py'
+      - name: Build RouterOS target binary
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: arm64
+        run: go build -o "$RUNNER_TEMP/conwayedge-linux-arm64" .
+
+  access-controller-tests:
+    name: Access-controller simulation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: access-controller
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install host Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: access-controller
+          shared-key: host-tests
+        env:
+          RUSTUP_TOOLCHAIN: stable
+      - name: Run unit, simulation, and property tests
+        # Override both the local esp toolchain and the default Xtensa target.
+        run: cargo +stable test --locked --no-default-features --features sim --target x86_64-unknown-linux-gnu
+
+  access-controller-firmware:
+    name: Access-controller ESP32 build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: access-controller
+    steps:
+      - uses: actions/checkout@v4
+      - uses: esp-rs/xtensa-toolchain@v1.6
+        with:
+          buildtargets: esp32
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: access-controller
+          shared-key: esp32-firmware
+        env:
+          RUSTUP_TOOLCHAIN: esp
+      - name: Build release firmware
+        run: cargo +esp build --locked --release
