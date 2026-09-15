@@ -108,7 +108,6 @@ func (e *edge) routes() (http.Handler, http.Handler) {
 		lan.HandleFunc("GET "+path, kioskAsset)
 	}
 	lan.HandleFunc("POST /kiosk/claims", e.issueKioskClaim)
-	lan.HandleFunc("GET /kiosk/claims", e.kioskClaimStatus)
 	lan.HandleFunc("/{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		e.configure(w, r)

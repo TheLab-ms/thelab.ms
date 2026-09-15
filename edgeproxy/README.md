@@ -20,12 +20,11 @@ scan issuance are available only on the LAN listener.
 3. The member signs in through Discord and confirms linking. D1 atomically
    consumes the claim and assigns the fob, preserving ownership checks and
    replay protection.
-4. The kiosk polls its LAN endpoint, which reads the Worker's token-only
-   `/keyfob/status` endpoint for completion. An unvisited code reports pending;
-   no member or fob details are exposed by that endpoint.
+4. Completion is shown on the phone. The kiosk keeps the QR code displayed
+   until reset, the next fob scan, or the code's five-minute expiry.
 
 The existing `CONWAYEDGE_WORKER_ISSUER` supplies the membership site's HTTPS
-origin for QR links and completion polling. `CONWAYEDGE_PUBLIC_URL` remains
+origin for QR links. `CONWAYEDGE_PUBLIC_URL` remains
 the public tunnel origin used as the Worker JWT audience. No new secret or
 kiosk IP-check configuration is needed.
 

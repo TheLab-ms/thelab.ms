@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -108,50 +107,5 @@ func TestKioskValidationAndRateLimit(t *testing.T) {
 	e.workerAuth = nil
 	if kioskScan(lan, `{"fob_id":123}`, "https://edge.thelab.ms").Code != 503 {
 		t.Fatal("unconfigured kiosk issued claim")
-	}
-}
-
-func TestKioskCompletionPolling(t *testing.T) {
-	e := testEdge(t)
-	lan, cloud := e.routes()
-	w := kioskScan(lan, `{"fob_id":123}`, "https://edge.thelab.ms")
-	var issued struct{ Token string }
-	if w.Code != 201 || json.Unmarshal(w.Body.Bytes(), &issued) != nil {
-		t.Fatal(w.Body.String())
-	}
-	status, body := 200, `{"claimed":false}`
-	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "GET" || r.URL.Path != "/keyfob/status" || r.URL.Query().Get("token") != issued.Token {
-			t.Error("unexpected status request", r.URL)
-		}
-		w.WriteHeader(status)
-		fmt.Fprint(w, body)
-	}))
-	defer worker.Close()
-	e.workerAuth.issuer = worker.URL
-	path := "/kiosk/claims?token=" + issued.Token
-	for _, claimed := range []bool{false, true} {
-		body = fmt.Sprintf(`{"claimed":%t}`, claimed)
-		w = request(lan, "GET", path, "")
-		var result struct {
-			Claimed bool
-			Expires int64
-		}
-		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &result) != nil || result.Claimed != claimed || result.Expires <= time.Now().Unix() {
-			t.Fatal(w.Code, w.Body.String())
-		}
-	}
-	for _, invalid := range []string{`{}`, `{"claimed":"true"}`, strings.Repeat("x", 1025)} {
-		body = invalid
-		if request(lan, "GET", path, "").Code != 503 {
-			t.Fatal("invalid completion accepted")
-		}
-	}
-	status = 500
-	if request(lan, "GET", path, "").Code != 503 {
-		t.Fatal("upstream failure ignored")
-	}
-	if request(cloud, "GET", path, "").Code != 401 {
-		t.Fatal("LAN polling exposed")
 	}
 }

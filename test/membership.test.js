@@ -1612,16 +1612,52 @@ describe('webhooks and queued Discord reconciliation', () => {
     await processMessage({ customer_id: customer }, env);
   });
 
-  it('retries Discord rate limits even when the Stripe state is already saved', async () => {
+  it('syncs each customer once per batch without swallowing invalid operator messages', async () => {
+    await seed();
+    await env.DB.prepare('INSERT INTO members (stripe_customer_id) VALUES (?)').bind('cus_other').run();
+    const messages = [
+      { customer_id: customer }, { customer_id: 'cus_other' },
+      { customer_id: customer, type: 'invalid' }, { customer_id: customer }, { customer_id: 'cus_other' },
+    ].map((body, i) => ({ id: `message-${i}`, body, attempts: 1, ack: vi.fn(), retry: vi.fn() }));
+    mockBilling();
+    mockSubs([subscription()]);
+    mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, () => {
+      expect(messages[0].ack).not.toHaveBeenCalled();
+      expect(messages[3].ack).not.toHaveBeenCalled();
+      return {};
+    }, 'PUT', 204);
+    mockStripe('/customers/cus_other', { id: 'cus_other', name: 'Other Member' });
+    mockSubs([]);
+    await worker.queue({ messages }, env);
+    for (const message of messages.filter(message => message.body.type === undefined)) {
+      expect(message.ack).toHaveBeenCalledOnce();
+      expect(message.retry).not.toHaveBeenCalled();
+    }
+    expect(messages[2].ack).not.toHaveBeenCalled();
+    expect(messages[2].retry).toHaveBeenCalledWith({ delaySeconds: 30 });
+    expect(globalThis.fetch).toHaveBeenCalledTimes(5);
+    expect(await readMember()).toMatchObject({ stripe_subscription_state: 'active', discord_last_synced: expect.any(Number) });
+    expect(await env.DB.prepare('SELECT billing_name FROM members WHERE stripe_customer_id = ?').bind('cus_other').first())
+      .toEqual({ billing_name: 'Other Member' });
+  });
+
+  it('retries every grouped message on Discord rate limits even when Stripe state is saved', async () => {
     const log = vi.spyOn(console, 'error').mockImplementation(() => {});
     await seed();
     mockBilling().times(2);
     mockSubs([subscription()]);
     mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, { retry_after: 120 }, 'PUT', 429);
     const message = { id: 'queue-message', body: { customer_id: customer }, attempts: 1, ack: vi.fn(), retry: vi.fn() };
-    await worker.queue({ messages: [message] }, env);
+    const duplicate = { ...message, id: 'duplicate-message', attempts: 4, ack: vi.fn(), retry: vi.fn() };
+    const unrelated = { ...message, id: 'unrelated-message', body: { customer_id: 'cus_unrelated' }, ack: vi.fn(), retry: vi.fn() };
+    await worker.queue({ messages: [message, unrelated, duplicate] }, env);
     expect(message.ack).not.toHaveBeenCalled();
     expect(message.retry).toHaveBeenCalledWith({ delaySeconds: 120 });
+    expect(duplicate.ack).not.toHaveBeenCalled();
+    expect(duplicate.retry).toHaveBeenCalledWith({ delaySeconds: 240 });
+    expect(unrelated.ack).toHaveBeenCalledOnce();
+    expect(unrelated.retry).not.toHaveBeenCalled();
+    expect(globalThis.fetch).toHaveBeenCalledTimes(3);
     const entries = log.mock.calls.map(([entry]) => JSON.parse(entry));
     const providerError = entries.find(entry => entry.event === 'provider.failed');
     expect(providerError).toMatchObject({ service: 'Discord', failure: 'http', provider_status: 429, retry_after: 120 });
@@ -1630,8 +1666,9 @@ describe('webhooks and queued Discord reconciliation', () => {
     expect(await readMember()).toMatchObject({ stripe_subscription_state: 'active', stripe_synced_at: expect.any(Number), discord_last_synced: null });
     mockSubs([subscription()]);
     mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, {}, 'PUT', 204);
-    await worker.queue({ messages: [{ ...message, attempts: 2 }] }, env);
+    await worker.queue({ messages: [{ ...message, attempts: 2 }, { ...duplicate, attempts: 5 }] }, env);
     expect(message.ack).toHaveBeenCalledOnce();
+    expect(duplicate.ack).toHaveBeenCalledOnce();
     expect(await readMember()).toMatchObject({ stripe_subscription_state: 'active', discord_last_synced: expect.any(Number) });
   });
 

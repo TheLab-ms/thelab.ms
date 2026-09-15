@@ -41,17 +41,18 @@ it('submits only after 300 ms of silence, including Enter/Tab suffixes', async (
   expect(nodes.standby.hidden).toBe(true);
 });
 
-it('continues capturing after using the reset control and resets on completion', async () => {
+it('continues capturing after reset and keeps the code displayed without polling', async () => {
   scan('123');
   await vi.advanceTimersByTimeAsync(300);
   nodes.done.dispatchEvent(new Event('click'));
   scan('456');
   await vi.advanceTimersByTimeAsync(300);
   expect(JSON.parse(fetch.mock.calls[1][1].body)).toEqual({ fob_id: 456 });
-  fetch.mockResolvedValueOnce(Response.json({ claimed: true }));
-  await vi.advanceTimersByTimeAsync(1500);
+  await vi.advanceTimersByTimeAsync(299000);
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(nodes.claim.hidden).toBe(false);
+  nodes.done.dispatchEvent(new Event('click'));
   expect(nodes.claim.hidden).toBe(true);
-  expect(nodes.status.textContent).toContain('Fob linked');
   expect(nodes.qr.src).toBeUndefined();
 });
 

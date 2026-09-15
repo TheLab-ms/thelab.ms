@@ -9,7 +9,7 @@ import { printerAccess } from './printers.js';
 import { edgeJWKS } from './edge-auth.js';
 import { waiverRequest } from './waiver.js';
 import { bindFob } from './keyfob.js';
-import { cleanupFobClaims, fobClaimStatus } from './fob-claims.js';
+import { cleanupFobClaims } from './fob-claims.js';
 export { Membership } from './membership.js';
 export { EdgeSync } from './edge-sync.js';
 import { edgeCall, edgeEnabled, nightlyDate, swipeWebhook } from './edge-sync.js';
@@ -138,7 +138,6 @@ const routes = new Map([
   ['/machines', ['GET', printerAccess]],
   ['/kiosk', ['GET', () => redirect('https://edge.thelab.ms/kiosk')]],
   ['/keyfob/bind', ['GET, POST', bindFob]],
-  ['/keyfob/status', ['GET', fobClaimStatus]],
   ['/webhooks/stripe', ['POST', webhook]],
   ['/webhooks/edge/swipes', ['POST', swipeWebhook]],
   ['/admin/login', ['GET', (request, env) => signup(request, env, true)]],
@@ -171,7 +170,6 @@ export default {
     } catch (error) {
       logError('request.failed', error, context, env);
       if (path === '/webhooks/stripe') return json({ error: 'Webhook could not be accepted.' }, error instanceof HttpError ? error.status : 500);
-      if (path === '/keyfob/status') return json({ error: error instanceof HttpError ? error.message : 'Fob enrollment is temporarily unavailable. Please try again.' }, error instanceof HttpError ? error.status : 500);
       const response = errorPage(error);
       if (path === '/login/discord/callback') {
         // Clearing an OAuth cookie must still work when SITE_URL itself is invalid.
@@ -181,14 +179,20 @@ export default {
     }
   },
   async queue(batch, env) {
-    for (const message of batch.messages) {
+    // Reconcile current Stripe state once per customer in this batch. Operator
+    // and invalid messages stay separate so they retain their own validation.
+    const groups = Map.groupBy(batch.messages, message => message.body?.type === undefined
+      && /^cus_[A-Za-z0-9]+$/.test(message.body?.customer_id || '') ? message.body.customer_id : message);
+    for (const messages of groups.values()) {
       try {
-        await processMessage(message.body, env);
-        message.ack();
+        await processMessage(messages[0].body, env);
+        for (const message of messages) message.ack();
       } catch (error) {
-        const delaySeconds = Math.min(43200, Math.max(error.retryAfter || 0, 30 * 2 ** Math.min(message.attempts - 1, 10)));
-        logError('queue.failed', error, { message_id: message.id, attempt: message.attempts, retry_delay_seconds: delaySeconds }, env);
-        message.retry({ delaySeconds });
+        for (const message of messages) {
+          const delaySeconds = Math.min(43200, Math.max(error.retryAfter || 0, 30 * 2 ** Math.min(message.attempts - 1, 10)));
+          logError('queue.failed', error, { message_id: message.id, attempt: message.attempts, retry_delay_seconds: delaySeconds }, env);
+          message.retry({ delaySeconds });
+        }
       }
     }
   },

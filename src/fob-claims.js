@@ -1,16 +1,8 @@
-import { HttpError, json, now, opaque } from './http.js';
+import { HttpError, now, opaque } from './http.js';
 import { edgeRequest, kickEdge } from './edge-sync.js';
 
 export function cleanupFobClaims(env) {
   return env.DB.prepare('DELETE FROM fob_claims WHERE expires <= ?').bind(now()).run();
-}
-
-export async function fobClaimStatus(request, env) {
-  const params = new URL(request.url).searchParams;
-  const token = params.get('token');
-  if (params.getAll('token').length !== 1 || !opaque.test(token || '')) throw new HttpError(410, 'Invalid enrollment code.');
-  const claim = await env.DB.prepare('SELECT claimed_by FROM fob_claims WHERE id = ? AND expires > ?').bind(token, now()).first();
-  return json({ claimed: Boolean(claim?.claimed_by) });
 }
 
 export async function fobClaim(env, token) {

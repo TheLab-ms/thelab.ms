@@ -4,7 +4,10 @@
 	"main": "src/index.js",
 	"compatibility_date": "2026-09-11",
 	"observability": {
-		"enabled": true
+		"enabled": true,
+		"logs": {
+			"invocation_logs": false
+		}
 	},
 	"assets": {
 		"directory": "static",

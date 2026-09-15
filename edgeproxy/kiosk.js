@@ -3,7 +3,7 @@ const standby = document.getElementById('standby');
 const status = document.getElementById('status');
 const panel = document.getElementById('claim');
 let buffer = '';
-let generation = 0, idleTimer, pollTimer, expiryTimer, controller;
+let generation = 0, idleTimer, expiryTimer, controller;
 
 function notice(message, error = false) {
   status.setAttribute('role', error ? 'alert' : 'status');
@@ -13,7 +13,6 @@ function reset(message = 'Ready when you are. Just tap your fob.', error = false
   generation++;
   controller?.abort();
   clearTimeout(idleTimer);
-  clearTimeout(pollTimer);
   clearTimeout(expiryTimer);
   buffer = '';
   panel.hidden = true;
@@ -52,20 +51,6 @@ async function submit() {
     kiosk.dataset.state = 'claim';
     notice('Scan the QR code with your phone. Sign in through Discord, then tap Link fob.');
     expiryTimer = setTimeout(() => reset('Code expired. Scan your fob again.'), Math.max(0, claim.expires * 1000 - Date.now()));
-    const poll = async () => {
-      try {
-        const result = await api(`/kiosk/claims?token=${encodeURIComponent(claim.token)}`);
-        if (current !== generation) return;
-        if (result.claimed) { reset('You’re all set! Fob linked. Ready for the next scan.'); return; }
-        notice('Scan the QR code with your phone. Sign in through Discord, then tap Link fob.');
-      } catch (error) {
-        if (current !== generation) return;
-        if ([403, 404, 410].includes(error.status)) { reset(error.message, true); return; }
-        notice('Could not check completion. Retrying…', true);
-      }
-      pollTimer = setTimeout(poll, 2000);
-    };
-    pollTimer = setTimeout(poll, 1500);
   } catch (error) {
     if (current === generation) reset(error.message, true);
   }

@@ -83,16 +83,6 @@ it('rejects unavailable or malformed edge claims', async () => {
   expect(await env.DB.prepare('SELECT count(*) n FROM fob_claims').first()).toEqual({ n: 0 });
 });
 
-it('returns only completion status without importing or revealing a fob', async () => {
-  const c = await claim();
-  const response = await api(`/keyfob/status?token=${c.token}`);
-  expect(response.headers.get('Cache-Control')).toBe('no-store');
-  expect(await response.json()).toEqual({ claimed: false });
-  expect(fetchSpy).not.toHaveBeenCalled();
-  expect((await api('/keyfob/status?token=fake')).status).toBe(410);
-  expect((await api(`/keyfob/status?token=${c.token}&token=${c.token}`)).status).toBe(410);
-});
-
 it('preserves the claim through browser-bound Discord OAuth and never links on GET', async () => {
   const c = await claim(), m = await member(), path = `/keyfob/bind?token=${c.token}`;
   const start = await api(path);
@@ -138,7 +128,6 @@ it('replaces an existing fob from cellular, records history and blocks replay', 
   const event = await env.DB.prepare("SELECT details FROM member_events WHERE member_id = ? AND event_type = 'FobChanged'").bind(m.member_id).first();
   expect(JSON.parse(event.details)).toEqual({ from: 99, to: 123 });
   expect(await env.DB.prepare('SELECT ended FROM fob_assignments WHERE fob = 99').first()).toMatchObject({ ended: expect.any(Number) });
-  expect(await (await api(`/keyfob/status?token=${c.token}`)).json()).toEqual({ claimed: true });
   expect((await bind(c, m)).status).toBe(409);
 });
 

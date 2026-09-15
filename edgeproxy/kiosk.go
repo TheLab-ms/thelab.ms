@@ -141,28 +141,3 @@ func (e *edge) issueKioskClaim(w http.ResponseWriter, r *http.Request) {
 	}
 	kioskJSON(w, http.StatusCreated, map[string]any{"token": claim.ID, "url": link, "expires": claim.Expires, "qr": "data:image/png;base64," + base64.StdEncoding.EncodeToString(qr)})
 }
-
-func (e *edge) kioskClaimStatus(w http.ResponseWriter, r *http.Request) {
-	claim := e.readKioskClaim(w, r)
-	if claim == nil {
-		return
-	}
-	if e.workerAuth != nil {
-		req, err := http.NewRequestWithContext(r.Context(), "GET", e.workerAuth.issuer+"/keyfob/status?token="+claim.ID, nil)
-		if err == nil {
-			response, err := e.workerAuth.client.Do(req)
-			if err == nil {
-				defer response.Body.Close()
-				body, err := io.ReadAll(io.LimitReader(response.Body, 1025))
-				var result struct {
-					Claimed *bool `json:"claimed"`
-				}
-				if err == nil && len(body) <= 1024 && response.StatusCode == http.StatusOK && decodeJSON(body, &result) == nil && result.Claimed != nil {
-					kioskJSON(w, http.StatusOK, map[string]any{"claimed": *result.Claimed, "expires": claim.Expires})
-					return
-				}
-			}
-		}
-	}
-	kioskError(w, http.StatusServiceUnavailable, "Could not check completion. Retrying…")
-}
