@@ -703,7 +703,7 @@ describe('Fob enrollment', () => {
   it('redirects the kiosk to the LAN hostname without network authentication', async () => {
     const response = await api('/kiosk', {}, { ...config, EDGE_URL: '' });
     expect(response.status).toBe(303);
-    expect(response.headers.get('Location')).toBe('https://edge.thelab.ms/kiosk');
+    expect(response.headers.get('Location')).toBe('http://edge.thelab.ms/kiosk');
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 

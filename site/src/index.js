@@ -671,7 +671,7 @@ const routes = new Map([
   ['/payment/success', ['GET', success]],
   ['/payment/resume', ['GET', resume]],
   ['/machines', ['GET', printerAccess]],
-  ['/kiosk', ['GET', () => redirect('https://edge.thelab.ms/kiosk')]],
+  ['/kiosk', ['GET', () => redirect('http://edge.thelab.ms/kiosk')]],
   ['/keyfob/bind', ['GET, POST', bindFob]],
   ['/webhooks/stripe', ['POST', webhook]],
   ['/webhooks/edge/swipes', ['POST', swipeWebhook]],

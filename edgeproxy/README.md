@@ -1,8 +1,8 @@
 # Edge proxy kiosk
 
-The key-fob kiosk is served at `https://edge.thelab.ms/kiosk` on the **LAN
-listener** (`-lan`, default `:80`). Local DNS and HTTPS termination should route
-that hostname to this listener and preserve the request's Host header.
+The key-fob kiosk is served at `http://edge.thelab.ms/kiosk` on the **LAN
+listener** (`-lan`, default `:80`). Local DNS should point that hostname to the
+edge proxy's LAN address.
 `https://thelab.ms/kiosk` redirects to this LAN-only URL.
 
 The public Cloudflare tunnel at `https://edgeproxy.thelab.ms` continues to use
@@ -130,4 +130,3 @@ your `wrangler login` OAuth credentials or `CLOUDFLARE_API_TOKEN`; the credentia
 must have Queues Write permission. Set `ACCOUNT_ID` (or `CLOUDFLARE_ACCOUNT_ID`)
 when you have multiple accounts; `QUEUE_ID` can also be supplied explicitly.
 Start the log tail below **before** running the script to confirm completion.
-
