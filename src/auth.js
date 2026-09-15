@@ -58,6 +58,7 @@ export function finishLogin(env, destination, audience, token) {
 // Only known GET destinations can survive the OAuth round-trip.
 export function loginDestination(value, purpose) {
   if (purpose === 'admin') {
+    if (value === '/admin/members/new') return value;
     if (/^\/admin\/members\/(?:[1-9][0-9]{16,19}|[a-f0-9]{32})$/.test(value)) return value;
     if (/^\/admin(?:\/members\/(?:[1-9][0-9]{16,19}|[a-f0-9]{32}))?\/events(?:\?[^#]*)?$/.test(value)) {
       try {

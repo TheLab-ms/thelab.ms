@@ -30,6 +30,7 @@ export class Membership extends DurableObject {
         let value;
         switch (operation) {
           case 'checkout': value = { url: await this.checkout(member, input) }; break;
+          case 'adminCheckout': value = { url: await this.checkout(member, { shared: true }) }; break;
           case 'refreshIdentity': value = await this.refreshIdentity(member, input.user); break;
           case 'sync': await this.sync(member, input); break;
           case 'updateMetadata': await this.updateMetadata(member, input); break;
@@ -83,14 +84,15 @@ export class Membership extends DurableObject {
       });
   }
 
-  async checkout(member, { user }) {
-    const id = user.id;
-    member = await this.refreshIdentity(member, user);
+  async checkout(member, { user, shared = false }) {
+    if (!shared) member = await this.refreshIdentity(member, user);
+    const id = member.discord_user_id;
     if (member.stripe_customer_id) {
       const subscriptions = await this.subscriptions(member);
       if (subscriptions.some(sub => isOngoingSubscription(sub.status))) {
         // Reconcile a just-completed Checkout even if its webhook is still in flight.
         await this.env.MEMBERSHIP_QUEUE.send({ customer_id: member.stripe_customer_id });
+        if (shared) throw new HttpError(409, 'This member already has an ongoing subscription. Manage it in Stripe.');
         const session = await stripe(this.env, '/billing_portal/sessions', {
           customer: member.stripe_customer_id, return_url: origin(this.env),
         });
@@ -116,8 +118,9 @@ export class Membership extends DurableObject {
       }
     }
 
-    // Enforce this inside the same lock as checkout, including direct resume calls.
-    if (!await this.env.DB.prepare(`SELECT member_id FROM members WHERE member_id = ? AND ${waiverSignedSQL}`).bind(member.member_id).first()) {
+    // Self-service checkout requires a waiver. Admin-shared checkout can precede
+    // onboarding; the access policy still requires waiver eligibility for entry.
+    if (!shared && !await this.env.DB.prepare(`SELECT member_id FROM members WHERE member_id = ? AND ${waiverSignedSQL}`).bind(member.member_id).first()) {
       return `${origin(this.env)}/waiver?signup=1`;
     }
 
@@ -133,16 +136,16 @@ export class Membership extends DurableObject {
       mode: 'subscription',
       customer: member.stripe_customer_id,
       'customer_update[name]': 'auto',
-      client_reference_id: id,
-      success_url: `${origin(this.env)}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
+      client_reference_id: shared ? member.member_id : id,
+      success_url: shared ? `${origin(this.env)}/welcome` : `${origin(this.env)}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${origin(this.env)}/#membership`,
       'line_items[0][price]': price.id,
       'line_items[0][quantity]': '1',
       // Card-only Checkout completes payment synchronously before the welcome redirect.
       'payment_method_types[0]': 'card',
-      'metadata[thelab_discord_id]': id,
+      ...(id ? { 'metadata[thelab_discord_id]': id } : {}),
       'metadata[thelab_member_id]': member.member_id,
-      'subscription_data[metadata][thelab_discord_id]': id,
+      ...(id ? { 'subscription_data[metadata][thelab_discord_id]': id } : {}),
       'subscription_data[metadata][thelab_member_id]': member.member_id,
       ...(coupon ? { 'discounts[0][coupon]': coupon.id } : {}),
     };
@@ -175,7 +178,7 @@ export class Membership extends DurableObject {
     const previous = await this.ctx.storage.get('customer');
     const customer = await this.write('customer', '/customers', previous?.form || {
       name: memberName(member),
-      'metadata[thelab_discord_id]': member.discord_user_id,
+      ...(member.discord_user_id ? { 'metadata[thelab_discord_id]': member.discord_user_id } : {}),
       'metadata[thelab_member_id]': member.member_id,
     });
     if (!/^cus_[A-Za-z0-9]+$/.test(customer.id)) throw new HttpError(502, 'Billing is temporarily unavailable. Please try again.');
@@ -330,6 +333,32 @@ export class Membership extends DurableObject {
     await discord(this.env, path, paid ? 'PUT' : 'DELETE');
     await this.env.DB.prepare('UPDATE members SET discord_last_synced = ? WHERE member_id = ?').bind(now(), member.member_id).run();
   }
+}
+
+export async function createMember(env, fields) {
+  const email = typeof fields.email === 'string' ? fields.email.trim().toLowerCase() : '';
+  if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new HttpError(400, 'Enter a valid email address.');
+  const value = validateMetadata({
+    name_override: fields.name_override, notes: fields.notes, discord_user_id: fields.discord_user_id,
+    billing: fields.billing, discount_type: fields.discount_type,
+    stripe_customer_id: '', stripe_subscription_id: '', metadata_version: '0',
+  });
+  const duplicate = () => new HttpError(409, 'That email or Discord account already belongs to a member. Search the members list to edit their existing record.');
+  if (await env.DB.prepare('SELECT member_id FROM members WHERE email = ? OR discord_email = ? OR discord_user_id = ?')
+    .bind(email, email, value.discord_user_id).first()) throw duplicate();
+  let username = '';
+  if (value.discord_user_id) {
+    const account = await discord(env, `/guilds/${env.DISCORD_GUILD_ID}/members/${value.discord_user_id}`);
+    if (account.user?.id !== value.discord_user_id || !account.user.username || account.user.bot) throw new HttpError(400, 'Choose a valid Discord member account.');
+    username = account.user.username;
+  }
+  const member = await env.DB.prepare(`INSERT INTO members (email, name_override, notes, discord_user_id, discord_username, bill_annually, discount_type)
+    SELECT ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM members WHERE email = ? OR discord_email = ? OR discord_user_id = ?)
+    ON CONFLICT DO NOTHING RETURNING *`)
+    .bind(email, value.name_override, value.notes, value.discord_user_id, username, value.bill_annually, value.discount_type,
+      email, email, value.discord_user_id).first();
+  if (!member) throw duplicate();
+  return member;
 }
 
 export async function registerMember(env, user) {

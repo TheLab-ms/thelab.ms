@@ -180,7 +180,7 @@ describe('JWT authentication', () => {
     expect((await api('/payment/resume', { headers: { Cookie: `thelab_member=${token}` } })).headers.get('Location')).toContain('discord.com/oauth2/authorize');
   });
 
-  it.each(['/admin/members/333333333333333333', '/admin?page=2', '/payment/resume', '/payment/success?session_id=cs_member'])('enters OAuth directly and restores %s', async path => {
+  it.each(['/admin/members/new', '/admin/members/333333333333333333', '/admin?page=2', '/payment/resume', '/payment/success?session_id=cs_member'])('enters OAuth directly and restores %s', async path => {
     await seed({ bill_annually: 1, discount_type: 'student', discord_email: '' });
     const admin = path.startsWith('/admin');
     const response = await api(path);
@@ -381,6 +381,167 @@ describe('member administration', () => {
       headers: { Cookie: cookie, Origin: env.SITE_URL, 'Content-Type': 'application/x-www-form-urlencoded', ...options } });
   }
 
+  async function adminPost(path, values = {}, headers = {}) {
+    return api(path, { method: 'POST', body: new URLSearchParams({ csrf: await hash(`admin-csrf:${token}`), ...values }),
+      headers: { Cookie: cookie, Origin: env.SITE_URL, 'Content-Type': 'application/x-www-form-urlencoded', ...headers } });
+  }
+  const newFields = (extra = {}) => ({ email: '  Maker@Example.com ', name_override: 'New Maker', discord_user_id: '',
+    notes: 'Meet at open house', billing: 'yearly', discount_type: 'student', ...extra });
+
+  it('creates a member from the list and links the same record on later Discord signup', async () => {
+    await authenticate();
+    expect(await (await api('/admin', { headers: { Cookie: cookie } })).text()).toContain('href="/admin/members/new"');
+    expect((await api('/admin/members/new', { headers: { Cookie: cookie } })).status).toBe(200);
+    const response = await adminPost('/admin/members/new', newFields());
+    expect(response.status).toBe(303);
+    const member = await env.DB.prepare('SELECT * FROM members WHERE email = ?').bind(user.email).first();
+    expect(response.headers.get('Location')).toBe(`/admin/members/${member.member_id}?created=1`);
+    expect(member).toMatchObject({ name_override: 'New Maker', notes: 'Meet at open house', discord_user_id: null,
+      bill_annually: 1, discount_type: 'student', stripe_customer_id: null });
+    expect((await queryEvents(env)).events.map(event => event.event_type)).toEqual(['MemberRegistered']);
+    expect(await registerMember(env, user)).toMatchObject({ member_id: member.member_id, discord_user_id: id, bill_annually: 1, discount_type: 'student' });
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it('validates optional Discord membership and rejects duplicate member creation', async () => {
+    await authenticate();
+    mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}`, { user });
+    expect((await adminPost('/admin/members/new', newFields({ discord_user_id: id }))).status).toBe(303);
+    expect(await readMember()).toMatchObject({ discord_username: user.username, discord_email: '', email: user.email });
+    for (const values of [newFields(), newFields({ email: 'other@example.com', discord_user_id: id })]) {
+      const response = await adminPost('/admin/members/new', values);
+      expect(response.status).toBe(409);
+      expect(await response.text()).toContain('already belongs to a member');
+    }
+    await env.DB.prepare('UPDATE members SET email = NULL').run();
+    await env.DB.prepare('UPDATE members SET discord_email = ?').bind(user.email).run();
+    expect((await adminPost('/admin/members/new', newFields())).status).toBe(409);
+    expect((await env.DB.prepare('SELECT COUNT(*) AS count FROM members').first()).count).toBe(1);
+  });
+
+  it('preserves invalid creation drafts and prevents concurrent duplicate inserts', async () => {
+    await authenticate();
+    for (const extra of [{ email: 'bad' }, { billing: 'weekly' }, { discount_type: 'fake' }, { discord_user_id: 'bad' }]) {
+      const response = await adminPost('/admin/members/new', newFields(extra));
+      expect(response.status).toBe(400);
+      expect(await response.text()).toContain('value="New Maker"');
+    }
+    const results = await Promise.all([adminPost('/admin/members/new', newFields()), adminPost('/admin/members/new', newFields())]);
+    expect(results.map(result => result.status).sort()).toEqual([303, 409]);
+    expect((await env.DB.prepare('SELECT COUNT(*) AS count FROM members').first()).count).toBe(1);
+  });
+
+  it('protects creation and checkout generation with admin authentication, CSRF, and POST-only checkout', async () => {
+    await seed(); await authenticate();
+    for (const path of ['/admin/members/new', `/admin/members/${id}/checkout`]) {
+      expect((await adminPost(path, newFields(), { Cookie: '' })).status).toBe(303);
+      expect((await adminPost(path, { ...newFields(), csrf: 'wrong' })).status).toBe(403);
+      expect((await adminPost(path, newFields(), { Origin: 'https://other.example' })).status).toBe(403);
+      expect((await adminPost(path, newFields(), { Cookie: `thelab_admin=${await memberToken(env, await readMember())}` })).status).toBe(303);
+    }
+    expect((await api(`/admin/members/${id}/checkout`, { headers: { Cookie: cookie } })).status).toBe(405);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it('generates and reuses a shareable checkout without Discord or a waiver, then syncs payment to that member', async () => {
+    await authenticate();
+    const created = await adminPost('/admin/members/new', newFields());
+    const path = created.headers.get('Location').split('?')[0];
+    const member = await env.DB.prepare('SELECT * FROM members').first();
+    const url = 'https://checkout.stripe.com/c/pay/shared';
+    mockPrice(true); mockCheckoutEmail();
+    mockStripe(/^\/v1\/coupons\?/, { data: [{ id: 'coupon_student', valid: true, metadata: { discountTypes: 'student' } }], has_more: false });
+    mockStripe('/customers', options => {
+      const form = new URLSearchParams(options.body);
+      expect(form.get('metadata[thelab_member_id]')).toBe(member.member_id);
+      expect(form.has('metadata[thelab_discord_id]')).toBe(false);
+      expect(form.get('name')).toBe('New Maker');
+      return { id: customer };
+    }, { method: 'POST' });
+    mockStripe('/checkout/sessions', options => {
+      const form = new URLSearchParams(options.body);
+      expect(form.get('client_reference_id')).toBe(member.member_id);
+      expect(form.get('metadata[thelab_member_id]')).toBe(member.member_id);
+      expect(form.get('subscription_data[metadata][thelab_member_id]')).toBe(member.member_id);
+      expect(form.has('metadata[thelab_discord_id]')).toBe(false);
+      expect(form.get('line_items[0][price]')).toBe('price_yearly');
+      expect(form.get('discounts[0][coupon]')).toBe('coupon_student');
+      expect(form.get('success_url')).toBe(`${env.SITE_URL}/welcome`);
+      return { id: 'cs_shared', url };
+    }, { method: 'POST' });
+    const response = await adminPost(`${path}/checkout`, { billing: 'monthly', discount_type: '' });
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+    expect(await response.text()).toContain(`readonly value="${url}"`);
+    mockSubs(); mockPrice(true); mockCheckoutEmail();
+    mockStripe(/^\/v1\/coupons\?/, { data: [{ id: 'coupon_student', valid: true, metadata: { discountTypes: 'student' } }], has_more: false });
+    mockStripe('/checkout/sessions/cs_shared', { id: 'cs_shared', status: 'open', url });
+    expect(await (await adminPost(`${path}/checkout`)).text()).toContain(url);
+    mockBilling(); mockSubs([{ ...subscription(), metadata: { thelab_member_id: member.member_id } }]);
+    await processMessage({ customer_id: customer }, env);
+    expect(await env.DB.prepare('SELECT stripe_subscription_state, discord_user_id FROM members').first())
+      .toEqual({ stripe_subscription_state: 'active', discord_user_id: null });
+    expect((await env.DB.prepare('SELECT COUNT(*) AS count FROM waivers').first()).count).toBe(0);
+  });
+
+  it.each(['active', 'trialing', 'past_due', 'incomplete'])('does not generate a shared checkout or portal for an ongoing %s subscription', async state => {
+    await seed(); await authenticate();
+    mockSubs([subscription(state)]);
+    const response = await adminPost(`/admin/members/${id}/checkout`);
+    expect(response.status).toBe(409);
+    expect(await response.text()).toContain('already has an ongoing subscription');
+  });
+
+  it('blocks duplicate shared checkouts while a completed payment is still processing', async () => {
+    await seed(); await authenticate();
+    mockSubs(); mockPrice(); mockCheckoutEmail();
+    mockStripe('/checkout/sessions', { id: 'cs_shared', url: 'https://checkout.stripe.com/c/pay/shared' }, { method: 'POST' });
+    expect((await adminPost(`/admin/members/${id}/checkout`)).status).toBe(200);
+    mockSubs().times(2);
+    mockStripe('/checkout/sessions/cs_shared', { id: 'cs_shared', status: 'complete', subscription: 'sub_pending' });
+    const response = await adminPost(`/admin/members/${id}/checkout`);
+    expect(response.status).toBe(409);
+    expect(await response.text()).toContain('previous checkout is being processed');
+  });
+
+  it('recovers shared checkout creation after an ambiguous Stripe failure using the same idempotency key', async () => {
+    await seed(); await authenticate();
+    mockSubs(); mockPrice(); mockCheckoutEmail();
+    let key;
+    mockStripe('/checkout/sessions', options => {
+      key = options.headers['Idempotency-Key'];
+      expect(key).toBeTruthy();
+      return {};
+    }, { method: 'POST', status: 500 });
+    expect((await adminPost(`/admin/members/${id}/checkout`)).status).toBe(502);
+    mockSubs(); mockPrice(); mockCheckoutEmail();
+    const session = { id: 'cs_recovered', status: 'open', url: 'https://checkout.stripe.com/c/pay/recovered' };
+    mockStripe('/checkout/sessions', options => {
+      expect(options.headers['Idempotency-Key']).toBe(key);
+      return session;
+    }, { method: 'POST' });
+    mockStripe('/checkout/sessions/cs_recovered', session);
+    const response = await adminPost(`/admin/members/${id}/checkout`);
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain(session.url);
+  });
+
+  it('expires a shared checkout on billing edits and generates a replacement at the new price', async () => {
+    await seed(); await authenticate();
+    mockSubs(); mockPrice(); mockCheckoutEmail();
+    mockStripe('/checkout/sessions', { id: 'cs_shared', url: 'https://checkout.stripe.com/c/pay/shared' }, { method: 'POST' });
+    expect((await adminPost(`/admin/members/${id}/checkout`)).status).toBe(200);
+    mockStripe('/checkout/sessions/cs_shared', { id: 'cs_shared', status: 'open' });
+    mockStripe('/checkout/sessions/cs_shared/expire', { status: 'expired' }, { method: 'POST' });
+    expect((await save(fields({ discount_type: '' }))).status).toBe(303);
+    mockSubs(); mockPrice(true); mockCheckoutEmail();
+    mockStripe('/checkout/sessions', options => {
+      expect(new URLSearchParams(options.body).get('line_items[0][price]')).toBe('price_yearly');
+      return { id: 'cs_replacement', url: 'https://checkout.stripe.com/c/pay/replacement' };
+    }, { method: 'POST' });
+    expect(await (await adminPost(`/admin/members/${id}/checkout`)).text()).toContain('/pay/replacement');
+  });
+
   it('records committed admin edits once and leaves history intact on stale or invalid saves', async () => {
     await seed(); await authenticate();
     expect((await save()).status).toBe(303);
@@ -468,11 +629,11 @@ describe('member administration', () => {
     expect(first.headers.get('Cache-Control')).toBe('no-store');
     expect(html).toContain('26 matching members');
     expect(html).toContain('Page 1 of 2');
-    expect(html.match(/href="\/admin\/members\//g)).toHaveLength(25);
+    expect(html.match(/href="\/admin\/members\/[0-9]/g)).toHaveLength(25);
     expect(html).toContain('>maker-25</a>');
     expect(html).not.toContain('>maker-0</a>');
     const second = await (await api('/admin?page=2', { headers: { Cookie: cookie } })).text();
-    expect(second.match(/href="\/admin\/members\//g)).toHaveLength(1);
+    expect(second.match(/href="\/admin\/members\/[0-9]/g)).toHaveLength(1);
     expect(second).toContain('>maker-0</a>');
     expect((await api('/admin?page=3', { headers: { Cookie: cookie } })).headers.get('Location')).toBe('/admin?page=2');
     expect((await api('/admin?page=-1', { headers: { Cookie: cookie } })).status).toBe(400);
@@ -595,13 +756,13 @@ describe('member administration', () => {
     const filters = '&waiver=unsigned&discord=all&payment=inactive';
     const first = await (await api(`/admin?q=Search+%26+Match${filters}`, { headers: { Cookie: cookie } })).text();
     expect(first).toContain('26 matching members');
-    expect(first.match(/href="\/admin\/members\//g)).toHaveLength(25);
+    expect(first.match(/href="\/admin\/members\/[0-9]/g)).toHaveLength(25);
     expect(first).toContain('href="/admin?page=2&amp;q=Search+%26+Match&amp;waiver=unsigned&amp;discord=all&amp;payment=inactive"');
     expect(first).toContain('href="/admin?page=1&amp;waiver=unsigned&amp;discord=all&amp;payment=inactive">Clear search</a>');
     expect(first).toContain('method="get" action="/admin"');
     expect(first).not.toContain('name="page"');
     const second = await (await api(`/admin?page=2&q=Search+%26+Match${filters}`, { headers: { Cookie: cookie } })).text();
-    expect(second.match(/href="\/admin\/members\//g)).toHaveLength(1);
+    expect(second.match(/href="\/admin\/members\/[0-9]/g)).toHaveLength(1);
     expect(second).toContain('href="/admin?page=1&amp;q=Search+%26+Match&amp;waiver=unsigned&amp;discord=all&amp;payment=inactive"');
     expect((await api(`/admin?page=3&q=Search+%26+Match${filters}`, { headers: { Cookie: cookie } })).headers.get('Location'))
       .toBe(`/admin?page=2&q=Search+%26+Match${filters}`);

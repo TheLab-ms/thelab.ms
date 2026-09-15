@@ -45,7 +45,7 @@ export function memberList(members, { total, current, pages, query = '', filters
 	const rows = members.map(m => `<tr><th scope="row"><a class="admin-member-name" href="${e(memberPath(m))}">${e(memberName(m))}</a><small>${e(m.discord_email || m.email || 'No email')}</small><small class="admin-id">Discord ID: ${e(m.discord_user_id || 'Not linked')}</small><small>${m.waiver_signed ? 'Waiver signed' : 'No linked waiver'}</small>${m.non_billable ? '<small>Non-billable</small>' : ''}${m.legacy_billing ? '<small>Legacy billing</small>' : ''}</th><td>${statusBadge(m)}<small>${subscriptionLink(m, env)}</small></td></tr>`).join('');
 	const filtered = query || Object.values(filters).some(value => value !== 'all');
 	const empty = filtered ? 'No members match your search and filters.' : 'No members have registered yet.';
-	return page('Registered members', `<form method="get" action="/admin" role="search" class="admin-form admin-search">
+	return page('Registered members', `<div class="admin-actions"><a class="btn btn-primary" href="/admin/members/new">New member</a></div><form method="get" action="/admin" role="search" class="admin-form admin-search">
     <label for="member-search">Search members</label>
     <div class="admin-search-controls"><input id="member-search" type="search" name="q" value="${e(query)}" maxlength="${MAX_SEARCH_LENGTH}" placeholder="Name, email, Discord handle or ID, fob ID">${query ? `<a class="btn btn-outline" href="${e(memberListURL(1, '', filters))}">Clear search</a>` : ''}</div>
     <div class="admin-list-filters">${memberFilters.map(({ name, label, choices }) => select(name, label, filters[name], choices)).join('')}</div>
@@ -65,7 +65,20 @@ function checkbox(name, label, value, help) {
 	return `<div class="admin-field"><label class="admin-checkbox" for="${name}"><input id="${name}" name="${name}" type="checkbox"${value === 1 || value === 'on' ? ' checked' : ''} aria-describedby="${name}-help">${e(label)}</label><p class="admin-help" id="${name}-help">${e(help)}</p></div>`;
 }
 
-export function editor(member, fields, csrf, env, message = '', status = 200, events = [], waivers = '') {
+export function newMember(fields, csrf, env, message = '', status = 200) {
+	const f = fields || { billing: 'monthly', discount_type: '' };
+	return page('New member', `<p class="admin-back"><a href="/admin">← All members</a></p>${message ? `<p class="admin-notice admin-notice--error" role="alert">${e(message)}</p>` : ''}
+    <form method="post" action="/admin/members/new" class="admin-form admin-section">
+    <input type="hidden" name="csrf" value="${e(csrf)}">
+    ${input('name_override', 'Member name', f.name_override, 160)}
+    <div class="admin-field"><label for="email">Member email</label><input id="email" name="email" type="email" value="${e(f.email || '')}" maxlength="254" required aria-describedby="email-help"><p class="admin-help" id="email-help">Use the member’s Discord email so their account and waiver can link when they sign in.</p></div>
+    ${input('discord_user_id', 'Discord ID (optional)', f.discord_user_id, 20, 'Leave blank if the member has not joined Discord yet.')}
+    <div class="admin-field-grid">${select('billing', 'Billing cycle', f.billing, [['monthly', 'Monthly'], ['yearly', 'Yearly']])}${select('discount_type', 'Discount category', f.discount_type, discounts.map(key => [key, labelDiscount(key)]))}</div>
+    <div class="admin-field"><label for="notes">Internal notes</label><textarea id="notes" name="notes" maxlength="5000" rows="4">${e(f.notes || '')}</textarea></div>
+    <p class="admin-help">After creating the member, open Billing info to generate a shareable checkout link.</p><div class="admin-actions"><button class="btn btn-primary" type="submit">Create member</button><a href="/admin">Cancel</a></div></form>`, csrf, status, env);
+}
+
+export function editor(member, fields, csrf, env, message = '', status = 200, events = [], waivers = '', checkoutURL = '') {
 	const f = fields || { ...member, billing: member.bill_annually ? 'yearly' : 'monthly' };
 	const account = [
 		['Member email', member.email], ['Waiver name', member.waiver_name],
@@ -83,15 +96,19 @@ export function editor(member, fields, csrf, env, message = '', status = 200, ev
     ${input('fob_id', 'Fob ID', f.fob_id, 10, 'One unique ID from 1 through 4294967295. Leave blank to remove. By default, door access requires an active or trialing Stripe subscription and a linked signed waiver or imported Conway waiver eligibility.')}
     ${checkbox('non_billable', 'Non-billable', f.non_billable, 'Activates the assigned fob regardless of payment or waiver status. Takes precedence over legacy billing.')}
     ${checkbox('legacy_billing', 'Legacy billing', f.legacy_billing, 'Activates the assigned fob with a linked signed waiver or imported Conway waiver eligibility, regardless of Stripe status.')}
-    <fieldset class="admin-billing"><legend>Billing preferences</legend><p class="admin-help">For future checkout only. Manage existing subscriptions and invoices in Stripe. Changing these preferences expires open checkout links.</p><div class="admin-field-grid">
+    <details class="admin-billing admin-linked-accounts"${checkoutURL || status >= 400 ? ' open' : ''}><summary>Billing info</summary><p class="admin-help">For future checkout only. Manage existing subscriptions and invoices in Stripe. Changing these preferences expires open checkout links.</p><div class="admin-field-grid">
     ${select('billing', 'Saved billing cycle', f.billing, [['monthly', 'Monthly'], ['yearly', 'Yearly']])}
     ${select('discount_type', 'Discount category', f.discount_type, discounts.map(key => [key, labelDiscount(key)]))}
-    </div><p class="admin-help">Discounts apply automatically and can only be changed by admins. Choose “Standard rate” to remove a discount. Send the member to <a href="/payment/resume">/payment/resume</a> to continue checkout.</p>
-    </fieldset><div class="admin-field"><label for="notes">Internal notes</label><textarea id="notes" name="notes" maxlength="5000" rows="4">${e(f.notes ?? '')}</textarea></div>
+    </div><p class="admin-help">Discounts apply automatically and can only be changed by admins. Choose “Standard rate” to remove a discount. Save any changes before generating a link.</p>
+    <div class="admin-actions"><button class="btn btn-outline" type="submit" form="generate-checkout">Generate checkout link</button></div>
+    <p class="admin-help">Share this Stripe link directly with the member, even before they link Discord. Links expire after 24 hours. A signed waiver is still required for normal door access.</p>
+    ${checkoutURL ? `<div class="admin-field"><label for="checkout-url">Shareable Stripe checkout URL</label><input id="checkout-url" type="url" readonly value="${e(checkoutURL)}" aria-describedby="checkout-help"><p class="admin-help" id="checkout-help">Select and copy this URL to send it to the member. Generating again reuses the current open link.</p></div>` : ''}
+    </details><div class="admin-field"><label for="notes">Internal notes</label><textarea id="notes" name="notes" maxlength="5000" rows="4">${e(f.notes ?? '')}</textarea></div>
     </section><details class="admin-section admin-linked-accounts"${status >= 400 ? ' open' : ''}><summary>Linked accounts <span>Edit Discord and Stripe IDs</span></summary><div class="admin-linked-fields">
     ${input('discord_user_id', 'Discord ID', f.discord_user_id, 20, 'Changing this ID transfers membership to that Discord account. Its email appears after it signs in. Waiver-only members can leave it blank.', Boolean(member.discord_user_id))}
     ${input('stripe_customer_id', 'Stripe customer ID', f.stripe_customer_id, 255)}
     ${input('stripe_subscription_id', 'Stripe subscription ID', f.stripe_subscription_id, 255, 'Must belong to the customer above. Stripe sync selects the current membership subscription and may replace this ID.')}
     </div></details><div class="admin-actions"><button class="btn btn-primary" type="submit">Save changes</button><a href="${e(memberPath(member))}">Reload member</a></div></form>
-    <aside class="admin-section admin-account" aria-labelledby="account-details"><h2 id="account-details">Account details</h2><p class="admin-help">Read-only · Updated from Discord sign-in and Stripe sync.</p><dl class="admin-account-fields">${account.map(([label, value]) => `<div><dt>${e(label)}</dt><dd>${e(value || '—')}</dd></div>`).join('')}</dl><dl class="admin-account-dates">${dates.map(([label, value]) => `<div><dt>${e(label)}</dt><dd>${timestamp(value)}</dd></div>`).join('')}</dl></aside></div>${waivers}${recentHistory(member, events)}`, csrf, status, env);
+    <aside class="admin-section admin-account" aria-labelledby="account-details"><h2 id="account-details">Account details</h2><p class="admin-help">Read-only · Updated from Discord sign-in and Stripe sync.</p><dl class="admin-account-fields">${account.map(([label, value]) => `<div><dt>${e(label)}</dt><dd>${e(value || '—')}</dd></div>`).join('')}</dl><dl class="admin-account-dates">${dates.map(([label, value]) => `<div><dt>${e(label)}</dt><dd>${timestamp(value)}</dd></div>`).join('')}</dl></aside></div>
+    <form id="generate-checkout" method="post" action="${e(memberPath(member))}/checkout"><input type="hidden" name="csrf" value="${e(csrf)}"></form>${waivers}${recentHistory(member, events)}`, csrf, status, env);
 }
