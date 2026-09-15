@@ -8,7 +8,8 @@ import { logError, requestContext } from './logging.js';
 import { printerAccess } from './printers.js';
 import { edgeJWKS } from './edge-auth.js';
 import { waiverRequest } from './waiver.js';
-import { bindFob, cleanupFobClaims, kioskClaims, kioskPage } from './kiosk.js';
+import { bindFob } from './keyfob.js';
+import { cleanupFobClaims, fobClaimStatus } from './fob-claims.js';
 export { Membership } from './membership.js';
 export { EdgeSync } from './edge-sync.js';
 import { edgeCall, edgeEnabled, nightlyDate } from './edge-sync.js';
@@ -127,9 +128,9 @@ const routes = new Map([
   ['/payment/success', ['GET', success]],
   ['/payment/resume', ['GET', resume]],
   ['/machines', ['GET', printerAccess]],
-  ['/kiosk', ['GET', kioskPage]],
-  ['/kiosk/claims', ['GET, POST', kioskClaims]],
+  ['/kiosk', ['GET', () => redirect('https://edge.thelab.ms/kiosk')]],
   ['/keyfob/bind', ['GET, POST', bindFob]],
+  ['/keyfob/status', ['GET', fobClaimStatus]],
   ['/webhooks/stripe', ['POST', webhook]],
   ['/admin/login', ['GET', (request, env) => signup(request, env, true)]],
 ]);
@@ -161,7 +162,7 @@ export default {
     } catch (error) {
       logError('request.failed', error, context, env);
       if (path === '/webhooks/stripe') return json({ error: 'Webhook could not be accepted.' }, error instanceof HttpError ? error.status : 500);
-      if (path === '/kiosk/claims') return json({ error: error instanceof HttpError ? error.message : 'Fob enrollment is temporarily unavailable. Please try again.' }, error instanceof HttpError ? error.status : 500);
+      if (path === '/keyfob/status') return json({ error: error instanceof HttpError ? error.message : 'Fob enrollment is temporarily unavailable. Please try again.' }, error instanceof HttpError ? error.status : 500);
       const response = errorPage(error);
       if (path === '/login/discord/callback') {
         // Clearing an OAuth cookie must still work when SITE_URL itself is invalid.

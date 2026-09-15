@@ -1,7 +1,4 @@
 SITE_URL=http://localhost:8787
-KIOSK_HOSTNAME=space.thelab.ms
-# Localhost only; production origins always enforce the network check.
-KIOSK_SKIP_IP_CHECK=true
 AUTH_SECRET=
 TURNSTILE_SITE_KEY=
 TURNSTILE_SECRET_KEY=

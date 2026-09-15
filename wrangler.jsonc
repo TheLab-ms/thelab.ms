@@ -19,7 +19,6 @@
 			"/payment/*",
 			"/machines",
 			"/kiosk",
-			"/kiosk/*",
 			"/keyfob/*",
 			"/webhooks/*"
 		]
@@ -89,7 +88,6 @@
 	},
 	"vars": {
 		"SITE_URL": "https://thelab.ms",
-		"KIOSK_HOSTNAME": "space.thelab.ms",
 		"TURNSTILE_SITE_KEY": "0x4AAAAAAA-xMVuWzfkR2PKz",
 		"PRINTER_EDGE_URL": "https://edgeproxy.thelab.ms/machines",
 		"EDGE_URL": "https://edgeproxy.thelab.ms",

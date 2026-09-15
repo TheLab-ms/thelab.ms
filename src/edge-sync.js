@@ -28,6 +28,25 @@ export function nightlyDate(timestamp) {
 }
 
 const validFob = n => Number.isInteger(n) && n > 0 && n <= 4294967295;
+
+export async function edgeRequest(env, path, method = 'GET', body) {
+  const { EDGE_URL: origin } = env;
+  const url = new URL(origin);
+  if (url.protocol !== 'https:' || url.origin !== origin) throw new Error('Invalid edge configuration.');
+  const token = await edgeToken(env);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20000);
+  try {
+    const response = await fetch(`${origin}${path}`, {
+      method, redirect: 'manual', signal: controller.signal,
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    const text = await boundedText(response, path === '/api/swipes' ? 32 * 1024 * 1024 : 16384);
+    return { status: response.status, text };
+  } finally { clearTimeout(timer); }
+}
+
 function goalValid(goal) {
   return goal && Number.isSafeInteger(goal.version) && goal.version >= 0 && Array.isArray(goal.fobs)
     && goal.fobs.length <= 512 && goal.fobs.every(validFob) && new Set(goal.fobs).size === goal.fobs.length;
@@ -77,21 +96,7 @@ export class EdgeSync extends DurableObject {
   }
 
   async request(path, method = 'GET', body) {
-    const { EDGE_URL: origin } = this.env;
-    const url = new URL(origin);
-    if (url.protocol !== 'https:' || url.origin !== origin) throw new Error('Invalid edge configuration.');
-    const token = await edgeToken(this.env);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 20000);
-    try {
-      const response = await fetch(`${origin}${path}`, {
-        method, redirect: 'manual', signal: controller.signal,
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        ...(body ? { body: JSON.stringify(body) } : {}),
-      });
-      const text = await boundedText(response, path === '/api/swipes' ? 32 * 1024 * 1024 : 16384);
-      return { status: response.status, text };
-    } finally { clearTimeout(timer); }
+    return edgeRequest(this.env, path, method, body);
   }
 
   async reconcile(full) {

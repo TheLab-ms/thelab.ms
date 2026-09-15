@@ -3,7 +3,7 @@ import { encodeBase64URL as encode, decodeBase64URL as decode, encodeJSON as jso
 import { memberFilters, memberListParams } from './admin-search.js';
 import { eventListParams } from './member-events.js';
 
-export const TOKEN_AGE = { member: 86400, admin: 8 * 3600, oauth: 600, fob: 300 };
+export const TOKEN_AGE = { member: 86400, admin: 8 * 3600, oauth: 600 };
 const encoder = new TextEncoder();
 
 function configured(env) {
@@ -30,7 +30,7 @@ export async function verifyToken(env, token, audience) {
     if (metadata.alg !== 'HS256' || metadata.typ !== 'JWT' || metadata.crit) return null;
     if (!await crypto.subtle.verify('HMAC', signingKey, decode(signature), encoder.encode(`${header}.${payload}`))) return null;
     const claims = JSON.parse(new TextDecoder().decode(decode(payload)));
-    if (claims.iss !== issuer || claims.aud !== audience || typeof claims.sub !== 'string' || !(['oauth', 'fob'].includes(audience) ? opaque : discordID).test(claims.sub)
+    if (claims.iss !== issuer || claims.aud !== audience || typeof claims.sub !== 'string' || !(audience === 'oauth' ? opaque : discordID).test(claims.sub)
       || !Number.isInteger(claims.iat) || !Number.isInteger(claims.exp) || claims.iat > now() || claims.exp <= now()
       || claims.exp <= claims.iat || claims.exp - claims.iat > TOKEN_AGE[audience]) return null;
     return claims;
@@ -76,7 +76,7 @@ export function loginDestination(value, purpose) {
     return '/admin';
   }
   if (purpose === 'member' && value === '/waiver?signup=1') return value;
-  if (purpose === 'member' && value.length < 1100 && /^\/keyfob\/bind\?token=[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/.test(value)) return value;
+  if (purpose === 'member' && /^\/keyfob\/bind\?token=[a-f0-9]{64}$/.test(value)) return value;
   return /^\/payment\/success\?session_id=cs_[A-Za-z0-9_]+$/.test(value) ? value : '/payment/resume';
 }
 

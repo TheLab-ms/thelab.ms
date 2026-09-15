@@ -58,6 +58,13 @@ CREATE TABLE IF NOT EXISTS swipes (
 DROP INDEX IF EXISTS pending_swipes;
 DROP INDEX IF EXISTS swipe_history;
 CREATE INDEX IF NOT EXISTS swipe_expiry ON swipes(time);
+CREATE TABLE IF NOT EXISTS kiosk_claims (
+  id TEXT PRIMARY KEY,
+  fob INTEGER NOT NULL CHECK (fob BETWEEN 1 AND 4294967295),
+  created INTEGER NOT NULL,
+  expires INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS kiosk_claim_expiry ON kiosk_claims(expires);
 `
 
 func openEdge(dir string) (*edge, error) {

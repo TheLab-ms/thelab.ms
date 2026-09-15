@@ -98,6 +98,11 @@ func secretEqual(a, b string) bool {
 func (e *edge) routes() (http.Handler, http.Handler) {
 	lan, tunnel := http.NewServeMux(), http.NewServeMux()
 	lan.HandleFunc("POST /api/fobs", e.fobs)
+	for _, path := range []string{"/kiosk", "/kiosk/app.js", "/kiosk/style.css", "/kiosk/favicon.svg"} {
+		lan.HandleFunc("GET "+path, kioskAsset)
+	}
+	lan.HandleFunc("POST /kiosk/claims", e.issueKioskClaim)
+	lan.HandleFunc("GET /kiosk/claims", e.kioskClaimStatus)
 	lan.HandleFunc("/{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		e.configure(w, r)
@@ -106,6 +111,7 @@ func (e *edge) routes() (http.Handler, http.Handler) {
 	tunnel.HandleFunc("GET /api/goal", e.getGoal)
 	tunnel.HandleFunc("PATCH /api/goal", e.patchGoal)
 	tunnel.HandleFunc("GET /api/swipes", e.getSwipes)
+	tunnel.HandleFunc("GET /api/kiosk/claim", e.getKioskClaim)
 	tunnel.HandleFunc("GET /machines", e.printers.dashboard)
 	tunnel.HandleFunc("GET /machines/content", e.printers.dashboard)
 	tunnel.HandleFunc("GET /machines/images/{image}", e.printers.snapshot)

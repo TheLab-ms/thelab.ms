@@ -13,7 +13,7 @@ beforeEach(async () => {
   vi.stubGlobal('document', document);
   vi.stubGlobal('window', window);
   vi.stubGlobal('fetch', fetch);
-  await import('../static/kiosk.js');
+  await import('../edgeproxy/kiosk.js');
 });
 afterEach(() => { window.dispatchEvent(new Event('pagehide')); vi.useRealTimers(); vi.unstubAllGlobals(); });
 

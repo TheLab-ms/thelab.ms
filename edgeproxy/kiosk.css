@@ -1,4 +1,12 @@
-.kiosk-page { font-family: var(--font-heading); }
+:root {
+  --color-bg: #0d0d0d; --color-bg-alt: #141414; --color-border: #2a2a2a; --color-border-light: #333;
+  --color-accent: #00c853; --color-accent-dark: #009624; --color-accent-glow: rgba(0, 200, 83, .15); --color-accent-subtle: rgba(0, 200, 83, .08);
+  --color-heading: #fff; --color-text-muted: #999; --font-heading: system-ui, -apple-system, sans-serif; --font-body: monospace; --radius-lg: 12px;
+}
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+.kiosk-page { font-family: var(--font-heading); line-height: 1.7; color: #e0e0e0; background: var(--color-bg); }
+.btn { padding: .875rem 2rem; font: 600 .95rem var(--font-heading); border: 2px solid var(--color-border-light); border-radius: 8px; cursor: pointer; color: #e0e0e0; background: transparent; }
+.btn:hover, .btn:focus-visible { border-color: var(--color-accent); color: var(--color-accent); }
 .kiosk-shell { min-height: 100vh; min-height: 100svh; max-width: 1600px; margin: auto; padding: clamp(1.5rem, 4vw, 4rem); display: flex; flex-direction: column; gap: 2rem; }
 .kiosk-header, .kiosk-brand, .kiosk-footer { display: flex; align-items: center; }
 .kiosk-header { justify-content: space-between; gap: 1rem; }
