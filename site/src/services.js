@@ -405,7 +405,7 @@ export async function startLogin(request, env, purpose = 'signup') {
     purpose, return_to: destination,
   });
   const target = new URL('https://discord.com/oauth2/authorize');
-  target.search = new URLSearchParams({ client_id: env.DISCORD_CLIENT_ID, response_type: 'code', scope: 'identify email', redirect_uri: `${origin(env)}/login/discord/callback`, state }).toString();
+  target.search = new URLSearchParams({ client_id: env.DISCORD_CLIENT_ID, response_type: 'code', scope: 'identify email', prompt: 'none', redirect_uri: `${origin(env)}/login/discord/callback`, state }).toString();
   const response = redirect(target.href);
   response.headers.set('Set-Cookie', cookieHeader(env, 'thelab_oauth', browser, TOKEN_AGE.oauth));
   return response;
