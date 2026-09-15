@@ -4,7 +4,7 @@ import { discord, stripe, stripeList } from './providers.js';
 import { grantsMembership, isOngoingSubscription, selectCurrentSubscription } from './membership-policy.js';
 import { memberName, validateMetadata } from './member-metadata.js';
 import { logError } from './logging.js';
-import { armEdge, kickEdge } from './edge-sync.js';
+import { kickEdge } from './edge-sync.js';
 import { linkFob } from './fob-claims.js';
 import { waiverSignedSQL } from './fob-access.js';
 
@@ -214,7 +214,6 @@ export class Membership extends DurableObject {
       try { await discord(this.env, `/guilds/${this.env.DISCORD_GUILD_ID}/members/${member.discord_user_id}/roles/${this.env.DISCORD_ROLE_ID}`, 'DELETE'); }
       catch (error) { if (error.providerStatus !== 404) throw error; }
     }
-    await armEdge(this.env);
     // Foreign keys retain waivers/history; triggers close fob assignments and
     // mark the access cache for synchronization.
     await this.env.DB.prepare('DELETE FROM members WHERE member_id = ?').bind(member.member_id).run();
@@ -297,7 +296,6 @@ export class Membership extends DurableObject {
       // The queued sync uses this same stable lock, so it runs after the save.
       await this.env.MEMBERSHIP_QUEUE.send({ member_id: member.member_id });
     }
-    await armEdge(this.env);
     let result;
     try { result = await this.env.DB.prepare(`UPDATE members SET discord_user_id = ?, discord_username = ?, discord_email = ?,
       billing_name = ?, billing_email = ?, name_override = ?, notes = ?, bill_annually = ?, discount_type = ?,
@@ -334,7 +332,6 @@ export class Membership extends DurableObject {
     const subscriptions = await this.subscriptions(member);
     const current = selectCurrentSubscription(subscriptions);
     const paid = grantsMembership(current?.status);
-    await armEdge(this.env);
     await this.env.DB.prepare(`UPDATE members SET stripe_subscription_id = ?, stripe_subscription_state = ?, stripe_synced_at = ?,
       billing_name = ?, billing_email = ?, metadata_version = metadata_version + 1 WHERE member_id = ?`)
       .bind(current?.id || null, current?.status || null, now(), billing.name || '', billing.email || '', member.member_id).run();

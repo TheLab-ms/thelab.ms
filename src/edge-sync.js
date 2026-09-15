@@ -15,9 +15,6 @@ export async function edgeCall(env, operation, input) {
   if (!result.ok) throw new HttpError(503, result.error);
   return result.value;
 }
-// Arm BEFORE committing access-affecting changes. A crash after D1 commits still
-// leaves an alarm that discovers the transactional revision/outbox.
-export async function armEdge(env) { if (edgeEnabled(env)) await edgeCall(env, 'arm'); }
 export async function kickEdge(env) {
   if (!edgeEnabled(env)) return;
   try { await edgeCall(env, 'changes'); }
@@ -64,16 +61,9 @@ export class EdgeSync extends DurableObject {
     const work = this.tail.then(async () => {
       try {
         if (!edgeEnabled(this.env)) throw new Error('Edge sync is not configured.');
-        if (operation === 'arm') {
-          if (!await this.ctx.storage.getAlarm()) await this.ctx.storage.setAlarm(Date.now() + 30000);
-        } else if (operation === 'changes') await this.reconcile(false);
-        else if (operation === 'full' || operation === 'nightly') {
-          if (operation === 'nightly' && await this.ctx.storage.get('nightlyDone') === input) return { ok: true };
-          await this.ctx.storage.setAlarm(Date.now() + 30000);
-          const pending = await this.ctx.storage.get('fullPending');
-          await this.ctx.storage.put('fullPending', { date: operation === 'nightly' ? input : pending?.date || null });
-          await this.full();
-        } else throw new Error('Unknown edge operation.');
+        if (!['changes', 'full', 'nightly'].includes(operation)) throw new Error('Unknown edge operation.');
+        if (operation === 'nightly' && await this.ctx.storage.get('nightlyDone') === input) return { ok: true };
+        await this.sync(operation, input);
         return { ok: true };
       } catch (error) {
         logError('edge.failed', error, { operation }, this.env);
@@ -87,11 +77,12 @@ export class EdgeSync extends DurableObject {
   async alarm() {
     const work = this.tail.then(async () => {
       if (!edgeEnabled(this.env)) { await this.ctx.storage.deleteAlarm(); return; }
-      await this.ctx.storage.setAlarm(Date.now() + 60000);
-      if (await this.ctx.storage.get('fullPending')) await this.full();
-      await this.reconcile(false);
-      // Keep watching the transactional outbox. A member write can finish after
-      // its pre-commit arm call, even if the request dies before its kick call.
+      try { await this.sync('changes'); }
+      catch (error) {
+        logError('edge.failed', error, { operation: 'retry' }, this.env);
+        // If arming itself failed, let the runtime retry this alarm invocation.
+        if (await this.ctx.storage.getAlarm() === null) throw error;
+      }
     });
     this.tail = work.catch(() => {});
     return work;
@@ -101,10 +92,33 @@ export class EdgeSync extends DurableObject {
     return edgeRequest(this.env, path, method, body);
   }
 
+  async sync(operation, input) {
+    // The alarm is the durable pending marker. Full requests also retain their
+    // mode/date atomically, so an ordinary change cannot downgrade a full retry.
+    let pending = await this.ctx.storage.get('fullPending');
+    if (operation === 'full' || operation === 'nightly') {
+      pending = { date: operation === 'nightly' ? input : pending?.date || null };
+    }
+    // Writes without an intervening await are committed atomically by storage.
+    await Promise.all([
+      this.ctx.storage.setAlarm(Date.now() + 60000),
+      ...(pending ? [this.ctx.storage.put('fullPending', pending)] : []),
+    ]);
+    await this.reconcile(Boolean(pending));
+    if (pending) {
+      if (pending.date) await this.ctx.storage.put('nightlyDone', pending.date);
+      await this.ctx.storage.delete('fullPending');
+      console.log(JSON.stringify({ event: 'edge.full.completed', date: pending.date }));
+    }
+    // A change committed during delivery remains pending. Otherwise go idle;
+    // subsequent writes notify us immediately, with nightly sync as a backstop.
+    const { revision } = await this.env.DB.prepare('SELECT revision FROM edge_changes WHERE id = 1').first();
+    if (revision === await this.ctx.storage.get('syncedRevision')) await this.ctx.storage.deleteAlarm();
+  }
+
   async reconcile(full) {
     const revision = (await this.env.DB.prepare('SELECT revision FROM edge_changes WHERE id = 1').first()).revision;
     if (!full && await this.ctx.storage.get('eventKeyDelivered') && revision === await this.ctx.storage.get('syncedRevision')) return;
-    await this.ctx.storage.setAlarm(Date.now() + 30000);
     let eventKey = await this.ctx.storage.get('eventSigningKey');
     if (!eventKey) {
       eventKey = randomToken();
@@ -138,13 +152,6 @@ export class EdgeSync extends DurableObject {
     }
     await this.ctx.storage.put('syncedRevision', revisionRows.results[0].revision);
     await this.ctx.storage.put('eventKeyDelivered', true);
-  }
-
-  async full() {
-    await this.reconcile(true);
-    const pending = await this.ctx.storage.get('fullPending');
-    if (pending?.date) await this.ctx.storage.put('nightlyDone', pending.date);
-    await this.ctx.storage.delete('fullPending');
   }
 
   async fetch(request) {

@@ -8,7 +8,6 @@ import { eventListParams, eventListURL, queryEvents, recentMemberEvents } from '
 import { eventList } from './event-views.js';
 import { memberName, memberPath } from './member-metadata.js';
 import { memberWaivers } from './waiver.js';
-import { edgeCall } from './edge-sync.js';
 import { fobEnabledSQL, waiverSignedSQL } from './fob-access.js';
 
 const PAGE_SIZE = 25;
@@ -86,7 +85,7 @@ export async function adminRequest(request, env, context = requestContext(reques
   const url = new URL(request.url), path = url.pathname;
   const match = path.match(/^\/admin\/members\/([1-9][0-9]{16,19}|[a-f0-9]{32})(\/events|\/checkout|\/delete)?$/);
   const creating = path === '/admin/members/new';
-  const methods = path === '/admin' || path === '/admin/' || path === '/admin/events' || match?.[2] === '/events' ? ['GET'] : path === '/admin/logout' || path === '/admin/edge/resync' || ['/checkout', '/delete'].includes(match?.[2]) ? ['POST'] : match || creating ? ['GET', 'POST'] : [];
+  const methods = path === '/admin' || path === '/admin/' || path === '/admin/events' || match?.[2] === '/events' ? ['GET'] : path === '/admin/logout' || ['/checkout', '/delete'].includes(match?.[2]) ? ['POST'] : match || creating ? ['GET', 'POST'] : [];
   if (!methods.length) {
     logError('admin.rejected', new HttpError(404, 'Admin page not found.'), context, env);
     return page('Not found', '<p>This admin page does not exist. <a href="/admin">Return to members</a>.</p>', null, 404);
@@ -110,10 +109,6 @@ export async function adminRequest(request, env, context = requestContext(reques
     }
     // Admin tokens are issued only after the OAuth role check. Trust that
     // authorization until the signed session expires, without a Discord round trip.
-    if (path === '/admin/edge/resync') {
-      await edgeCall(env, 'full');
-      return page('Cache sync complete', '<p role="status">The complete authorized fob set and event signing key were sent to edgeproxy. Swipe events are pushed automatically.</p><p><a href="/admin/events?event_type=FobSwipe">View swipes</a></p>', csrf, 200, env);
-    }
     if (path === '/admin/events') return await history(request, env, csrf);
     if (creating) {
       if (!fields) return newMember(null, csrf, env);
@@ -173,9 +168,6 @@ export async function adminRequest(request, env, context = requestContext(reques
     return editor(member, null, csrf, env, url.searchParams.get('saved') === '1' ? 'Member metadata saved.' : url.searchParams.get('created') === '1' ? 'Member created. Open Billing info to generate a checkout link.' : '', 200, events, waivers);
   } catch (error) {
     logError('admin.failed', error, context, env);
-    if (path === '/admin/edge/resync' && csrf && error.status === 503) {
-      return page('Cache sync pending', `<p role="alert">${e(error.message)}</p><p><a href="/admin">Return to members</a></p>`, csrf, 503, env);
-    }
     return page('Admin access', `<p role="alert">${e(error instanceof HttpError ? error.message : 'Admin is temporarily unavailable. Please try again.')}</p><p><a href="${e(path + url.search)}">Retry</a> · <a href="/admin">Return to members</a> · <a href="/admin/login">Sign in again</a></p>`, csrf, error instanceof HttpError ? error.status : 500, env);
   }
 }

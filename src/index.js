@@ -109,6 +109,14 @@ async function webhook(request, env) {
 }
 
 export async function processMessage(body, env) {
+  // Operator messages are published through the authenticated Cloudflare API.
+  if (body?.type !== undefined) {
+    if (body.type !== 'edge.sync' || body.mode !== 'full' || Object.keys(body).some(key => !['type', 'mode'].includes(key))) {
+      throw new HttpError(400, 'Invalid queue message.');
+    }
+    await edgeCall(env, 'full');
+    return;
+  }
   if (body?.member_id && /^[a-f0-9]{32}$/.test(body.member_id) && !body.customer_id) {
     await coordinated(env, body.member_id, 'sync');
     return;

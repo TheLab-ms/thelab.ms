@@ -1,5 +1,5 @@
 import { HttpError, json, now, opaque } from './http.js';
-import { armEdge, edgeRequest, kickEdge } from './edge-sync.js';
+import { edgeRequest, kickEdge } from './edge-sync.js';
 
 export function cleanupFobClaims(env) {
   return env.DB.prepare('DELETE FROM fob_claims WHERE expires <= ?').bind(now()).run();
@@ -49,7 +49,6 @@ export async function linkFob(env, member, input) {
     throw new HttpError(401, 'Please sign in again to continue.');
   }
   const claim = await fobClaim(env, input.token);
-  await armEdge(env);
   let result;
   try {
     result = await env.DB.prepare(`UPDATE fob_claims SET claimed_by = ?

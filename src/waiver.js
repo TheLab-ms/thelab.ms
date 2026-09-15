@@ -3,7 +3,7 @@ import { signedInMember, startLogin } from './auth.js';
 import { provider } from './providers.js';
 import { logError } from './logging.js';
 import { waiverContent } from './waiver-content.js';
-import { armEdge, kickEdge } from './edge-sync.js';
+import { kickEdge } from './edge-sync.js';
 
 // Conway's deliberately small markdown format. All text is escaped at rendering.
 export function parseWaiver(content) {
@@ -95,7 +95,6 @@ export async function waiverRequest(request, env) {
     await verifyHuman(request, env, form.get('cf-turnstile-response'));
     const evidence = [waiver.version, waiver.content, options.name, options.email, JSON.stringify(waiver.agreements)];
     let signed;
-    await armEdge(env);
     if (signup) {
       signed = await env.DB.prepare(`INSERT INTO waivers (version, content, name, email, agreements, member_id)
         SELECT ?, ?, ?, ?, ?, member_id FROM members WHERE member_id = ? AND discord_user_id = ? AND auth_version = ?

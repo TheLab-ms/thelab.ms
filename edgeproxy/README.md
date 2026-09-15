@@ -92,10 +92,58 @@ the event's original timestamp.
 
 ## Upgrade
 
-Deploy the Worker and edgeproxy, then use **Sync Cache** to deliver the full goal
-and signing key immediately (the next reconciliation also provisions it).
+Deploy the Worker and edgeproxy, then request an [operator full sync](#operator-full-sync)
+to deliver the full goal and signing key immediately (the next reconciliation also provisions it).
 No additional environment secret or D1 migration is required. Edgeproxy upgrades
 its SQLite schema automatically and queues retained history for delivery.
 
 Manual/nightly sync now reconciles goal state only. The old edgeproxy
 `GET /api/swipes` pull endpoint has been removed.
+
+# Access-list synchronization
+
+Billing updates, admin edits/deletions, waiver signatures, and fob assignments
+notify EdgeSync immediately after committing to D1. EdgeSync serializes delivery
+and sends versioned diffs (or a full snapshot when necessary).
+
+An alarm is armed when sync starts, before reading D1 or contacting edgeproxy.
+Failed work retries after 60 seconds. Full snapshots retain their pending mode
+and nightly date across retries. Once delivery catches up with D1, the alarm is
+deleted: there is no periodic idle polling. An alarm from an older deployment
+reconciles once and then follows the same retry-or-idle behavior.
+
+This relies on post-commit notifications arriving. The existing nightly full
+reconciliation at 1 AM America/Chicago is the backstop for missed notifications
+and direct database edits. Swipe uploads run independently and do not arm sync
+alarms.
+
+## Operator full sync
+
+Manual sync is available through the Cloudflare management API, rather than the
+admin website. It sends the complete current authorized fob set and event signing
+key; it does not re-fetch billing state or re-import delivered swipes.
+
+1. Obtain the account ID with `npx wrangler whoami` and the ID of
+   `thelab-membership` with `npx wrangler queues info thelab-membership`.
+2. Set `ACCOUNT_ID`, `QUEUE_ID`, and `CLOUDFLARE_API_TOKEN` in your shell. The API
+   token needs **Account → Queues → Edit** (`Queues Write`) for that account.
+3. Start `npx wrangler tail thelab-ms --format pretty` in another terminal.
+4. Publish the operator message:
+
+   ```sh
+   curl --fail-with-body --silent --show-error \
+     "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/queues/${QUEUE_ID}/messages" \
+     --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+     --header 'Content-Type: application/json' \
+     --data '{"content_type":"json","body":{"type":"edge.sync","mode":"full"}}'
+   ```
+
+An API response with `success: true` means **queued**, not completed. Look for
+`edge.full.completed` in the Worker logs to confirm delivery. `edge.failed` and
+`queue.failed` report failures; the pending alarm and queue delivery retries
+handle recovery. Repeating the command is safe: it sends another versioned full
+snapshot. The installed Wrangler has no queue-publish command, so publication
+uses the API directly.
+
+Removing the admin sync action and idle watchdog requires only a Worker deploy;
+there is no new D1 migration, queue, binding, or environment secret.

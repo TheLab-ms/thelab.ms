@@ -187,6 +187,7 @@ it('synchronizes replacement immediately and retains the commit when edge delive
   });
   expect((await bind(c, m)).status).toBe(200);
   expect(writes).toEqual([{ version: expect.any(Number), fobs: [123], event_signing_key: expect.stringMatching(/^[a-f0-9]{64}$/) }]);
+  await runInDurableObject(env.EDGE_SYNC.get(env.EDGE_SYNC.idFromName('edge')), async (_instance, ctx) => { expect(await ctx.storage.getAlarm()).toBeNull(); });
   fetchSpy.mockRejectedValue(new Error('Edge offline'));
   expect((await bind(next, m)).status).toBe(200);
   expect((await readMember(m)).fob_id).toBe(456);

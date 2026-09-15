@@ -217,6 +217,44 @@ func TestSwipeSenderRetriesWithoutNotifications(t *testing.T) {
 	}
 }
 
+func TestSwipeSenderIdleAfterDelivery(t *testing.T) {
+	e := testEdge(t)
+	pushVersion(t, e, 1, "[]", 204)
+	requests := make(chan struct{}, 10)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- struct{}{}
+		w.WriteHeader(204)
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	const interval = 20 * time.Millisecond
+	go func() { defer close(done); e.sendSwipes(ctx, server.URL, server.Client(), interval) }()
+	defer func() { cancel(); <-done }()
+	// Neither startup nor the idle window after delivery should upload anything.
+	idle := func() {
+		t.Helper()
+		select {
+		case <-requests:
+			t.Fatal("idle sender uploaded swipes")
+		case <-time.After(5 * interval):
+		}
+	}
+	idle()
+	for range 2 {
+		addSwipes(t, e, 1)
+		select {
+		case <-requests:
+		case <-time.After(2 * time.Second):
+			t.Fatal("new swipe did not wake sender")
+		}
+		idle()
+		if pendingCount(t, e) != 0 {
+			t.Fatal("successful delivery still pending")
+		}
+	}
+}
+
 func TestSwipeAcknowledgmentFailureAndHTTPStatus(t *testing.T) {
 	e := testEdge(t)
 	pushVersion(t, e, 1, "[]", 204)

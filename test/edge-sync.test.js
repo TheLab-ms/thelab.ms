@@ -2,7 +2,7 @@ import { env } from 'cloudflare:workers';
 import { applyD1Migrations, reset, runInDurableObject, runDurableObjectAlarm } from 'cloudflare:test';
 import { beforeEach, afterEach, expect, it, vi } from 'vitest';
 import { edgeCall, nightlyDate } from '../src/edge-sync.js';
-import worker from '../src/index.js';
+import worker, { processMessage } from '../src/index.js';
 import { issueToken } from '../src/auth.js';
 import { hash } from '../src/http.js';
 import { testEdgePrivateKey } from './edge-auth-helpers.js';
@@ -56,6 +56,118 @@ async function member(fob = 7, status = 'active', waiver = true) {
   if (waiver) await env.DB.prepare(`INSERT INTO waivers(member_id, version, content, name, email, agreements) VALUES (?, 1, 'Terms', 'Maker', 'maker@example.com', '[]')`).bind(row.member_id).run();
   return row;
 }
+
+it('goes idle after immediate and unchanged syncs, and wakes for the next change', async () => {
+  const m = await member();
+  await edgeCall(configured, 'changes');
+  expect(goal.fobs).toEqual([7]);
+  expect(await runDurableObjectAlarm(stub())).toBe(false);
+  fetchSpy.mockClear();
+  await edgeCall(configured, 'changes');
+  expect(fetchSpy).not.toHaveBeenCalled();
+  expect(await runDurableObjectAlarm(stub())).toBe(false);
+  await env.DB.prepare('UPDATE members SET fob_id = 8 WHERE member_id = ?').bind(m.member_id).run();
+  await edgeCall(configured, 'changes');
+  expect(goal.fobs).toEqual([8]);
+  expect(await runDurableObjectAlarm(stub())).toBe(false);
+});
+
+it('keeps retrying an offline edge, then cancels the alarm on recovery', async () => {
+  await member();
+  const normal = fetchSpy.getMockImplementation();
+  fetchSpy.mockRejectedValue(new Error('Edge offline'));
+  await expect(edgeCall(configured, 'changes')).rejects.toThrow();
+  for (let retry = 0; retry < 2; retry++) {
+    expect(await runDurableObjectAlarm(stub())).toBe(true);
+    await runInDurableObject(stub(), async (_instance, ctx) => {
+      const delay = await ctx.storage.getAlarm() - Date.now();
+      expect(delay).toBeGreaterThan(50000);
+      expect(delay).toBeLessThanOrEqual(60000);
+    });
+  }
+  fetchSpy.mockImplementation(normal);
+  expect(await runDurableObjectAlarm(stub())).toBe(true);
+  expect(goal.fobs).toEqual([7]);
+  expect(await runDurableObjectAlarm(stub())).toBe(false);
+});
+
+it('arms recovery before a failed D1 revision read', async () => {
+  await member();
+  await env.DB.exec('ALTER TABLE edge_changes RENAME TO unavailable_edge_changes');
+  await expect(edgeCall(configured, 'changes')).rejects.toThrow();
+  await env.DB.exec('ALTER TABLE unavailable_edge_changes RENAME TO edge_changes');
+  expect(await runDurableObjectAlarm(stub())).toBe(true);
+  expect(goal.fobs).toEqual([7]);
+  expect(await runDurableObjectAlarm(stub())).toBe(false);
+});
+
+it('reconciles once for a legacy alarm and stops polling', async () => {
+  const m = await member();
+  await edgeCall(configured, 'changes');
+  await env.DB.prepare('UPDATE members SET fob_id = 8 WHERE member_id = ?').bind(m.member_id).run();
+  await runInDurableObject(stub(), async (_instance, ctx) => ctx.storage.setAlarm(Date.now() + 60000));
+  expect(await runDurableObjectAlarm(stub())).toBe(true);
+  expect(goal.fobs).toEqual([8]);
+  expect(await runDurableObjectAlarm(stub())).toBe(false);
+});
+
+it('retains a newer revision committed during successful delivery until it is synced', async () => {
+  const m = await member();
+  const normal = fetchSpy.getMockImplementation();
+  fetchSpy.mockImplementation(async (url, init) => {
+    const response = await normal(url, init);
+    if (init.method === 'PUT') await env.DB.prepare('UPDATE members SET fob_id = 8 WHERE member_id = ?').bind(m.member_id).run();
+    return response;
+  });
+  await edgeCall(configured, 'changes');
+  expect(goal.fobs).toEqual([7]);
+  fetchSpy.mockImplementation(normal);
+  expect(await runDurableObjectAlarm(stub())).toBe(true);
+  expect(goal.fobs).toEqual([8]);
+  expect(await runDurableObjectAlarm(stub())).toBe(false);
+});
+
+it('serializes a change notification arriving during delivery and finishes idle', async () => {
+  const m = await member();
+  const normal = fetchSpy.getMockImplementation();
+  // Keep the deliberately blocked promises in the same DO I/O context.
+  await runInDurableObject(stub(), async instance => {
+    let release, started;
+    const blocked = new Promise(resolve => { release = resolve; });
+    const delivering = new Promise(resolve => { started = resolve; });
+    fetchSpy.mockImplementation(async (url, init) => {
+      const response = await normal(url, init);
+      if (init.method === 'PUT') { started(); await blocked; }
+      return response;
+    });
+    const first = instance.execute('changes');
+    await delivering;
+    await instance.env.DB.prepare('UPDATE members SET fob_id = 8 WHERE member_id = ?').bind(m.member_id).run();
+    const second = instance.execute('changes');
+    release();
+    expect(await Promise.all([first, second])).toEqual([{ ok: true }, { ok: true }]);
+  });
+  expect(goal.fobs).toEqual([8]);
+  expect(writes.map(write => write.method)).toEqual(['PUT', 'PATCH']);
+  expect(await runDurableObjectAlarm(stub())).toBe(false);
+});
+
+it('honors a pending full snapshot when an ordinary change arrives', async () => {
+  const m = await member();
+  await edgeCall(configured, 'changes');
+  const normal = fetchSpy.getMockImplementation();
+  fetchSpy.mockRejectedValue(new Error('Edge offline'));
+  await expect(edgeCall(configured, 'nightly', '2026-09-13')).rejects.toThrow();
+  await env.DB.prepare('UPDATE members SET fob_id = 8 WHERE member_id = ?').bind(m.member_id).run();
+  fetchSpy.mockImplementation(normal);
+  await edgeCall(configured, 'changes');
+  expect(writes.at(-1)).toMatchObject({ method: 'PUT', fobs: [8] });
+  await runInDurableObject(stub(), async (_instance, ctx) => {
+    expect(await ctx.storage.get('nightlyDone')).toBe('2026-09-13');
+    expect(await ctx.storage.get('fullPending')).toBeUndefined();
+  });
+  expect(await runDurableObjectAlarm(stub())).toBe(false);
+});
 
 it.each(['active', 'trialing'])('allows %s with a signed waiver; pushes diffs for changes and empty revocation', async status => {
   const subscribed = await member(7, status);
@@ -216,6 +328,7 @@ it('recovers ambiguous delivery from edge state and keeps later revisions pendin
   await runDurableObjectAlarm(stub());
   expect(goal.fobs).toEqual([11]);
   expect(goal.version).toBeGreaterThan(writes[1].version);
+  expect(await runDurableObjectAlarm(stub())).toBe(false);
 });
 
 it('deduplicates pushed swipes and uses ownership at swipe time after reassignment', async () => {
@@ -248,37 +361,63 @@ it('renders cached swipes across admin pages without contacting edgeproxy', asyn
     expect(response.status).toBe(200);
     const html = await response.text();
     if (path !== '/admin') expect(html).toContain('Fob 7');
-    expect(html).toMatch(/<header\b[^>]*>.*>Sync Cache<\/button>.*>Log Out<\/button>.*<\/header>/s);
+    expect(html).toMatch(/<header\b[^>]*>.*>Log Out<\/button>.*<\/header>/s);
+    expect(html).not.toContain('Sync Cache');
+    expect(html).not.toContain('/admin/edge/resync');
   }
   expect(execute).not.toHaveBeenCalled();
 });
 
-it('protects manual full sync with an admin session and CSRF; sends a full snapshot', async () => {
+it('removes browser-triggered sync even for signed-in admins', async () => {
   await member();
   const token = await issueToken(env, '333333333333333333', 'admin');
-  const admin = await worker.fetch(new Request(`${env.SITE_URL}/admin`, { headers: { Cookie: `thelab_admin=${token}` } }), configured);
-  expect(admin.headers.get('Referrer-Policy')).toBe('same-origin');
-  const html = await admin.text();
-  expect(html).toMatch(/<header\b[^>]*>.*action="\/admin\/edge\/resync".*>Sync Cache<\/button>.*action="\/admin\/logout".*<\/header>/s);
-  expect(html).not.toContain('<h2>Door access</h2>');
-  const disabled = await worker.fetch(new Request(`${env.SITE_URL}/admin`, { headers: { Cookie: `thelab_admin=${token}` } }), { ...configured, EDGE_URL: '' });
-  expect(await disabled.text()).not.toContain('Sync Cache');
-  const request = csrf => new Request(`${env.SITE_URL}/admin/edge/resync`, { method: 'POST', headers: {
-    Cookie: `thelab_admin=${token}`, Origin: env.SITE_URL, 'Content-Type': 'application/x-www-form-urlencoded',
-  }, body: new URLSearchParams({ csrf }) });
-  expect((await worker.fetch(request('wrong'), configured)).status).toBe(403);
+  for (const method of ['GET', 'POST']) {
+    const response = await worker.fetch(new Request(`${env.SITE_URL}/admin/edge/resync`, { method, headers: {
+      Cookie: `thelab_admin=${token}`, Origin: env.SITE_URL, 'Content-Type': 'application/x-www-form-urlencoded',
+    }, ...(method === 'POST' ? { body: new URLSearchParams({ csrf: await hash(`admin-csrf:${token}`) }) } : {}) }), configured);
+    expect(response.status).toBe(404);
+  }
+  expect(fetchSpy).not.toHaveBeenCalled();
   expect(writes).toHaveLength(0);
-  const csrf = await hash(`admin-csrf:${token}`);
-  swipes = [{ id: 'manual', fob: 7, allowed: true, controller: '192.168.1.2', time: new Date().toISOString() }];
-  expect((await worker.fetch(request(csrf), configured)).status).toBe(200);
-  expect(writes[0]).toMatchObject({ method: 'PUT', fobs: [7] });
-  expect(await env.DB.prepare('SELECT id FROM edge_swipes').all()).toMatchObject({ results: [] });
-  expect(fetchSpy.mock.calls.some(([url]) => String(url).endsWith('/api/swipes'))).toBe(false);
-  expect(fetchSpy.mock.calls.some(([url]) => String(url).startsWith('https://discord.com/'))).toBe(false);
-  const invalid = request(csrf);
-  invalid.headers.set('Cookie', `thelab_admin=${await issueToken(env, '333333333333333333', 'member')}`);
-  expect((await worker.fetch(invalid, configured)).status).toBe(303);
-  expect(writes).toHaveLength(1);
+});
+
+it('accepts operator full-sync queue messages and safely handles redelivery', async () => {
+  await member();
+  const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+  const message = { id: 'operator-sync', body: { type: 'edge.sync', mode: 'full' }, attempts: 1, ack: vi.fn(), retry: vi.fn() };
+  for (let delivery = 0; delivery < 2; delivery++) {
+    await worker.queue({ messages: [message] }, configured);
+    expect(writes[delivery]).toMatchObject({ method: 'PUT', fobs: [7] });
+    expect(await runDurableObjectAlarm(stub())).toBe(false);
+  }
+  expect(message.ack).toHaveBeenCalledTimes(2);
+  expect(message.retry).not.toHaveBeenCalled();
+  expect(writes[1].version).toBeGreaterThan(writes[0].version);
+  expect(writes[1].event_signing_key).toBe(writes[0].event_signing_key);
+  expect(log).toHaveBeenCalledWith(JSON.stringify({ event: 'edge.full.completed', date: null }));
+});
+
+it('retries failed operator queue messages and acknowledges only successful delivery', async () => {
+  await member();
+  const normal = fetchSpy.getMockImplementation();
+  fetchSpy.mockRejectedValue(new Error('Edge offline'));
+  const message = { id: 'operator-sync', body: { type: 'edge.sync', mode: 'full' }, attempts: 1, ack: vi.fn(), retry: vi.fn() };
+  await worker.queue({ messages: [message] }, configured);
+  expect(message.ack).not.toHaveBeenCalled();
+  expect(message.retry).toHaveBeenCalledWith({ delaySeconds: 30 });
+  fetchSpy.mockImplementation(normal);
+  await worker.queue({ messages: [message] }, configured);
+  expect(message.ack).toHaveBeenCalledOnce();
+  expect(goal.fobs).toEqual([7]);
+  expect(await runDurableObjectAlarm(stub())).toBe(false);
+});
+
+it.each([
+  { type: 'edge.sync' }, { type: 'edge.sync', mode: 'changes' }, { type: 'unknown', mode: 'full' },
+  { type: 'edge.sync', mode: 'full', customer_id: 'cus_unrelated' },
+])('rejects malformed operator messages: %j', async body => {
+  await expect(processMessage(body, configured)).rejects.toMatchObject({ status: 400 });
+  expect(fetchSpy).not.toHaveBeenCalled();
 });
 
 it.each([
@@ -287,13 +426,13 @@ it.each([
   ['https://elsewhere.example', 'https://elsewhere.example'],
   ['https://private-user:private-password@elsewhere.example/private-path?code=private-code', 'https://elsewhere.example'],
   ['malformed-private-header', 'invalid'],
-])('explains rejected full-sync origins in traces without exposing request secrets: %s', async (origin, received) => {
+])('explains rejected admin form origins in traces without exposing request secrets: %s', async (origin, received) => {
   const token = await issueToken(env, '333333333333333333', 'admin');
   const csrf = await hash(`admin-csrf:${token}`);
   const log = vi.spyOn(console, 'warn').mockImplementation(() => {});
   const headers = new Headers({ Cookie: `thelab_admin=${token}`, 'Content-Type': 'application/x-www-form-urlencoded' });
   if (origin !== null) headers.set('Origin', origin);
-  const response = await worker.fetch(new Request(`${env.SITE_URL}/admin/edge/resync?code=private-query`, {
+  const response = await worker.fetch(new Request(`${env.SITE_URL}/admin/logout?code=private-query`, {
     method: 'POST', headers, body: new URLSearchParams({ csrf, notes: 'private-body' }),
   }), configured);
   expect(response.status).toBe(403);
@@ -303,7 +442,7 @@ it.each([
   expect(writes).toHaveLength(0);
   expect(log).toHaveBeenCalledTimes(1);
   const entry = JSON.parse(log.mock.calls[0][0]);
-  expect(entry).toMatchObject({ event: 'admin.failed', path: '/admin/edge/resync', method: 'POST', status: 403,
+  expect(entry).toMatchObject({ event: 'admin.failed', path: '/admin/logout', method: 'POST', status: 403,
     error: { cause: { message: `Admin form Origin check failed: expected ${env.SITE_URL}; received ${received}. Request rejected before performing the admin action.` } } });
   const trace = JSON.stringify(entry);
   for (const secret of [token, csrf, 'private-user', 'private-password', 'private-path', 'private-code', 'private-query', 'private-body', 'malformed-private-header']) {
@@ -342,6 +481,7 @@ it('syncs goals nightly once per Central date, including the repeated fall-back 
   }
   expect(writes).toHaveLength(1);
   expect(fetchSpy.mock.calls.filter(([url]) => String(url).endsWith('/api/swipes'))).toHaveLength(0);
+  expect(await runDurableObjectAlarm(stub())).toBe(false);
 });
 
 it('retries partially imported batches without duplicating swipe history', async () => {
@@ -370,6 +510,7 @@ it('keeps nightly goal work pending after failure and retries', async () => {
     expect(await ctx.storage.get('nightlyDone')).toBe('2026-09-13');
     expect(await ctx.storage.get('fullPending')).toBeUndefined();
   });
+  expect(await runDurableObjectAlarm(stub())).toBe(false);
 });
 
 it('rejects malformed swipe payloads before importing any rows', async () => {
