@@ -2,7 +2,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import {
   HttpError, boundedBytes, boundedText, hash, json, logError, now, opaque, origin, randomToken,
-  discord, edgeToken, stripe, stripeList, fobEnabledSQL, grantsMembership, github, githubConfigured, requireGithubMember,
+  discord, edgeToken, stripe, stripeList, fobEnabledSQL, grantsMembership,
   isOngoingSubscription, memberName, selectCurrentSubscription, validateMetadata, waiverSignedSQL,
 } from './services.js';
 
@@ -38,7 +38,6 @@ export class Membership extends DurableObject {
           case 'updateMetadata': await this.updateMetadata(member, input); break;
           case 'deleteMember': await this.deleteMember(member); break;
           case 'linkFob': await linkFob(this.env, member, input); break;
-          case 'linkGithub': value = await this.linkGithub(member, input); break;
           default: throw new HttpError(404, 'Unknown membership operation.');
         }
         return { ok: true, value };
@@ -56,31 +55,6 @@ export class Membership extends DurableObject {
     return this.env.DB.prepare(`UPDATE members SET discord_username = ?, discord_email = ?,
       metadata_version = metadata_version + 1 WHERE member_id = ? RETURNING *`)
       .bind(user.username, user.email.toLowerCase(), member.member_id).first();
-  }
-
-  async linkGithub(member, { user, discord_user_id, auth_version }) {
-    githubConfigured(this.env);
-    if (member.discord_user_id !== discord_user_id || member.auth_version !== auth_version) {
-      throw new HttpError(401, 'Your sign-in changed. Please start GitHub onboarding again.');
-    }
-    requireGithubMember(member);
-    if (member.github_user_id && member.github_user_id !== user.id) {
-      throw new HttpError(409, 'A different GitHub account is already linked. Please contact leadership to change it.');
-    }
-    // Reserve the identity before granting access. The unique index also handles
-    // concurrent claims by different members. A failed API call can be retried.
-    const linked = await this.env.DB.prepare(`UPDATE members SET github_user_id = ?, github_username = ?
-      WHERE member_id = ? AND NOT EXISTS (SELECT 1 FROM members WHERE github_user_id = ? AND member_id != ?)
-      RETURNING member_id`).bind(user.id, user.username, member.member_id, user.id, member.member_id).first();
-    if (!linked) throw new HttpError(409, 'This GitHub account is already linked to another member. Please contact leadership.');
-    const path = `/orgs/${this.env.GITHUB_ORG}/teams/${this.env.GITHUB_TEAM_SLUG}/memberships/${encodeURIComponent(user.username)}`;
-    let membership;
-    try { membership = await github(this.env, path); }
-    catch (error) { if (error.providerStatus !== 404) throw error; }
-    // Existing maintainers keep their role; pending invitations can be reused.
-    if (!membership) membership = await github(this.env, path, this.env.GITHUB_TEAM_TOKEN, 'PUT', { role: 'member' });
-    if (!['active', 'pending'].includes(membership.state)) throw new HttpError(502, 'GitHub team access could not be confirmed. Please try again.');
-    return { state: membership.state };
   }
 
   async write(slot, path, form) {

@@ -17,7 +17,6 @@
 			"/admin",
 			"/admin/*",
 			"/signup",
-			"/github",
 			"/waiver",
 			"/login/*",
 			"/payment/*",
@@ -92,8 +91,6 @@
 	},
 	"vars": {
 		"SITE_URL": "https://thelab.ms",
-		"GITHUB_ORG": "TheLab-ms",
-		"GITHUB_TEAM_SLUG": "members",
 		"TURNSTILE_SITE_KEY": "0x4AAAAAAA-xMVuWzfkR2PKz",
 		"PRINTER_EDGE_URL": "https://edgeproxy.thelab.ms/machines",
 		"EDGE_URL": "https://edgeproxy.thelab.ms",

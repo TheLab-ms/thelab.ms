@@ -257,7 +257,6 @@ export const eventTypes = {
   MemberRegistered: 'Member registered',
   WaiverSigned: 'Waiver signed',
   DiscordAccountChanged: 'Discord account changed',
-  GitHubAccountChanged: 'GitHub account changed',
   DiscordUsernameChanged: 'Discord username changed',
   DiscordEmailChanged: 'Discord email changed',
   BillingNameChanged: 'Billing name changed',
@@ -384,7 +383,6 @@ export function loginDestination(value, purpose) {
     return '/admin';
   }
   if (purpose === 'member' && value === '/waiver?signup=1') return value;
-  if (purpose === 'member' && value === '/github') return value;
   if (purpose === 'member' && /^\/keyfob\/bind\?token=[a-f0-9]{64}$/.test(value)) return value;
   return /^\/payment\/success\?session_id=cs_[A-Za-z0-9_]+$/.test(value) ? value : '/payment/resume';
 }
@@ -478,7 +476,7 @@ export async function provider(url, init, service, env = {}) {
   const authorization = new Headers(init?.headers).get('Authorization');
   const secrets = { ...env, PROVIDER_TOKEN: authorization?.replace(/^(Bearer|Bot) /i, '') };
   if (typeof init?.body === 'string') {
-    for (const key of ['code', 'code_verifier', 'client_secret', 'access_token', 'refresh_token']) {
+    for (const key of ['code', 'client_secret', 'access_token', 'refresh_token']) {
       secrets[`PROVIDER_SECRET_${key}`] = new URLSearchParams(init.body).get(key);
     }
   }
@@ -567,59 +565,6 @@ export async function discordIdentity(env, code) {
   if (!discordID.test(user.id || '') || typeof user.id !== 'string' || typeof user.username !== 'string' || !user.username.trim() || user.username.length > 80 || user.bot === true) throw new HttpError(502, 'Discord sign-in failed. Please try again.');
   if (user.verified !== true || typeof user.email !== 'string' || user.email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(user.email)) throw new HttpError(403, 'Please verify your email in Discord before signing up.');
   return { id: user.id, username: user.username, email: user.email };
-}
-
-// GitHub onboarding uses member login for authorization and OAuth only for identity.
-export function githubConfigured(env) {
-  if (!env.GITHUB_CLIENT_ID || !env.GITHUB_CLIENT_SECRET || !env.GITHUB_TEAM_TOKEN
-    || !/^[A-Za-z0-9-]+$/.test(env.GITHUB_ORG || '') || !/^[A-Za-z0-9_-]+$/.test(env.GITHUB_TEAM_SLUG || '')) {
-    throw new HttpError(503, 'GitHub onboarding is temporarily unavailable. Please contact leadership.');
-  }
-}
-
-export function requireGithubMember(member) {
-  if (!member.non_billable && !member.legacy_billing && !grantsMembership(member.stripe_subscription_state)) {
-    throw new HttpError(403, 'An active membership is required for GitHub access. Please manage your billing or contact leadership.');
-  }
-}
-
-export function github(env, path, token = env.GITHUB_TEAM_TOKEN, method = 'GET', body) {
-  return provider(`https://api.github.com${path}`, {
-    method, headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json',
-      'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'TheLab-membership',
-      ...(body ? { 'Content-Type': 'application/json' } : {}) },
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  }, 'GitHub', env);
-}
-
-export async function startGithub(request, env, member) {
-  const browser = randomToken();
-  const state = await issueToken(env, await hash(browser), 'oauth', {
-    purpose: 'github', member_id: member.member_id, session: await hash(cookie(request, 'thelab_member')),
-  });
-  const challenge = encodeBase64URL(new Uint8Array(await crypto.subtle.digest('SHA-256', encoder.encode(browser))));
-  const target = new URL('https://github.com/login/oauth/authorize');
-  target.search = new URLSearchParams({ client_id: env.GITHUB_CLIENT_ID, redirect_uri: `${origin(env)}/login/github/callback`,
-    scope: '', state, code_challenge: challenge, code_challenge_method: 'S256' }).toString();
-  const response = redirect(target.href);
-  response.headers.set('Set-Cookie', cookieHeader(env, 'thelab_github_oauth', browser, TOKEN_AGE.oauth));
-  return response;
-}
-
-export async function githubIdentity(env, code, verifier) {
-  const token = await provider('https://github.com/login/oauth/access_token', {
-    method: 'POST', headers: { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ client_id: env.GITHUB_CLIENT_ID, client_secret: env.GITHUB_CLIENT_SECRET,
-      code, code_verifier: verifier, redirect_uri: `${origin(env)}/login/github/callback` }).toString(),
-  }, 'GitHub', env);
-  if (token.error || typeof token.access_token !== 'string' || !/^[A-Za-z0-9._~+-]{1,2048}$/.test(token.access_token)
-    || token.token_type?.toLowerCase() !== 'bearer') throw new HttpError(502, 'GitHub sign-in failed. Please try again.');
-  const user = await github(env, '/user', token.access_token);
-  if (!Number.isSafeInteger(user.id) || user.id <= 0 || typeof user.login !== 'string'
-    || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(user.login) || user.type !== 'User') {
-    throw new HttpError(502, 'GitHub returned an invalid account. Please try again.');
-  }
-  return { id: String(user.id), username: user.login };
 }
 
 export async function verifyStripe(request, env, text) {
