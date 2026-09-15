@@ -118,33 +118,16 @@ alarms.
 
 ## Operator full sync
 
-Run the Wrangler commands below from the repository's `site/` directory.
+From the repository root, schedule a full sync with:
 
-Manual sync is available through the Cloudflare management API, rather than the
-admin website. It sends the complete current authorized fob set and event signing
-key; it does not re-fetch billing state or re-import delivered swipes.
+```sh
+bash site/scripts/resync-edge.sh
+```
 
-1. Obtain the account ID with `npx wrangler whoami` and the ID of
-   `thelab-membership` with `npx wrangler queues info thelab-membership`.
-2. Set `ACCOUNT_ID`, `QUEUE_ID`, and `CLOUDFLARE_API_TOKEN` in your shell. The API
-   token needs **Account → Queues → Edit** (`Queues Write`) for that account.
-3. Start `npx wrangler tail thelab-ms --format pretty` in another terminal.
-4. Publish the operator message:
+The script uses the installed Wrangler to discover the account and
+`thelab-membership` queue, then publishes through the management API. It reuses
+your `wrangler login` OAuth credentials or `CLOUDFLARE_API_TOKEN`; the credential
+must have Queues Write permission. Set `ACCOUNT_ID` (or `CLOUDFLARE_ACCOUNT_ID`)
+when you have multiple accounts; `QUEUE_ID` can also be supplied explicitly.
+Start the log tail below **before** running the script to confirm completion.
 
-   ```sh
-   curl --fail-with-body --silent --show-error \
-     "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/queues/${QUEUE_ID}/messages" \
-     --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-     --header 'Content-Type: application/json' \
-     --data '{"content_type":"json","body":{"type":"edge.sync","mode":"full"}}'
-   ```
-
-An API response with `success: true` means **queued**, not completed. Look for
-`edge.full.completed` in the Worker logs to confirm delivery. `edge.failed` and
-`queue.failed` report failures; the pending alarm and queue delivery retries
-handle recovery. Repeating the command is safe: it sends another versioned full
-snapshot. The installed Wrangler has no queue-publish command, so publication
-uses the API directly.
-
-Removing the admin sync action and idle watchdog requires only a Worker deploy;
-there is no new D1 migration, queue, binding, or environment secret.

@@ -1,7 +1,5 @@
 # TheLab
 
-Three independently built projects live here:
-
 - **[`site/`](site/)** — Cloudflare Worker, public website, membership administration,
   D1 migrations, and operational scripts.
 - **[`edgeproxy/`](edgeproxy/)** — Go service for door-controller synchronization,
@@ -54,27 +52,6 @@ select the account with `CLOUDFLARE_ACCOUNT_ID`, then run:
 npm run bootstrap -- --remote
 ```
 
-Remote bootstrap creates/reuses D1 and queues, applies migrations, and deploys
-with missing secrets. Generated secrets are retained in `.env.bootstrap.json`.
-Supply Discord, Stripe, and Turnstile credentials via the environment or that
-file; public IDs and origins are configured in `wrangler.jsonc`. Configure the
-Discord OAuth callback at `${SITE_URL}/login/discord/callback`, Stripe webhook at
-`${SITE_URL}/webhooks/stripe`, Turnstile hostname, and the Worker's custom domain
-to match the deployed site.
-
-### Checks
-
-From `site/`:
-
-```sh
-npm test
-node --test scripts/bootstrap-worker.test.js
-python3 -m unittest discover -s scripts -p 'test_*.py'
-npx wrangler deploy --dry-run
-```
-
-Membership/onboarding tests live in `test/membership.test.js`; edge integration
-tests live in `test/edge.test.js`.
 
 ## Edge proxy
 
