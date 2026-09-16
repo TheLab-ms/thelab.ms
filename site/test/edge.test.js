@@ -854,7 +854,7 @@ describe('Fob enrollment', () => {
 		expect(callback.headers.get('Location')).toBe(c.url);
 		const response = await api(path, { headers: { Cookie: m.cookie } });
 		expect(response.status).toBe(200);
-		expect(response.headers.get('Referrer-Policy')).toBe('no-referrer');
+		expect(response.headers.get('Referrer-Policy')).toBe('same-origin');
 		expect(response.headers.get('Cache-Control')).toBe('no-store');
 		expect(await response.text()).toContain('Link fob');
 		expect((await readMember(m)).fob_id).toBeNull();
