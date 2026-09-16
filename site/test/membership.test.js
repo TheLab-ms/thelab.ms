@@ -698,7 +698,7 @@ describe('Membership', () => {
       expect((await api('/admin?page=-1', { headers: { Cookie: cookie } })).status).toBe(400);
     });
 
-    it('combines waiver, Discord, payment, and search filters with signed/linked defaults', async () => {
+    it('combines waiver, Discord, and payment filters with signed/linked defaults and ignores them when searching', async () => {
       const members = [];
       const billing = [
         { payment: 'inactive', state: null },
@@ -728,7 +728,7 @@ describe('Membership', () => {
         const response = await api(`/admin?${new URLSearchParams(params)}`, { headers: { Cookie: cookie } });
         expect(response.status).toBe(200);
         const html = await response.text();
-        expect(html).toContain(`${expected.length} matching members`);
+        expect(html).toContain(`${expected.length} matching member${expected.length === 1 ? '' : 's'}`);
         expect([...html.matchAll(/>(filter-\d+)<\/a>/g)].map(match => match[1]).sort()).toEqual(expected.map(m => m.name).sort());
         return html;
       };
@@ -736,6 +736,7 @@ describe('Membership', () => {
       expect(defaults).toContain('<option value="signed" selected>Waiver signed</option>');
       expect(defaults).toContain('<option value="linked" selected>Discord linked</option>');
       expect(defaults).toContain('<option value="all" selected>Any payment status</option>');
+      expect(defaults).toContain('aria-label="Member filters">');
       for (const waiver of ['signed', 'unsigned', 'all']) {
         for (const discord of ['linked', 'unlinked', 'all']) {
           if (waiver === 'all' && discord === 'all') continue; // Covered by the paginated unfiltered view below.
@@ -745,9 +746,14 @@ describe('Membership', () => {
         }
       }
       for (const payment of ['inactive', 'non_billable', 'legacy_billing', 'stripe_active']) {
-        await check({ waiver: 'all', discord: 'all', payment, q: 'filter-' }, members.filter(m => m.payment === payment));
-        await check({ payment, q: 'filter-' }, members.filter(m => m.signed && m.linked && m.payment === payment));
+        await check({ waiver: 'all', discord: 'all', payment }, members.filter(m => m.payment === payment));
+        await check({ payment }, members.filter(m => m.signed && m.linked && m.payment === payment));
+        const searched = await check({ waiver: 'signed', discord: 'linked', payment, q: 'filter-0' }, [members[0]]);
+        expect(searched).toContain('aria-label="Member filters" disabled>');
+        expect(searched).toContain('type="submit">Search</button>');
       }
+      await check({ q: 'filter-0' }, [members[0]]);
+      await check({ q: '   ' }, members.filter(m => m.signed && m.linked));
       const all = await (await api('/admin?waiver=all&discord=all', { headers: { Cookie: cookie } })).text();
       expect(all).toContain('42 registered members');
       expect(all).toContain('Page 1 of 2');
@@ -795,7 +801,7 @@ describe('Membership', () => {
       for (const query of ['%', '_', '\\', "' OR 1=1 --", '"><script>alert(1)</script>']) {
         const html = await (await api(`/admin?${new URLSearchParams({ q: query })}`, { headers: { Cookie: cookie } })).text();
         expect(html).toContain('0 matching members');
-        expect(html).toContain('No members match your search and filters.');
+        expect(html).toContain('No members match your search.');
         expect(html).not.toContain(`href="/admin/members/${id}"`);
         expect(html).not.toContain('<script>');
         if (query.includes('<script>')) expect(html).toContain('&lt;script&gt;');
@@ -2263,6 +2269,30 @@ describe('Waivers', () => {
 
 describe('Admin browser behavior', () => {
   afterEach(() => { vi.unstubAllGlobals(); });
+
+  it('disables filters while searching and enables them when the search is cleared', async () => {
+    vi.resetModules();
+    const filters = { disabled: false }, button = { textContent: 'Apply filters' };
+    const search = Object.assign(new EventTarget(), {
+      value: 'Maker',
+      form: { querySelector: selector => selector === '.admin-list-filters' ? filters : button },
+    });
+    const browser = new EventTarget();
+    vi.stubGlobal('document', { getElementById: id => id === 'member-search' ? search : null });
+    vi.stubGlobal('window', browser);
+    await import('../static/script.js');
+    expect(filters.disabled).toBe(true);
+    expect(button.textContent).toBe('Search');
+    for (const value of ['', '   ', 'Maker']) {
+      search.value = value;
+      search.dispatchEvent(new Event('input'));
+      expect(filters.disabled).toBe(value === 'Maker');
+      expect(button.textContent).toBe(value === 'Maker' ? 'Search' : 'Apply filters');
+    }
+    search.value = '';
+    browser.dispatchEvent(new Event('pageshow'));
+    expect(filters.disabled).toBe(false);
+  });
 
   it.each([false, true])('requires browser confirmation before deletion (confirmed: %s)', async confirmed => {
     vi.resetModules();

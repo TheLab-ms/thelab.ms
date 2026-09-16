@@ -58,13 +58,13 @@ function subscriptionLink(member, env) {
 export function memberList(members, { total, current, pages, query = '', filters = defaultMemberFilters }, env, csrf) {
 	const rows = members.map(m => `<tr><th scope="row"><a class="admin-member-name" href="${e(memberPath(m))}">${e(memberName(m))}</a><small>${e(m.discord_email || m.email || 'No email')}</small><small class="admin-id">Discord ID: ${e(m.discord_user_id || 'Not linked')}</small><small>${m.waiver_signed ? 'Waiver signed' : 'No linked waiver'}</small>${m.non_billable ? '<small>Non-billable</small>' : ''}${m.legacy_billing ? '<small>Legacy billing</small>' : ''}</th><td>${statusBadge(m)}<small>${subscriptionLink(m, env)}</small></td></tr>`).join('');
 	const filtered = query || Object.values(filters).some(value => value !== 'all');
-	const empty = filtered ? 'No members match your search and filters.' : 'No members have registered yet.';
+	const empty = query ? 'No members match your search.' : filtered ? 'No members match your search and filters.' : 'No members have registered yet.';
 	return page('Registered members', `<div class="admin-actions"><a class="btn btn-primary" href="/admin/members/new">New member</a></div><form method="get" action="/admin" role="search" class="admin-form admin-search">
     <label for="member-search">Search members</label>
     <div class="admin-search-controls"><input id="member-search" type="search" name="q" value="${e(query)}" maxlength="${MAX_SEARCH_LENGTH}" placeholder="Name, email, Discord handle or ID, fob ID">${query ? `<a class="btn btn-outline" href="${e(memberListURL(1, '', filters))}">Clear search</a>` : ''}</div>
-    <div class="admin-list-filters">${memberFilters.map(({ name, label, choices }) => select(name, label, filters[name], choices)).join('')}</div>
-    <div class="admin-actions"><button class="btn btn-primary" type="submit">Apply filters</button><a href="/admin">Reset</a></div></form>
-    <div class="admin-list-summary"><p><strong>${total} ${filtered ? 'matching' : 'registered'} member${total === 1 ? '' : 's'}</strong>${query ? ` for “${e(query)}”` : ''}</p><p class="admin-help">${filters.payment === 'all' ? 'Any payment status · ' : ''}Newest first</p></div><div class="admin-table" role="region" aria-label="Registered members" tabindex="0"><table class="admin-member-table"><thead><tr><th scope="col">Member</th><th scope="col">Subscription</th></tr></thead><tbody>${rows || `<tr><td colspan="2" class="admin-empty">${empty}${filtered ? '<p>Try changing your search or filters.</p>' : ''}</td></tr>`}</tbody></table></div><nav class="admin-pagination" aria-label="Member pages">${current > 1 ? `<a class="btn btn-outline" href="${e(memberListURL(current - 1, query, filters))}">Previous</a>` : ''}<span>Page ${current} of ${pages}</span>${current < pages ? `<a class="btn btn-outline" href="${e(memberListURL(current + 1, query, filters))}">Next</a>` : ''}</nav>`, csrf, 200, env);
+    <fieldset class="admin-list-filters" aria-label="Member filters"${query ? ' disabled' : ''}>${memberFilters.map(({ name, label, choices }) => select(name, label, filters[name], choices)).join('')}</fieldset>
+    <div class="admin-actions"><button class="btn btn-primary" type="submit">${query ? 'Search' : 'Apply filters'}</button><a href="/admin">Reset</a></div></form><script src="/script.js" defer></script>
+    <div class="admin-list-summary"><p><strong>${total} ${filtered ? 'matching' : 'registered'} member${total === 1 ? '' : 's'}</strong>${query ? ` for “${e(query)}”` : ''}</p><p class="admin-help">${query ? 'Searching all members · ' : filters.payment === 'all' ? 'Any payment status · ' : ''}Newest first</p></div><div class="admin-table" role="region" aria-label="Registered members" tabindex="0"><table class="admin-member-table"><thead><tr><th scope="col">Member</th><th scope="col">Subscription</th></tr></thead><tbody>${rows || `<tr><td colspan="2" class="admin-empty">${empty}${query ? '<p>Try changing your search.</p>' : filtered ? '<p>Try changing your search or filters.</p>' : ''}</td></tr>`}</tbody></table></div><nav class="admin-pagination" aria-label="Member pages">${current > 1 ? `<a class="btn btn-outline" href="${e(memberListURL(current - 1, query, filters))}">Previous</a>` : ''}<span>Page ${current} of ${pages}</span>${current < pages ? `<a class="btn btn-outline" href="${e(memberListURL(current + 1, query, filters))}">Next</a>` : ''}</nav>`, csrf, 200, env);
 }
 
 function input(name, label, value, max, help = '', required = false) {
@@ -197,9 +197,9 @@ async function list(request, env, csrf) {
 	const columns = ['discord_user_id', 'discord_username', 'discord_email', 'billing_name', 'billing_email', 'name_override', 'email', 'waiver_name', 'fob_id'];
 	const conditions = query ? [`(${columns.map(column => `${column} LIKE ? ESCAPE '\\'`).join(' OR ')})`] : [];
 	const values = query ? columns.map(() => `%${query.replace(/[\\%_]/g, '\\$&')}%`) : [];
-	if (filters.waiver !== 'all') conditions.push(`${waiverSignedSQL} = ${filters.waiver === 'signed' ? 1 : 0}`);
-	if (filters.discord !== 'all') conditions.push(`discord_user_id IS ${filters.discord === 'linked' ? 'NOT ' : ''}NULL`);
-	if (filters.payment !== 'all') {
+	if (!query && filters.waiver !== 'all') conditions.push(`${waiverSignedSQL} = ${filters.waiver === 'signed' ? 1 : 0}`);
+	if (!query && filters.discord !== 'all') conditions.push(`discord_user_id IS ${filters.discord === 'linked' ? 'NOT ' : ''}NULL`);
+	if (!query && filters.payment !== 'all') {
 		conditions.push(`(CASE WHEN non_billable = 1 THEN 'non_billable'
       WHEN legacy_billing = 1 THEN 'legacy_billing'
       WHEN stripe_subscription_state IN ('active', 'trialing') THEN 'stripe_active'

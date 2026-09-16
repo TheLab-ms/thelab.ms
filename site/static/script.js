@@ -143,6 +143,21 @@
 
 })();
 
+// Member administration: search all members while filters are disabled.
+(function () {
+  const search = document.getElementById('member-search');
+  if (!search) return;
+  const filters = search.form.querySelector('.admin-list-filters');
+  const submit = search.form.querySelector('button[type="submit"]');
+  function updateFilters() {
+    filters.disabled = search.value.trim().length > 0;
+    submit.textContent = filters.disabled ? 'Search' : 'Apply filters';
+  }
+  search.addEventListener('input', updateFilters);
+  window.addEventListener('pageshow', updateFilters);
+  updateFilters();
+})();
+
 // Member administration: explicit confirmation before deletion.
 (function () {
   const deleteForm = document.getElementById('delete-member');
