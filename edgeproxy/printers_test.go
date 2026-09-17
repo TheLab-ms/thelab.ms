@@ -3,10 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"image/jpeg"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -329,9 +332,215 @@ func TestPrinterFFmpegURL(t *testing.T) {
 	t.Fatal("FFmpeg input argument missing")
 }
 
+func bambuCameraPacket(frame []byte) []byte {
+	header := make([]byte, 16)
+	binary.LittleEndian.PutUint32(header[:4], uint32(len(frame)))
+	header[8] = 1
+	return append(header, frame...)
+}
+
+func bambuTestConnection(t *testing.T) (*printer, net.Conn, <-chan error) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	p := &printer{ctx: ctx, cancel: cancel, config: printerConfig{CameraType: "bambu", AccessCode: "12345678"}}
+	client, server := net.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- p.readBambuCamera(client) }()
+	t.Cleanup(func() { cancel(); server.Close() })
+	_ = server.SetDeadline(time.Now().Add(5 * time.Second))
+	return p, server, done
+}
+
+func readBambuTestAuth(t *testing.T, server net.Conn) {
+	t.Helper()
+	auth := make([]byte, 80)
+	if _, err := io.ReadFull(server, auth); err != nil {
+		t.Fatal(err)
+	}
+	want := append([]byte{0x40, 0, 0, 0, 0, 0x30, 0, 0}, make([]byte, 8)...)
+	want = append(want, []byte("bblp"+strings.Repeat("\x00", 28)+"12345678"+strings.Repeat("\x00", 24))...)
+	if !bytes.Equal(auth, want) {
+		t.Fatal("incorrect camera authentication packet")
+	}
+}
+
+func waitBambuError(t *testing.T, done <-chan error) {
+	t.Helper()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected connection error")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Bambu camera did not stop")
+	}
+}
+
+func TestBambuCameraFrames(t *testing.T) {
+	p, server, done := bambuTestConnection(t)
+	readBambuTestAuth(t, server)
+	first := bambuCameraPacket([]byte{0xff, 0xd8, 1, 0xff, 0xd9})
+	// Header and image bytes can be split anywhere in the TCP/TLS stream.
+	for _, b := range first {
+		if _, err := server.Write([]byte{b}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := waitCameraFrame(t, p, 1)
+	packets := append(bambuCameraPacket([]byte{0xff, 0xd8, 2, 0xff, 0xd9}),
+		bambuCameraPacket([]byte{0xff, 0xd8, 3, 0xff, 0xd9})...)
+	if _, err := server.Write(packets); err != nil {
+		t.Fatal(err)
+	}
+	waitCameraFrame(t, p, 3)
+	if old[2] != 1 {
+		t.Fatal("previous snapshot buffer was mutated")
+	}
+	p.cancel()
+	waitBambuError(t, done)
+}
+
+func TestBambuCameraRejectsMalformedFrames(t *testing.T) {
+	oversized := make([]byte, 16)
+	binary.LittleEndian.PutUint32(oversized, maxCameraFrame+1)
+	large := make([]byte, 16)
+	binary.LittleEndian.PutUint32(large, 0xff000005)
+	cases := map[string][]byte{
+		"rejected-auth":      nil,
+		"partial-header":     {5, 0, 0},
+		"empty-frame":        make([]byte, 16),
+		"oversized":          oversized,
+		"full-32-bit-length": large,
+		"partial-frame":      bambuCameraPacket([]byte{0xff, 0xd8, 1, 0xff, 0xd9})[:19],
+		"invalid-jpeg":       bambuCameraPacket([]byte("not a jpeg")),
+		"missing-end-marker": bambuCameraPacket([]byte{0xff, 0xd8, 0, 0}),
+	}
+	for name, packet := range cases {
+		t.Run(name, func(t *testing.T) {
+			p, server, done := bambuTestConnection(t)
+			readBambuTestAuth(t, server)
+			if len(packet) > 0 {
+				_, _ = server.Write(packet)
+			}
+			server.Close()
+			waitBambuError(t, done)
+			if p.frame != nil || !p.frameAt.IsZero() {
+				t.Fatal("invalid frame was published")
+			}
+		})
+	}
+}
+
+func TestBambuCameraCancellation(t *testing.T) {
+	for _, stage := range []string{"authentication", "header", "payload"} {
+		t.Run(stage, func(t *testing.T) {
+			p, server, done := bambuTestConnection(t)
+			if stage != "authentication" {
+				readBambuTestAuth(t, server)
+			}
+			if stage == "payload" {
+				_, _ = server.Write(bambuCameraPacket([]byte{0xff, 0xd8, 1, 0xff, 0xd9})[:17])
+			}
+			p.cancel()
+			waitBambuError(t, done)
+		})
+	}
+}
+
+func TestBambuCameraTimeout(t *testing.T) {
+	t.Parallel()
+	p, server, done := bambuTestConnection(t)
+	readBambuTestAuth(t, server)
+	// A complete header with an incomplete payload must not keep the worker alive.
+	_, _ = server.Write(bambuCameraPacket([]byte{0xff, 0xd8, 1, 0xff, 0xd9})[:17])
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "timeout") {
+			t.Fatalf("expected frame timeout, got %v", err)
+		}
+	case <-time.After(cameraTimeout + 5*time.Second):
+		t.Fatal("stalled camera did not time out")
+	}
+	if p.frame != nil {
+		t.Fatal("partial frame was published")
+	}
+}
+
+// Opt-in hardware check; credentials stay outside source and normal test runs.
+func TestBambuCameraLive(t *testing.T) {
+	host := os.Getenv("CONWAYEDGE_BAMBU_TEST_HOST")
+	if host == "" {
+		t.Skip("set CONWAYEDGE_BAMBU_TEST_HOST and CONWAYEDGE_BAMBU_TEST_ACCESS_CODE for a LAN camera check")
+	}
+	code := os.Getenv("CONWAYEDGE_BAMBU_TEST_ACCESS_CODE")
+	if code == "" {
+		t.Fatal("CONWAYEDGE_BAMBU_TEST_ACCESS_CODE is required")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	p := &printer{ctx: ctx, cancel: cancel, config: printerConfig{Host: host, AccessCode: code, CameraType: "bambu"}}
+	p.wg.Add(1)
+	go p.runCamera()
+	t.Cleanup(func() { cancel(); p.wg.Wait() })
+	s := printerSet{printers: map[string]*printer{"live": p}}
+	deadline := time.Now().Add(25 * time.Second)
+	var first time.Time
+	for time.Now().Before(deadline) {
+		p.mu.Lock()
+		at := p.frameAt
+		p.mu.Unlock()
+		if !at.IsZero() {
+			if first.IsZero() {
+				first = at
+			} else if at.After(first) {
+				r := httptest.NewRequest("GET", "/", nil)
+				r.SetPathValue("image", "live.jpg")
+				w := &printerDeadlineWriter{ResponseRecorder: httptest.NewRecorder(), t: t}
+				s.snapshot(w, r)
+				if w.Code != http.StatusOK || w.Header().Get("Content-Type") != "image/jpeg" {
+					t.Fatalf("snapshot failed: %d", w.Code)
+				}
+				image, err := jpeg.Decode(w.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Logf("received multiple live frames; HTTP snapshot decoded: %v", image.Bounds())
+				return
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("camera did not deliver multiple frames within 25s")
+}
+
 // ────────────────────────────────────────────────────────────────────────
 // Printer configuration
 // ────────────────────────────────────────────────────────────────────────
+
+func TestBambuCameraConfig(t *testing.T) {
+	for _, tc := range []struct {
+		camera, code string
+		valid        bool
+	}{
+		{"", "legacy", true},
+		{"rtsps", "legacy", true},
+		{"bambu", "12345678", true},
+		{"bambu", strings.Repeat("a", 32), true},
+		{"bambu", strings.Repeat("a", 33), false},
+		{"bambu", "1234\x005678", false},
+		{"bambu", "", false},
+		{"unknown", "12345678", false},
+	} {
+		config := []printerConfig{{Name: "Printer", Host: "127.0.0.1", SerialNumber: "serial", AccessCode: tc.code, CameraType: tc.camera}}
+		data, err := json.Marshal(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := parsePrinters(data)
+		if (err == nil) != tc.valid || (tc.valid && !reflect.DeepEqual(got, config)) {
+			t.Fatalf("camera=%q code length=%d: unexpected parse result: %v", tc.camera, len(tc.code), err)
+		}
+	}
+}
 
 func printerForm(e *edge, action string, printers ...printerConfig) url.Values {
 	form := url.Values{"csrf": {e.csrf}, "action": {action}, "count": {fmt.Sprint(len(printers))}}
@@ -340,6 +549,7 @@ func printerForm(e *edge, action string, printers ...printerConfig) url.Values {
 		form.Set(fmt.Sprintf("host_%d", i), p.Host)
 		form.Set(fmt.Sprintf("access_code_%d", i), p.AccessCode)
 		form.Set(fmt.Sprintf("serial_number_%d", i), p.SerialNumber)
+		form.Set(fmt.Sprintf("camera_type_%d", i), p.CameraType)
 	}
 	return form
 }
@@ -362,13 +572,13 @@ func TestPrinterFormWorkflow(t *testing.T) {
 	if disk := storedPrinters(t, e); disk != "[]" {
 		t.Fatalf("draft persisted: %s", disk)
 	}
-	second := printerConfig{Name: "Second", Host: "::1", AccessCode: "other", SerialNumber: "second"}
+	second := printerConfig{Name: "Second", Host: "::1", AccessCode: "other", SerialNumber: "second", CameraType: "bambu"}
 	w = submit("save", p, second)
 	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/" || !reflect.DeepEqual(e.config, []printerConfig{p, second}) {
 		t.Fatalf("save: %d %s", w.Code, w.Body.String())
 	}
 	w = request(lan, "GET", "/", "")
-	for _, field := range []string{`action="/"`, `type="password"`, `name="serial_number_1"`, template.HTMLEscapeString(p.Name), template.HTMLEscapeString(p.AccessCode)} {
+	for _, field := range []string{`action="/"`, `type="password"`, `name="serial_number_1"`, `name="camera_type_1"`, `value="bambu" selected`, template.HTMLEscapeString(p.Name), template.HTMLEscapeString(p.AccessCode)} {
 		if !strings.Contains(w.Body.String(), field) {
 			t.Fatalf("missing field %q: %s", field, w.Body.String())
 		}
@@ -410,6 +620,7 @@ func TestPrinterFormRejectsInvalidSaves(t *testing.T) {
 		{"name_0", ""}, {"host_0", "printer.local"}, {"access_code_0", ""},
 		{"serial_number_0", "bad/serial"}, {"count", ""}, {"count", "-1"}, {"count", "33"},
 		{"action", "remove_9"}, {"action", "unknown"},
+		{"camera_type_0", "unknown"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.key+"="+tc.value, func(t *testing.T) {
@@ -452,7 +663,7 @@ func storedPrinters(t *testing.T, e *edge) string {
 func TestPrinterConfigPersistence(t *testing.T) {
 	e := testEdge(t)
 	lan, _ := e.routes()
-	p := printerConfig{Name: "Printer", Host: "127.0.0.1", AccessCode: "secret", SerialNumber: "serial"}
+	p := printerConfig{Name: "Printer", Host: "127.0.0.1", AccessCode: "secret", SerialNumber: "serial", CameraType: "bambu"}
 	if w := request(lan, "POST", "/", printerForm(e, "save", p).Encode(), "Content-Type", "application/x-www-form-urlencoded"); w.Code != 303 {
 		t.Fatal(w.Code)
 	}

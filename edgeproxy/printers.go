@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -31,6 +32,7 @@ type printerConfig struct {
 	Host         string `json:"host"`
 	AccessCode   string `json:"access_code"`
 	SerialNumber string `json:"serial_number"`
+	CameraType   string `json:"camera_type,omitempty"`
 }
 
 type printerStatus struct {
@@ -259,6 +261,10 @@ func (p *printer) runCamera() {
 }
 
 func (p *printer) cameraConnection() {
+	if p.config.CameraType == "bambu" {
+		p.bambuCameraConnection()
+		return
+	}
 	p.logf("camera connecting port=322")
 	ctx, cancel := context.WithCancel(p.ctx)
 	defer cancel()
@@ -304,18 +310,92 @@ func (p *printer) cameraConnection() {
 			return
 		}
 		frame, err := io.ReadAll(io.LimitReader(part, maxCameraFrame+1))
-		if err != nil || len(frame) > maxCameraFrame || len(frame) < 4 ||
-			frame[0] != 0xff || frame[1] != 0xd8 || frame[len(frame)-2] != 0xff || frame[len(frame)-1] != 0xd9 {
+		if err != nil || !validCameraFrame(frame) {
 			p.logf("camera frame rejected: read failure, invalid JPEG, or size limit bytes=%d", len(frame))
 			return
 		}
 		watchdog.Reset(cameraTimeout)
-		p.mu.Lock()
-		// Frames are immutable so HTTP requests can write without holding the lock.
-		p.frame, p.frameAt = frame, time.Now()
-		p.mu.Unlock()
-		p.logf("camera frame received bytes=%d", len(frame))
+		p.storeCameraFrame(frame)
 	}
+}
+
+func validCameraFrame(frame []byte) bool {
+	return len(frame) >= 4 && len(frame) <= maxCameraFrame &&
+		frame[0] == 0xff && frame[1] == 0xd8 && frame[len(frame)-2] == 0xff && frame[len(frame)-1] == 0xd9
+}
+
+func (p *printer) storeCameraFrame(frame []byte) {
+	p.mu.Lock()
+	// Frames are immutable so HTTP requests can write without holding the lock.
+	p.frame, p.frameAt = frame, time.Now()
+	p.mu.Unlock()
+	p.logf("camera frame received bytes=%d", len(frame))
+}
+
+func (p *printer) bambuCameraConnection() {
+	p.logf("camera connecting protocol=bambu port=6000")
+	// Like MQTT, the LAN camera uses a printer-issued certificate. TLS 1.2
+	// also works with firmware that stalls on a TLS 1.3 ClientHello.
+	dialer := tls.Dialer{NetDialer: &net.Dialer{Timeout: 5 * time.Second}, Config: &tls.Config{
+		InsecureSkipVerify: true, MinVersion: tls.VersionTLS12, MaxVersion: tls.VersionTLS12,
+	}}
+	conn, err := dialer.DialContext(p.ctx, "tcp", net.JoinHostPort(p.config.Host, "6000"))
+	if err == nil {
+		err = p.readBambuCamera(conn)
+	}
+	if err != nil && p.ctx.Err() == nil {
+		p.logf("Bambu camera connection ended: %v", err)
+	}
+}
+
+// A1/P1 cameras send an 80-byte authentication request followed by a stream
+// of 16-byte headers and JPEG payloads (not RTSP or HTTP multipart).
+// Protocol reference: ha-bambulab's pybambu/bambu_client.py ChamberImageThread.
+// This method owns conn; cancellation interrupts authentication and frame reads.
+func (p *printer) readBambuCamera(conn net.Conn) error {
+	defer conn.Close()
+	stop := context.AfterFunc(p.ctx, func() { _ = conn.Close() })
+	defer stop()
+	if len(p.config.AccessCode) == 0 || len(p.config.AccessCode) > 32 || strings.ContainsRune(p.config.AccessCode, '\x00') {
+		return fmt.Errorf("invalid Bambu camera access code length or NUL byte")
+	}
+	var auth [80]byte
+	binary.LittleEndian.PutUint32(auth[0:4], 0x40)
+	binary.LittleEndian.PutUint32(auth[4:8], 0x3000)
+	copy(auth[16:48], "bblp")
+	copy(auth[48:80], p.config.AccessCode)
+	if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return err
+	}
+	if n, err := conn.Write(auth[:]); err != nil {
+		return fmt.Errorf("write camera authentication: %w", err)
+	} else if n != len(auth) {
+		return io.ErrShortWrite
+	}
+	for p.ctx.Err() == nil {
+		// Bound the entire frame, including its header, even if the upstream
+		// trickles bytes. ReadFull handles fragmented and coalesced TLS records.
+		if err := conn.SetReadDeadline(time.Now().Add(cameraTimeout)); err != nil {
+			return err
+		}
+		var header [16]byte
+		if _, err := io.ReadFull(conn, header[:]); err != nil {
+			return fmt.Errorf("read camera header (check LAN access code if rejected): %w", err)
+		}
+		size := binary.LittleEndian.Uint32(header[:4])
+		if size < 4 || size > maxCameraFrame {
+			return fmt.Errorf("invalid camera frame size: %d", size)
+		}
+		frame := make([]byte, int(size))
+		if _, err := io.ReadFull(conn, frame); err != nil {
+			return fmt.Errorf("read camera frame: %w", err)
+		}
+		if !validCameraFrame(frame) {
+			return fmt.Errorf("invalid camera JPEG")
+		}
+		p.storeCameraFrame(frame)
+	}
+	return p.ctx.Err()
 }
 
 func (s *printerSet) snapshot(w http.ResponseWriter, r *http.Request) {
@@ -382,6 +462,12 @@ func validatePrinters(printers []printerConfig) error {
 			return fmt.Errorf("printer %d needs a name, IP address, access code, and unique serial number without spaces or / + #", i+1)
 		}
 		seen[p.SerialNumber] = true
+		if p.CameraType != "" && p.CameraType != "rtsps" && p.CameraType != "bambu" {
+			return fmt.Errorf("printer %d camera type must be rtsps or bambu", i+1)
+		}
+		if p.CameraType == "bambu" && (len(p.AccessCode) > 32 || strings.ContainsRune(p.AccessCode, '\x00')) {
+			return fmt.Errorf("printer %d Bambu camera access code must be at most 32 bytes without NUL bytes", i+1)
+		}
 	}
 	return nil
 }
@@ -398,7 +484,7 @@ var configPage = template.Must(template.New("config").Parse(`<!doctype html>
     legend { font-weight: 600; padding: 0 .5rem; }
     .fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr)); gap: 1rem; }
     label { display: block; }
-    input { display: block; box-sizing: border-box; width: 100%; margin-top: .4rem; padding: .6rem; font: inherit; border: 1px solid #788797; border-radius: .25rem; }
+    input, select { display: block; box-sizing: border-box; width: 100%; margin-top: .4rem; padding: .6rem; font: inherit; border: 1px solid #788797; border-radius: .25rem; }
     button { padding: .6rem 1.2rem; font: inherit; cursor: pointer; border: 1px solid #788797; border-radius: .25rem; background: white; }
     button:disabled { cursor: default; opacity: .5; }
     .remove { margin-top: 1rem; color: #a11b1b; }
@@ -438,6 +524,13 @@ var configPage = template.Must(template.New("config").Parse(`<!doctype html>
               <input name="serial_number_{{$i}}" value="{{.SerialNumber}}" spellcheck="false" autocapitalize="none" required>
               <small>Must be unique, without spaces or / + #.</small>
             </label>
+            <label>Camera type
+              <select name="camera_type_{{$i}}">
+                <option value="" {{if ne .CameraType "bambu"}}selected{{end}}>RTSPS (X1 series)</option>
+                <option value="bambu" {{if eq .CameraType "bambu"}}selected{{end}}>Bambu JPEG (A1 Mini / A1 / P1 series)</option>
+              </select>
+              <small>A1/P1 cameras connect directly on port 6000; RTSPS uses FFmpeg on port 322.</small>
+            </label>
           </div>
           <button class="remove" type="submit" name="action" value="remove_{{$i}}" formnovalidate>Remove printer</button>
         </fieldset>
@@ -475,6 +568,7 @@ func printersFromForm(form url.Values) ([]printerConfig, error) {
 		printers[i] = printerConfig{
 			Name: form.Get("name" + suffix), Host: form.Get("host" + suffix),
 			AccessCode: form.Get("access_code" + suffix), SerialNumber: form.Get("serial_number" + suffix),
+			CameraType: form.Get("camera_type" + suffix),
 		}
 	}
 	return printers, nil
