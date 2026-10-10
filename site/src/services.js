@@ -383,6 +383,7 @@ export function loginDestination(value, purpose) {
     return '/admin';
   }
   if (purpose === 'member' && value === '/waiver?signup=1') return value;
+  if (purpose === 'member' && value.split('?')[0] === '/machines') return '/machines';
   if (purpose === 'member' && /^\/keyfob\/bind\?token=[a-f0-9]{64}$/.test(value)) return value;
   return /^\/payment\/success\?session_id=cs_[A-Za-z0-9_]+$/.test(value) ? value : '/payment/resume';
 }
@@ -441,11 +442,12 @@ async function signingKey(env) {
   }
 }
 
-export async function edgeToken(env) {
+export async function edgeToken(env, printerMemberID) {
   const { key, publicKey } = await signingKey(env);
   const issued = now();
   const data = `${encodeJSON({ alg: 'EdDSA', typ: 'JWT', kid: publicKey.kid })}.${encodeJSON({
-    iss: origin(env), aud: env.EDGE_URL, sub: 'edge-sync', scope: 'edge:api', iat: issued, exp: issued + 60,
+    iss: origin(env), aud: env.EDGE_URL, sub: printerMemberID ?? 'edge-sync',
+    scope: printerMemberID === undefined ? 'edge:api' : 'printers:read', iat: issued, exp: issued + 60,
   })}`;
   return `${data}.${encodeBase64URL(new Uint8Array(await crypto.subtle.sign('Ed25519', key, encoder.encode(data))))}`;
 }

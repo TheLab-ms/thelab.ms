@@ -54,8 +54,8 @@ func TestPrinterSetLifecycleAndStatus(t *testing.T) {
 	var s printerSet
 	t.Cleanup(s.close)
 	w := httptest.NewRecorder()
-	s.dashboard(w, httptest.NewRequest("GET", "/machines", nil))
-	if !strings.Contains(w.Body.String(), "No printers are configured") {
+	s.status(w, httptest.NewRequest("GET", "/api/printers", nil))
+	if strings.TrimSpace(w.Body.String()) != "[]" {
 		t.Fatalf("zero-value status: %q", w.Body.String())
 	}
 	config := printerConfig{Name: "Printer", SerialNumber: "serial", Host: "127.0.0.1", AccessCode: "secret:/@password"}
@@ -67,7 +67,7 @@ func TestPrinterSetLifecycleAndStatus(t *testing.T) {
 	}
 	first.report([]byte(`{"print":{"gcode_state":"IDLE"}}`))
 	w = httptest.NewRecorder()
-	s.dashboard(w, httptest.NewRequest("GET", "/machines", nil))
+	s.status(w, httptest.NewRequest("GET", "/api/printers", nil))
 	for _, secret := range []string{config.AccessCode, config.Host, "access_code", "host"} {
 		if strings.Contains(w.Body.String(), secret) {
 			t.Fatalf("status exposes %q: %s", secret, w.Body.String())
@@ -713,41 +713,50 @@ func TestConcurrentPrinterConfiguration(t *testing.T) {
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// Public dashboard
+// Protected printer APIs
 // ────────────────────────────────────────────────────────────────────────
 
-func TestPublicMachinesRoutes(t *testing.T) {
+func TestProtectedMachinesRoutes(t *testing.T) {
 	e := testEdge(t)
-	e.workerAuth = nil
 	lan, cloud := e.routes()
 	for _, path := range []string{"/machines", "/machines/content", "/machines/app.js"} {
-		w := request(cloud, "GET", path, "")
-		if w.Code != 200 || w.Body.Len() == 0 || w.Header().Get("X-Robots-Tag") != "noindex, nofollow, noarchive" || w.Header().Get("Cache-Control") != "no-store" || w.Header().Get("Content-Security-Policy") == "" || len(w.Result().Cookies()) != 0 {
-			t.Fatalf("public resource failed: %s: %d %v", path, w.Code, w.Header())
+		if w := jwtRequest(cloud, "GET", path, ""); w.Code != 404 {
+			t.Fatalf("dashboard remains: %s: %d", path, w.Code)
 		}
 		if request(lan, "GET", path, "").Code != 404 {
 			t.Fatal("dashboard exposed on LAN listener")
 		}
 	}
-	w := request(cloud, "GET", "/machines", "")
-	if !strings.Contains(w.Body.String(), `name="robots" content="noindex, nofollow, noarchive"`) || strings.Contains(w.Body.String(), "data-expires") {
-		t.Fatal("wrong public dashboard markup")
-	}
-	for _, path := range []string{"/machines/login", "/machines/callback", "/machines/session", "/machines/images/missing.jpg"} {
+	for _, path := range []string{"/api/printers", "/machines/images/missing.jpg"} {
 		w := request(cloud, "GET", path, "")
-		if w.Code != 404 || w.Header().Get("X-Robots-Tag") == "" {
+		if w.Code != 401 || w.Header().Get("Cache-Control") != "no-store" {
 			t.Fatal("unexpected route", path, w.Code)
 		}
 	}
-	if request(cloud, "POST", "/machines/session", `{}`).Code != 404 {
-		t.Fatal("session endpoint remains")
-	}
-	if request(cloud, "GET", "/api/swipes", "").Code != 401 {
-		t.Fatal("public dashboard exposed machine API")
+	for _, origin := range []string{"https://thelab.example", "https://evil.example", ""} {
+		r := httptest.NewRequest("OPTIONS", "/machines/images/camera.jpg", nil)
+		r.Header.Set("Origin", origin)
+		r.Header.Set("Access-Control-Request-Method", "GET")
+		r.Header.Set("Access-Control-Request-Headers", "authorization")
+		w := httptest.NewRecorder()
+		cloud.ServeHTTP(w, r)
+		if origin == "https://thelab.example" {
+			if w.Code != 204 || w.Header().Get("Access-Control-Allow-Origin") != origin || w.Header().Get("Access-Control-Allow-Headers") != "Authorization" {
+				t.Fatal("preflight failed", w.Code, w.Header())
+			}
+		} else if w.Code != 401 || w.Header().Get("Access-Control-Allow-Origin") != "" {
+			t.Fatal("untrusted preflight allowed")
+		}
 	}
 }
 
-func TestPublicPrinterPageAndSnapshot(t *testing.T) {
+func printerClaims() map[string]any {
+	claims := testWorkerClaims()
+	claims["sub"], claims["scope"] = strings.Repeat("a", 32), "printers:read"
+	return claims
+}
+
+func TestProtectedPrinterStatusAndSnapshot(t *testing.T) {
 	e := testEdge(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -757,8 +766,8 @@ func TestPublicPrinterPageAndSnapshot(t *testing.T) {
 		frame: []byte{0xff, 0xd8, 0xff, 0xd9}, frameAt: time.Now(),
 	}}
 	_, cloud := e.routes()
-	w := request(cloud, "GET", "/machines/content", "")
-	for _, want := range []string{"Printing", "2h 5m", "&lt;script&gt;Maker&lt;/script&gt;", "/machines/images/camera.jpg"} {
+	w := jwtRequest(cloud, "GET", "/api/printers", "")
+	for _, want := range []string{"Printing", "2h 5m", `\u003cscript\u003eMaker\u003c/script\u003e`, "/machines/images/camera.jpg"} {
 		if !strings.Contains(w.Body.String(), want) {
 			t.Fatalf("missing %s: %s", want, w.Body.String())
 		}
@@ -769,10 +778,52 @@ func TestPublicPrinterPageAndSnapshot(t *testing.T) {
 		}
 	}
 	r := httptest.NewRequest("GET", "/machines/images/camera.jpg", nil)
+	r.Header.Set("Authorization", "Bearer "+workerTestToken(printerClaims()))
+	r.Header.Set("Origin", "https://thelab.example")
 	image := &printerDeadlineWriter{ResponseRecorder: httptest.NewRecorder(), t: t}
 	cloud.ServeHTTP(image, r)
 	if image.Code != 200 || image.Header().Get("Content-Type") != "image/jpeg" || image.Body.Len() != 4 || image.Header().Get("X-Robots-Tag") != "noindex, nofollow, noarchive" {
-		t.Fatal("public snapshot unavailable")
+		t.Fatal("authorized snapshot unavailable")
+	}
+	if image.Header().Get("Access-Control-Allow-Origin") != "https://thelab.example" {
+		t.Fatal("cross-origin image unavailable")
+	}
+	for _, path := range []string{"/api/printers", "/api/goal", "/api/kiosk/claim"} {
+		r := httptest.NewRequest("GET", path, nil)
+		r.Header.Set("Authorization", "Bearer "+workerTestToken(printerClaims()))
+		w := httptest.NewRecorder()
+		cloud.ServeHTTP(w, r)
+		if w.Code != 401 {
+			t.Fatal("printer token authorized privileged API", path)
+		}
+	}
+	for _, change := range []struct {
+		key   string
+		value any
+	}{
+		{"scope", "edge:api"}, {"sub", "edge-sync"}, {"aud", "https://other.example"},
+		{"iss", "https://other.example"}, {"exp", time.Now().Unix()}, {"exp", time.Now().Unix() + 61},
+	} {
+		claims := printerClaims()
+		claims[change.key] = change.value
+		r.Header.Set("Authorization", "Bearer "+workerTestToken(claims))
+		w := httptest.NewRecorder()
+		cloud.ServeHTTP(w, r)
+		if w.Code != 401 {
+			t.Fatal("invalid printer JWT accepted", change.key)
+		}
+	}
+	for _, token := range []string{"", workerTestToken(printerClaims()) + "x", workerTestToken(testWorkerClaims())} {
+		r.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		cloud.ServeHTTP(w, r)
+		if w.Code != 401 {
+			t.Fatal("invalid printer token accepted")
+		}
+	}
+	e.workerAuth = nil
+	if request(cloud, "GET", "/machines/images/camera.jpg", "").Code != 401 {
+		t.Fatal("unconfigured auth failed open")
 	}
 	p := e.printers.printers["camera"]
 	p.data.UpdatedAt = time.Now().Add(-30 * time.Second)

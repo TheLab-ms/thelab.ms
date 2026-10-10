@@ -938,20 +938,115 @@ describe('Fob enrollment', () => {
 });
 
 describe('Printer access', () => {
-	it('redirects anonymous visitors directly to the public machines page', async () => {
+	const config = { ...env, EDGE_URL: 'https://edge.example', EDGE_JWT_PRIVATE_KEY: testEdgePrivateKey };
+	let member, cookie, fetchSpy;
+	const api = (path = '/machines', session = cookie, bindings = config) => worker.fetch(new Request(`${config.SITE_URL}${path}`, {
+		headers: session ? { Cookie: session } : {},
+	}), bindings);
+	const card = { Name: '<script>Maker</script>', Status: 'Printing', Remaining: '2h 5m', Updated: 'Last report: 12:00:00 UTC', Image: '/machines/images/camera.jpg', Unavailable: false };
+	beforeEach(async () => {
+		await reset();
+		await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
+		member = await env.DB.prepare(`INSERT INTO members (discord_user_id, stripe_subscription_state, legacy_waiver_signed)
+          VALUES ('333333333333333333', 'active', 1) RETURNING *`).first();
+		cookie = `thelab_member=${await memberToken(config, member)}`;
+		fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+			expect(String(url)).toBe('https://edge.example/api/printers');
+			expect(init.redirect).toBe('manual');
+			const claims = JSON.parse(atob(init.headers.Authorization.split('.')[1].replaceAll('-', '+').replaceAll('_', '/')));
+			expect(claims.scope).toBe('edge:api');
+			return Response.json([card]);
+		});
+	});
+	afterEach(() => vi.restoreAllMocks());
+
+	it('signs anonymous visitors in through Discord and preserves the page destination', async () => {
 		for (const suffix of ['', '?state=obsolete&return_to=https://evil.example']) {
-			const response = await worker.fetch(new Request(`${env.SITE_URL}/machines${suffix}`), { ...env, PRINTER_EDGE_URL: 'https://edge.example' });
+			const response = await api(`/machines${suffix}`, null);
 			expect(response.status).toBe(303);
-			expect(response.headers.get('Location')).toBe('https://edge.example/machines');
-			expect(response.headers.get('Set-Cookie')).toBeNull();
-			expect(response.headers.get('X-Robots-Tag')).toBe('noindex, nofollow, noarchive');
+			const location = new URL(response.headers.get('Location'));
+			expect(location.origin).toBe('https://discord.com');
+			expect((await verifyToken(config, location.searchParams.get('state'), 'oauth')).return_to).toBe('/machines');
+			expect(response.headers.get('Set-Cookie')).toContain('thelab_oauth=');
 			expect(response.headers.get('Cache-Control')).toBe('no-store');
+		}
+		const data = await api('/machines/data', null);
+		expect(data.status).toBe(401);
+		expect(data.headers.get('Location')).toBeNull();
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
+	it('serves the page locally and issues only read-only, verifiable 60-second image credentials', async () => {
+		const page = await api();
+		expect(page.status).toBe(200);
+		expect(page.headers.get('Location')).toBeNull();
+		expect(page.headers.get('Cache-Control')).toBe('no-store');
+		expect(page.headers.get('Content-Security-Policy')).toContain("connect-src 'self' https://edge.example");
+		expect(await page.text()).toContain('src="/machines.js"');
+		expect(fetchSpy).not.toHaveBeenCalled();
+		const response = await api('/machines/data');
+		expect(response.headers.get('Cache-Control')).toBe('no-store');
+		const result = await response.json();
+		expect(result.cards).toEqual([card]);
+		expect(result.edge).toBe(config.EDGE_URL);
+		const decode = value => Uint8Array.from(atob(value.replaceAll('-', '+').replaceAll('_', '/')), c => c.charCodeAt(0));
+		const [header, payload, signature] = result.token.split('.');
+		const claims = JSON.parse(new TextDecoder().decode(decode(payload)));
+		expect(claims).toMatchObject({ sub: member.member_id, scope: 'printers:read', iss: config.SITE_URL, aud: config.EDGE_URL });
+		expect(claims.exp - claims.iat).toBe(60);
+		const jwks = await (await edgeJWKS(null, config)).json();
+		const key = await crypto.subtle.importKey('jwk', jwks.keys[0], 'Ed25519', false, ['verify']);
+		expect(await crypto.subtle.verify('Ed25519', key, decode(signature), new TextEncoder().encode(`${header}.${payload}`))).toBe(true);
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it.each([
+		['active', 1, 0, 0, 200], ['trialing', 1, 0, 0, 200], ['active', 0, 0, 0, 403],
+		['past_due', 1, 0, 0, 403], ['canceled', 1, 0, 0, 403], ['', 1, 1, 0, 200],
+		['', 0, 1, 0, 403], ['', 0, 0, 1, 200],
+	])('applies access eligibility without requiring a fob: %s/%s/%s/%s', async (state, waiver, legacy, nonBillable, expected) => {
+		await env.DB.prepare('UPDATE members SET stripe_subscription_state = ?, legacy_waiver_signed = ?, legacy_billing = ?, non_billable = ? WHERE member_id = ?')
+			.bind(state, waiver, legacy, nonBillable, member.member_id).run();
+		expect((await api()).status).toBe(expected);
+		expect((await api('/machines/data')).status).toBe(expected);
+		if (expected === 403) expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
+	it('recognizes linked waivers and rechecks eligibility and session revocation on refresh', async () => {
+		await env.DB.prepare('UPDATE members SET legacy_waiver_signed = 0').run();
+		await env.DB.prepare(`INSERT INTO waivers(member_id, version, content, name, email, agreements) VALUES (?, 1, 'Terms', 'Maker', 'maker@example.com', '[]')`).bind(member.member_id).run();
+		expect((await api('/machines/data')).status).toBe(200);
+		await env.DB.prepare("UPDATE members SET stripe_subscription_state = 'canceled'").run();
+		expect((await api('/machines/data')).status).toBe(403);
+		await env.DB.prepare('UPDATE members SET auth_version = auth_version + 1').run();
+		expect((await api('/machines/data')).status).toBe(401);
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it('rejects admin sessions, expired sessions, and deleted member sessions', async () => {
+		const admin = `thelab_admin=${await issueToken(config, member.discord_user_id, 'admin')}`;
+		expect((await api('/machines/data', admin)).status).toBe(401);
+		vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 86401000);
+		expect((await api('/machines/data')).status).toBe(401);
+		vi.mocked(Date.now).mockRestore();
+		await env.DB.prepare('DELETE FROM members').run();
+		expect((await api('/machines/data')).status).toBe(401);
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
+	it('fails closed on edge outages, redirects and malformed status without issuing credentials', async () => {
+		for (const response of [new Response(null, { status: 302 }), new Response(null, { status: 503 }), Response.json({}),
+			Response.json([{ ...card, Image: 'https://evil.example/frame.jpg' }])]) {
+			fetchSpy.mockResolvedValueOnce(response);
+			const result = await api('/machines/data');
+			expect(result.status).toBeGreaterThanOrEqual(500);
+			expect(await result.json()).not.toHaveProperty('token');
 		}
 	});
 
 	it('rejects unsafe or incomplete dashboard configuration', async () => {
 		for (const origin of ['', 'http://edge.example', 'https://edge.example/path', 'https://user:password@edge.example']) {
-			expect((await worker.fetch(new Request(`${env.SITE_URL}/machines`), { ...env, PRINTER_EDGE_URL: origin })).status).toBe(503);
+			expect((await api('/machines', cookie, { ...config, EDGE_URL: origin })).status).toBe(503);
 		}
 	});
 });

@@ -30,6 +30,9 @@ the reference. Local Wrangler state and secrets live inside `site/`.
   member policy, validation, and queries. Also importable by Node bootstrap tools.
 - `static/style.css` and `static/script.js` — shared styles and page-specific
   browser behavior. Images and public HTML live alongside them.
+- `static/machines.js` and `static/machines.css` — member-only printer dashboard
+  behavior and styles. The Worker serves the page and status; browsers fetch
+  authenticated camera frames directly from the edge proxy.
 
 Source files use named sections to keep related code together. Dependencies flow
 from entrypoints to state coordination to shared services. Numbered D1 migrations
@@ -66,9 +69,8 @@ go build .
 
 - `main.go` — startup/listeners, authentication, SQLite state, controller APIs,
   swipe delivery, and LAN kiosk handlers/assets.
-- `printers.go` — printer connections/images, local configuration, and dashboard
-  handlers/templates.
-- `app.js` — independent dashboard and kiosk browser initializers.
+- `printers.go` — printer connections/images, local configuration, and status API.
+- `app.js` — LAN kiosk browser behavior.
 - `main_test.go`, `printers_test.go`, `app_test.mjs` — server and browser tests.
 
 Build the RouterOS linux/arm64 image with `python3 build.py`. Runtime packages

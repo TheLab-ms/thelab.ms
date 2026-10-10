@@ -1,3 +1,49 @@
+# Printer monitoring
+
+The printer dashboard lives at **`https://thelab.ms/machines`** on the Worker.
+Discord sign-in is required. The page and every `/machines/data` refresh check
+the current D1 access policy: non-billable members, or legacy-billing / active /
+trialing members with a signed waiver. An assigned key fob is not required.
+
+The tunnel listener exposes printer data, not dashboard HTML:
+
+- `GET /api/printers`: names, status, remaining time, report time, and image paths;
+  requires the Worker's privileged `edge:api` JWT. Credentials and LAN addresses
+  are never included. The Worker fetches this small JSON response every refresh.
+- `GET /machines/images/{serial}.jpg`: latest JPEG frame; requires a
+  `printers:read` JWT in the Authorization header. Browsers fetch these directly
+  from the edge and display blob URLs. The Worker never fetches image bytes.
+- Image CORS preflights allow `GET` and `Authorization` only from
+  `CONWAYEDGE_WORKER_ISSUER`. Image requests still require a valid token.
+
+The Worker issues a new read-only image token after each successful eligibility
+check and status fetch. Tokens use the existing Ed25519 signing key and JWKS,
+are audience-bound to the edge origin, and expire after **60 seconds**. Existing
+tokens can remain usable for that lifetime after membership access is revoked;
+further renewals are denied. Printer tokens cannot access goal or kiosk APIs.
+Tokens stay in browser memory and Authorization headers, never query strings or
+browser storage. Protected responses use `Cache-Control: no-store`.
+
+## Configuration and rollout
+
+- Worker `EDGE_URL` and edge `CONWAYEDGE_PUBLIC_URL` must be the same HTTPS origin
+  (normally `https://edgeproxy.thelab.ms`). `PRINTER_EDGE_URL` is removed.
+- Edge `CONWAYEDGE_WORKER_ISSUER` must match Worker `SITE_URL` exactly
+  (normally `https://thelab.ms`), including for CORS.
+- Reuse `EDGE_JWT_PRIVATE_KEY` and the Worker's `/.well-known/edge-jwks.json`.
+  No new secrets or database migrations are required.
+- Deploy the rebuilt edge proxy, then the Worker. The old public edge dashboard
+  and its browser assets are removed; there is no compatibility redirect.
+
+Verify that an eligible member can open `/machines`, that browser network tools
+show JPEG requests going directly to the edge with Bearer authorization, and that
+an unauthenticated image request returns `401`. Ineligible members receive `403`
+from the Worker. Status and frames refresh every five seconds; access denial
+clears the dashboard, and connection failures hide old images.
+
+Run the browser tests from `site/` with `npm run test:browser`, the Worker tests
+with `npm test`, and edge tests from `edgeproxy/` with `go test ./...`.
+
 # Edge proxy kiosk
 
 The key-fob kiosk is served at `http://edge.thelab.ms/kiosk` on the **LAN

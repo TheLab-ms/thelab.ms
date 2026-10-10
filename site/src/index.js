@@ -3,14 +3,14 @@ import {
 	HttpError, boundedText, cookie, cookieHeader, discordID, errorPage, escapeHTML as e,
 	hash, json, logError, opaque, origin, randomToken, redirect, requestContext,
 	finishLogin, issueToken, loginDestination, memberToken, signedInMember, startLogin,
-	verifyOAuthState, verifyToken, discord, discordIdentity, edgeJWKS, provider, stripe, verifyStripe,
-	discounts, fobEnabledSQL, grantsMembership, memberName, memberPath, waiverSignedSQL,
+	verifyOAuthState, verifyToken, discord, discordIdentity, edgeJWKS, edgeToken, provider, stripe, verifyStripe,
+	discounts, fobEnabledSQL, grantsMembership, memberAccessSQL, memberName, memberPath, waiverSignedSQL,
 	MAX_SEARCH_LENGTH, defaultMemberFilters, memberFilters, memberListParams, memberListURL,
 	eventListParams, eventListURL, eventTypes, queryEvents, recentMemberEvents,
 } from './services.js';
 import {
 	cleanupFobClaims, coordinated, createMember, edgeCall, edgeEnabled, fobClaim,
-	kickEdge, nightlyDate, registerMember, swipeWebhook,
+	kickEdge, nightlyDate, registerMember, swipeWebhook, edgeRequest,
 } from './membership.js';
 export { Membership, EdgeSync } from './membership.js';
 
@@ -533,21 +533,49 @@ export async function bindFob(request, env) {
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// Printer dashboard redirect
+// Member-only printer dashboard; camera bytes travel directly from edge to browser
 // ────────────────────────────────────────────────────────────────────────
 
 export function printerOrigin(env) {
 	try {
-		const url = new URL(env.PRINTER_EDGE_URL);
-		if (url.protocol === 'https:' && url.origin === env.PRINTER_EDGE_URL) return url.origin;
+		const url = new URL(env.EDGE_URL);
+		if (url.protocol === 'https:' && url.origin === env.EDGE_URL) return url.origin;
 	} catch { /* Report a configuration error below. */ }
 	throw new HttpError(503, 'Machine status is temporarily unavailable. Please try again later.');
 }
 
-export function printerAccess(_request, env) {
-	const response = redirect(`${printerOrigin(env)}/machines`);
-	response.headers.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
-	return response;
+export async function printerAccess(request, env) {
+	const data = new URL(request.url).pathname === '/machines/data';
+	const member = await signedInMember(request, env);
+	if (!member) {
+		if (data) throw new HttpError(401, 'Sign in again to view the printers.');
+		return startLogin(request, env, 'member');
+	}
+	const eligible = await env.DB.prepare(`SELECT member_id FROM members WHERE member_id = ?
+      AND discord_user_id = ? AND auth_version = ? AND ${memberAccessSQL}`)
+		.bind(member.member_id, member.discord_user_id, member.auth_version).first();
+	if (!eligible) throw new HttpError(403, 'An active membership with access eligibility is required to view the printers.');
+	const edge = printerOrigin(env);
+	if (data) {
+		const response = await edgeRequest(env, '/api/printers');
+		if (response.status !== 200) throw new HttpError(503, 'Machine status is temporarily unavailable.');
+		let cards;
+		try { cards = JSON.parse(response.text); } catch { /* Validate below. */ }
+		if (!Array.isArray(cards) || cards.length > 32 || cards.some(card => !card
+			|| ['Name', 'Status', 'Remaining', 'Updated', 'Image'].some(key => typeof card[key] !== 'string')
+			|| typeof card.Unavailable !== 'boolean'
+			|| !/^\/machines\/images\/[^/?#]+\.jpg$/.test(card.Image)
+			|| new URL(card.Image, edge).origin !== edge)) throw new HttpError(502, 'Invalid printer status response.');
+		return json({ cards, edge, token: await edgeToken(env, member.member_id) });
+	}
+	return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex, nofollow, noarchive"><title>Machines | TheLab</title><link rel="icon" href="/assets/favicon.svg"><link rel="stylesheet" href="/machines.css"><script src="/machines.js" defer></script></head>
+      <body><main id="dashboard"><header><a class="brand" href="/">THELAB</a><h1>Machines</h1><p>Check machine status and follow your 3D prints from wherever you are.</p><p id="refresh-status" role="status">Loading printers…</p><p id="access-help" hidden><a href="/machines">Sign in or check access again</a></p></header><noscript>Enable JavaScript to view printer status and camera images.</noscript><section id="printers" class="grid" aria-label="Printers"></section><footer class="muted">Remaining times are printer estimates. Status and still images refresh every 5 seconds.</footer></main></body></html>`, {
+		headers: {
+			'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
+			'X-Robots-Tag': 'noindex, nofollow, noarchive', 'X-Content-Type-Options': 'nosniff',
+			'Content-Security-Policy': `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob:; connect-src 'self' ${edge}; base-uri 'none'; frame-ancestors 'none'; form-action 'none'`,
+		},
+	});
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -676,6 +704,7 @@ const routes = new Map([
 	['/payment/success', ['GET', success]],
 	['/payment/resume', ['GET', resume]],
 	['/machines', ['GET', printerAccess]],
+	['/machines/data', ['GET', printerAccess]],
 	['/kiosk', ['GET', () => redirect('http://edge.thelab.ms/kiosk')]],
 	['/keyfob/bind', ['GET, POST', bindFob]],
 	['/webhooks/stripe', ['POST', webhook]],
@@ -710,6 +739,7 @@ export default {
 		} catch (error) {
 			logError('request.failed', error, context, env);
 			if (path === '/webhooks/stripe') return json({ error: 'Webhook could not be accepted.' }, error instanceof HttpError ? error.status : 500);
+			if (path === '/machines/data') return json({ error: error instanceof HttpError ? error.message : 'Machine status is temporarily unavailable.' }, error instanceof HttpError ? error.status : 500);
 			const response = errorPage(error);
 			if (path === '/login/discord/callback') {
 				// Clearing an OAuth cookie must still work when SITE_URL itself is invalid.

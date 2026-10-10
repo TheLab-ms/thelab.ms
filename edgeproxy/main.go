@@ -140,17 +140,28 @@ func (e *edge) routes() (http.Handler, http.Handler) {
 	tunnel.HandleFunc("GET /api/goal", e.getGoal)
 	tunnel.HandleFunc("PATCH /api/goal", e.patchGoal)
 	tunnel.HandleFunc("GET /api/kiosk/claim", e.getKioskClaim)
-	tunnel.HandleFunc("GET /machines", e.printers.dashboard)
-	tunnel.HandleFunc("GET /machines/content", e.printers.dashboard)
+	tunnel.HandleFunc("GET /api/printers", e.printers.status)
 	tunnel.HandleFunc("GET /machines/images/{image}", e.printers.snapshot)
-	tunnel.HandleFunc("GET /machines/app.js", printerScript)
 	return logRequests("lan", lan), logRequests("tunnel", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		if r.URL.Path == "/machines" || strings.HasPrefix(r.URL.Path, "/machines/") {
+		if strings.HasPrefix(r.URL.Path, "/machines/images/") {
 			w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive")
 			w.Header().Set("Referrer-Policy", "no-referrer")
 			w.Header().Set("X-Content-Type-Options", "nosniff")
-			w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+			w.Header().Set("Vary", "Origin")
+			if e.workerAuth != nil && r.Header.Get("Origin") == e.workerAuth.issuer {
+				w.Header().Set("Access-Control-Allow-Origin", e.workerAuth.issuer)
+				if r.Method == http.MethodOptions {
+					w.Header().Set("Access-Control-Allow-Methods", "GET")
+					w.Header().Set("Access-Control-Allow-Headers", "Authorization")
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+			}
+			if r.Method != http.MethodGet || e.workerAuth.validateScopeAt(r, time.Now().Unix(), "printers:read") != nil {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
 		} else if !e.workerAuth.verify(r) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -362,6 +373,10 @@ func (a *workerAuth) verifyAt(r *http.Request, now int64) bool {
 }
 
 func (a *workerAuth) validateAt(r *http.Request, now int64) error {
+	return a.validateScopeAt(r, now, "edge:api")
+}
+
+func (a *workerAuth) validateScopeAt(r *http.Request, now int64, scope string) error {
 	if a == nil {
 		return fmt.Errorf("Worker authentication is not configured")
 	}
@@ -413,7 +428,8 @@ func (a *workerAuth) validateAt(r *http.Request, now int64) error {
 	if claims.Audience != a.audience {
 		return fmt.Errorf("audience mismatch: got %q, want CONWAYEDGE_PUBLIC_URL=%q (Worker EDGE_URL)", claims.Audience, a.audience)
 	}
-	if claims.Subject != "edge-sync" || claims.Scope != "edge:api" {
+	if claims.Scope != scope || (scope == "edge:api" && claims.Subject != "edge-sync") ||
+		(scope == "printers:read" && !validMemberSubject(claims.Subject)) {
 		return fmt.Errorf("invalid JWT subject or scope")
 	}
 	if claims.Issued <= 0 || claims.Expires <= claims.Issued || claims.Expires-claims.Issued > 60 {
@@ -426,6 +442,18 @@ func (a *workerAuth) validateAt(r *http.Request, now int64) error {
 		return fmt.Errorf("JWT expired; check edge clock or request delay: now=%d exp=%d", now, claims.Expires)
 	}
 	return nil
+}
+
+func validMemberSubject(subject string) bool {
+	if len(subject) != 32 {
+		return false
+	}
+	for _, c := range subject {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // ────────────────────────────────────────────────────────────────────────

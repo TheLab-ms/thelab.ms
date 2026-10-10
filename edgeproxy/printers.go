@@ -431,7 +431,7 @@ func (s *printerSet) snapshot(w http.ResponseWriter, r *http.Request) {
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// Printer configuration and dashboard
+// Printer configuration and status API
 // ────────────────────────────────────────────────────────────────────────
 
 const maxPrinters = 32
@@ -637,76 +637,6 @@ func (e *edge) configure(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-const dashboardHTML = `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="robots" content="noindex, nofollow, noarchive">
-  <title>Machines | TheLab</title>
-  <script src="/machines/app.js" defer></script>
-  <style>
-    :root { color-scheme: dark; }
-    * { box-sizing: border-box; }
-    body { margin: 0; background: #11151b; color: #edf2f7; font: 16px system-ui, sans-serif; }
-    main { max-width: 1200px; margin: auto; padding: 2rem 1rem; }
-    .brand { color: #65e5b4; font-weight: 700; letter-spacing: .12em; }
-    h1 { font-size: clamp(2rem, 5vw, 3rem); margin: .5rem 0; }
-    header p, .muted { color: #adb9c9; }
-    a { color: #65e5b4; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 1.25rem; margin: 2rem 0; }
-    .card { background: #1b222d; border: 1px solid #364254; border-radius: 12px; overflow: hidden; }
-    .details { padding: 1.25rem; }
-    h2 { margin: 0 0 1rem; font-size: 1.3rem; }
-    .status { color: #65e5b4; font-weight: 600; }
-    .unavailable { color: #ffd28a; }
-    dl { display: grid; grid-template-columns: 1fr 1fr; gap: .8rem; }
-    dt { color: #adb9c9; }
-    dd { margin: 0; text-align: right; }
-    .camera { aspect-ratio: 4/3; background: #090d12; display: grid; place-items: center; position: relative; }
-    .camera img { position: absolute; width: 100%; height: 100%; object-fit: contain; }
-    .camera p { padding: 1rem; color: #adb9c9; }
-    .camera img[hidden] { display: none; }
-    small { color: #adb9c9; }
-    #refresh-status { min-height: 1.5em; }
-  </style>
-</head>
-<body>
-  <main id="dashboard">
-    <header>
-      <span class="brand">THELAB</span>
-      <h1>Machines</h1>
-      <p>Check machine status and follow your 3D prints from wherever you are.</p>
-      <p id="refresh-status" role="status">Status and still images refresh every 5 seconds.</p>
-    </header>
-    <noscript>Enable JavaScript for automatic updates. Reload this page to see the latest status.</noscript>
-    <section id="printers" class="grid" aria-label="Printers">{{template "cards" .}}</section>
-    <footer class="muted">Remaining times are printer estimates.</footer>
-  </main>
-</body>
-</html>
-
-{{define "cards"}}
-  {{range .Cards}}
-    <article class="card">
-      <div class="details">
-        <h2>{{.Name}}</h2>
-        <p class="status {{if .Unavailable}}unavailable{{end}}">{{.Status}}</p>
-        <dl><dt>Remaining print time</dt><dd>{{.Remaining}}</dd></dl>
-        <small>{{.Updated}}</small>
-      </div>
-      <div class="camera">
-        <p>Camera unavailable — retrying automatically.</p>
-        <img src="{{.Image}}" alt="Current camera image of {{.Name}}" data-camera>
-      </div>
-    </article>
-  {{else}}
-    <p>No printers are configured yet.</p>
-  {{end}}
-{{end}}`
-
-var dashboardTemplate = template.Must(template.New("dashboard").Parse(dashboardHTML))
-
 type printerCard struct {
 	Name, Status, Remaining, Image, Updated string
 	Unavailable                             bool
@@ -735,10 +665,9 @@ func (s *printerSet) cards() []printerCard {
 	cards := make([]printerCard, 0, len(rows))
 	now := time.Now()
 	for _, p := range rows {
-		// A distinct URL also bypasses the browser's per-document image reuse.
 		card := printerCard{
 			Name: p.name, Remaining: "—", Updated: "Waiting for first report",
-			Image:       fmt.Sprintf("/machines/images/%s.jpg?v=%d", url.PathEscape(p.serial), now.UnixNano()),
+			Image:       fmt.Sprintf("/machines/images/%s.jpg", url.PathEscape(p.serial)),
 			Unavailable: p.Error != "" || p.UpdatedAt.IsZero() || now.Sub(p.UpdatedAt) > statusTimeout,
 		}
 		if !p.UpdatedAt.IsZero() {
@@ -771,18 +700,7 @@ func (s *printerSet) cards() []printerCard {
 	return cards
 }
 
-func (s *printerSet) dashboard(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	name := "dashboard"
-	if r.URL.Path == "/machines/content" {
-		name = "cards"
-	}
-	_ = dashboardTemplate.ExecuteTemplate(w, name, struct {
-		Cards []printerCard
-	}{s.cards()})
-}
-
-func printerScript(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-	_, _ = w.Write([]byte(appJS))
+func (s *printerSet) status(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(s.cards())
 }

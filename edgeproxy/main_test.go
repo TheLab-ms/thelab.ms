@@ -361,7 +361,7 @@ func TestAPIValidationAndRoutes(t *testing.T) {
 		{"PUT", "/api/goal", `{"version":1,"fobs":[1],"event_signing_key":"` + testEventKey + `"}`, 204},
 		{"GET", "/api/swipes", "", 404},
 		{"POST", "/api/swipes/ack", `{"ids":[]}`, 404},
-		{"GET", "/api/printers", "", 404},
+		{"GET", "/api/printers", "", 200},
 		{"GET", "/api/printers/missing/snapshot.jpg", "", 404},
 	} {
 		if w := request(cloud, route.method, route.path, route.body); w.Code != 401 {
@@ -1728,7 +1728,7 @@ func TestRequestLogging(t *testing.T) {
 	}{
 		{lan, "/missing", "lan", "404"},
 		{tunnel, "/api/swipes", "tunnel", "401"},
-		{tunnel, "/machines", "tunnel", "200"},
+		{tunnel, "/machines", "tunnel", "401"},
 	} {
 		output.Reset()
 		r := httptest.NewRequest("GET", tc.path+"?token=query-secret", strings.NewReader("body-secret"))

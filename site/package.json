@@ -11,6 +11,7 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "test": "vitest run",
+    "test:browser": "node --test test/machines.browser.mjs",
     "db:local": "wrangler d1 migrations apply thelab-membership --local"
   },
   "devDependencies": {
