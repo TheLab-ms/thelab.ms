@@ -90,6 +90,17 @@
 			}
 		]
 	},
+	"secrets": {
+		"required": [
+			"AUTH_SECRET",
+			"EDGE_JWT_PRIVATE_KEY",
+			"TURNSTILE_SECRET_KEY",
+			"DISCORD_CLIENT_SECRET",
+			"DISCORD_BOT_TOKEN",
+			"STRIPE_SECRET_KEY",
+			"STRIPE_WEBHOOK_SECRET"
+		]
+	},
 	"vars": {
 		"SITE_URL": "https://thelab.ms",
 		"TURNSTILE_SITE_KEY": "0x4AAAAAAA-xMVuWzfkR2PKz",

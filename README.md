@@ -76,12 +76,80 @@ connected to this repository. Install and deploy commands are `npm ci` and
 npm run deploy
 ```
 
-For initial provisioning, authenticate Wrangler or set `CLOUDFLARE_API_TOKEN`,
-select the account with `CLOUDFLARE_ACCOUNT_ID`, then run:
+Authenticate Wrangler (`npx wrangler login`) or set `CLOUDFLARE_API_TOKEN`, and
+select the account with `CLOUDFLARE_ACCOUNT_ID`. `npm run deploy` runs
+`wrangler d1 migrations apply DB --remote` through its `predeploy` hook before
+`wrangler deploy`; a migration failure stops deployment. The configured production
+D1 ID is `3e4bca68-f6db-4ef5-8e92-c80a38f02aa1`: keep it for existing deployments.
+Review migration compatibility before deploying, especially the swipe-ingestion
+pause described above. Migrations are not rolled back if the subsequent deploy
+fails; fix the deployment and retry before resuming ingestion.
+For an offline bundle check, use `npx wrangler deploy --dry-run` directly:
+`npm run deploy -- --dry-run` would still run the remote migration hook.
 
-```sh
-npm run bootstrap -- --remote
-```
+Ordinary deployments retain remote secrets and never upload locally generated keys.
+Wrangler validates the seven names in `secrets.required`; missing secrets block
+deployment. For an existing Worker, inspect **names only** with
+`npx wrangler secret list --format json`, then use `npx wrangler secret put NAME`
+for each missing name (the interactive value prompt is hidden). Do not put a name
+that already exists unless intentionally rotating it: `secret put`, `secret bulk`,
+and `deploy --secrets-file` overwrite supplied names. Never upload `.dev.vars` or
+an old bootstrap file to an existing Worker. Required declarations check presence,
+not credential validity; supply real nonempty provider credentials. Secret
+validation happens during deploy, after the predeploy migrations.
+The old `bootstrap -- --remote` mode has been replaced by this workflow.
+
+#### First deployment to a new account/Worker
+
+Use a separate checkout/configuration for a new deployment:
+
+1. Set the new Worker name, account, queue names and site/provider variables in
+   `wrangler.jsonc`. Replace the production D1 entry's name and ID with the new
+   database details in the next step; retain binding `DB` and `migrations_dir`.
+2. Create the database explicitly with the supported command (substitute a unique
+   name):
+
+   ```sh
+   npx wrangler d1 create NEW_DATABASE_NAME --no-update-config
+   ```
+
+   Copy the returned `database_id` and name into the `DB` entry. If the database
+   already exists, copy its ID from the dashboard instead of creating another.
+   D1 automatic provisioning is supported, but happens during deploy, too late
+   for our predeploy migration hook. Explicit creation lets migrations finish
+   before any HTTP, queue or scheduled handlers can run.
+3. Prepare independent production keys locally:
+
+   ```sh
+   npm run bootstrap -- --secrets
+   ```
+
+   This creates ignored, mode-0600 `.env.bootstrap.json` containing a random
+   `AUTH_SECRET` and an Ed25519 PKCS#8 base64 `EDGE_JWT_PRIVATE_KEY`. Reruns preserve
+   existing keys and provider entries; nothing is uploaded or printed. Using a
+   secure editor, add `TURNSTILE_SECRET_KEY`, `DISCORD_CLIENT_SECRET`,
+   `DISCORD_BOT_TOKEN`, `STRIPE_SECRET_KEY`, and `STRIPE_WEBHOOK_SECRET` as nonempty
+   JSON strings. Keep these production keys separate from `.dev.vars`.
+4. After confirming this is a **new Worker**, deploy with all seven secrets:
+
+   ```sh
+   npm run deploy -- --secrets-file .env.bootstrap.json
+   ```
+
+   npm applies remote D1 migrations first and forwards `--secrets-file` only to
+   deploy. A fresh Worker cannot pass required-secret validation without this
+   file. If deployment fails, retain the file for recovery; check the Worker in
+   the dashboard before retrying, and use the same keys. Once deployed, store the
+   keys in your secret manager, remove the bootstrap file, and use ordinary
+   `npm run deploy` for subsequent releases.
+
+The lockfile pins Wrangler **4.131.1**. Its default automatic provisioning handles
+the named producer queue (also consumed by this Worker); the configured dead-letter
+queue is created when the consumer is registered. No queue discovery or creation
+script is needed. See [automatic provisioning](https://developers.cloudflare.com/workers/wrangler/configuration/#automatic-provisioning)
+and [Queues configuration](https://developers.cloudflare.com/workers/wrangler/configuration/#queues).
+Finish provider callback/webhook configuration and attach the intended custom
+domain in Cloudflare before directing users to the new deployment.
 
 
 ## Edge proxy

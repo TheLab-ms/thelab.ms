@@ -9,10 +9,12 @@
     "bootstrap": "bash scripts/bootstrap-worker.sh",
     "images:hero": "node scripts/generate-hero-images.js",
     "dev": "wrangler dev",
+    "predeploy": "npm run db:remote",
     "deploy": "wrangler deploy",
     "test": "vitest run",
     "test:browser": "node --test test/machines.browser.mjs",
-    "db:local": "wrangler d1 migrations apply thelab-membership --local"
+    "db:local": "wrangler d1 migrations apply DB --local",
+    "db:remote": "wrangler d1 migrations apply DB --remote"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.22.0",
