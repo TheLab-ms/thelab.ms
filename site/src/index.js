@@ -12,6 +12,7 @@ import {
 	cleanupFobClaims, coordinated, createMember, edgeCall, edgeEnabled, fobClaim,
 	kickEdge, nightlyDate, registerMember, swipeWebhook, edgeRequest,
 } from './membership.js';
+import { calendarData } from './calendar.js';
 export { Membership, EdgeSync } from './membership.js';
 
 // ────────────────────────────────────────────────────────────────────────
@@ -697,6 +698,7 @@ export async function processMessage(body, env) {
 }
 
 const routes = new Map([
+	['/calendar/data', ['GET', calendarData]],
 	['/.well-known/edge-jwks.json', ['GET', edgeJWKS]],
 	['/signup', ['GET', signup]],
 	['/waiver', ['GET, POST', waiverRequest]],

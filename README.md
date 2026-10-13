@@ -28,6 +28,10 @@ the reference. Local Wrangler state and secrets live inside `site/`.
   coordination, fob claims, and access-list synchronization.
 - `src/services.js` — shared HTTP/authentication utilities, provider clients,
   member policy, validation, and queries. Also importable by Node bootstrap tools.
+- `src/calendar.js` — public Google Calendar feed parsing, recurrence expansion,
+  and Cloudflare caching for `/calendar/data?month=YYYY-MM`.
+- `static/calendar.js` and `static/calendar.css` — homepage month/list calendar
+  and accessible event details.
 - `static/style.css` and `static/script.js` — shared styles and page-specific
   browser behavior. Images and public HTML live alongside them.
 - `static/machines.js` and `static/machines.css` — member-only printer dashboard
@@ -37,6 +41,28 @@ the reference. Local Wrangler state and secrets live inside `site/`.
 Source files use named sections to keep related code together. Dependencies flow
 from entrypoints to state coordination to shared services. Numbered D1 migrations
 retain their deployed history.
+
+### Homepage calendar
+
+The calendar after Our Facilities reads TheLab's public Google iCal feed; no
+Google API key is required. Source data and monthly results are reused for ten
+minutes using the Cloudflare Cache API. A separate last-successful feed is retained
+for up to 24 hours for temporary upstream failures (subject to cache eviction).
+Dates use America/Chicago; browsing allows the previous month through the next
+twelve months. Calendar data loads when the section approaches the viewport.
+
+To preview locally with the correct Worker origin, run from `site/`:
+
+```sh
+npm run dev -- --port 8787 --var SITE_URL:http://localhost:8787
+```
+
+Open `http://localhost:8787` and scroll to Events. Inspect the JSON directly at
+`http://localhost:8787/calendar/data`; an optional `month=YYYY-MM` selects a month
+within the available range. Local Wrangler caching is useful for development;
+production cache entries are specific to each Cloudflare data center.
+
+Run calendar tests with `npm test -- test/calendar.test.js`.
 
 ### Deployment
 
