@@ -199,43 +199,24 @@ domain in Cloudflare before directing users to the new deployment.
 
 #### Queue-to-alarm cutover (existing deployment)
 
-Do not delete the old queues as part of deploying this commit. Plan a short
-maintenance window; the new Worker has no queue consumer and cannot drain old
-messages itself. Migration `0006_membership_sync.sql` is additive and compatible
-with the previous Worker.
+For this low-load rollout, messages remaining in the old queues need not be
+preserved. Migration `0006_membership_sync.sql` is additive and compatible with
+the previous Worker.
 
-1. Before deployment, record/export the main `thelab-membership` queue and
-   `thelab-membership-failed` DLQ backlog using Cloudflare's authenticated dashboard
-   or management tooling. Retain customer/member IDs and failures for recovery.
-   Pause membership edits/checkout and Stripe webhook delivery during the drain
-   (return retryable failures or pause the endpoint; never acknowledge/drop events).
-   Keep the old consumer running until the main queue is empty; inspect the DLQ,
-   fix underlying errors, and redrive recoverable records through the old consumer.
-   Preserve any unresolved records beyond queue retention; never purge to make
-   the backlog appear healthy. Old operator `edge.sync` messages need a full edge
-   sync rather than a membership retry.
-2. Apply migrations and deploy this Worker with its queue binding/consumer removed.
-   Verify Cloudflare has detached the old consumer; keep both queue resources and
-   the exported recovery inventory. Resume Stripe delivery and membership routes.
-   Resend failed Stripe events; duplicates are safe. Check a mapped webhook returns
-   204 only when its member shows pending work or a completed alarm reconciliation.
-3. In **Admin → Synchronization**, run **Schedule next 100 stale memberships**
-   repeatedly until the sweep visits the roster (all initial cursors are zero).
-   For exported DLQ/backlog IDs, find their current membership, retry explicitly,
-   and verify Stripe/Discord completion. Document unrelated/deleted customers as
-   intentionally outside this app; transfers must be checked against current
-   ownership. Resolve paused failures, verify billing/access state and timestamps,
-   then run **Full edge sync**. Keep recovery records until all work is accounted for.
-4. Only after recovery is verified, no old producers/consumer remain, and both
-   old backlogs are drained/accounted for, delete the main queue and DLQ through
-   Cloudflare management tooling. The removed `resync-edge.sh` is replaced by the
-   authenticated admin full-sync action.
+1. Run `npm run deploy` from `site/` to apply migrations and deploy the Worker
+   with its queue binding/consumer removed.
+2. Verify a mapped Stripe webhook schedules durable work and its alarm completes
+   Stripe/Discord reconciliation. In **Admin → Synchronization**, check status
+   and retry any failures, then run **Full edge sync**. This authenticated action
+   replaces `resync-edge.sh`.
+3. Confirm the old consumer is detached and no old producers remain, then delete
+   `thelab-membership` and `thelab-membership-failed` through Cloudflare management
+   tooling. Remaining messages may be discarded.
 
-Rollback before queue deletion requires restoring the previous consumer/bindings.
-Its code does not process DO pending records: preserve/export the admin recovery
-inventory and reconcile those members explicitly when returning to this release.
-Do not reset DO storage or replay ambiguous Stripe billing writes older than the
-existing 23-hour idempotency guard. Cutover steps are operational guidance only;
+This queue cutover needs no separate maintenance window. The distinct
+`0005_swipe_events.sql` ingestion pause described above and the edge-first
+deployment requirements in the [edge operations guide](edgeproxy/README.md)
+still apply when those upgrades are included. These are rollout instructions;
 repository checks and dry-run bundling make no live cloud changes.
 
 

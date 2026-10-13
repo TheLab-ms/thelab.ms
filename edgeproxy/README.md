@@ -218,5 +218,6 @@ the forced snapshot for alarm retry. Repeating the action is safe. Completion lo
 The queue-publishing `resync-edge.sh` has been removed. No Cloudflare queue, new
 operator secret, or separate operator service is required. Membership billing and
 Discord retry controls are on the same admin page. See the root
-[cutover guide](../README.md#queue-to-alarm-cutover-existing-deployment) before
-removing the old main queue or DLQ.
+[cutover guide](../README.md#queue-to-alarm-cutover-existing-deployment) for
+deployment verification and deleting the old queues after consumer detachment.
+Remaining queue messages need not be preserved for this low-load rollout.
