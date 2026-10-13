@@ -1,9 +1,10 @@
 import { env } from 'cloudflare:workers';
 import { applyD1Migrations, reset, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { EdgeSync, cleanupFobClaims, coordinated, edgeCall, fobClaim, nightlyDate } from '../src/membership.js';
+import { EdgeSync, cleanupFobClaims, coordinated, edgeCall, fobClaim } from '../src/membership.js';
 import worker, { processMessage } from '../src/index.js';
 import { edgeJWKS, edgeToken, hash, issueToken, loginDestination, memberToken, now, randomToken, verifyOAuthState, verifyToken } from '../src/services.js';
+import wranglerConfig from '../wrangler.jsonc?raw';
 
 // RFC 8032 test seed in PKCS#8; public test material, never a deployment key.
 const testEdgePrivateKey = 'MC4CAQAwBQYDK2VwBCIEIJ1hsZ3v/VpguoRK9JLsLMREScVpezJpGXA7rAMcrn9g';
@@ -96,10 +97,14 @@ describe('Edge synchronization', () => {
 		expect(await runDurableObjectAlarm(stub())).toBe(false);
 	});
 
-	it('arms recovery before a failed D1 revision read', async () => {
+	it.each(['changes', 'full'])('arms %s recovery before a failed D1 revision read', async operation => {
 		await member();
 		await env.DB.exec('ALTER TABLE edge_changes RENAME TO unavailable_edge_changes');
-		await expect(edgeCall(configured, 'changes')).rejects.toThrow();
+		await expect(edgeCall(configured, operation)).rejects.toThrow();
+		await runInDurableObject(stub(), async (_instance, ctx) => {
+			expect(await ctx.storage.get('fullPending')).toBe(operation === 'full' ? true : undefined);
+			expect(await ctx.storage.getAlarm()).not.toBeNull();
+		});
 		await env.DB.exec('ALTER TABLE unavailable_edge_changes RENAME TO edge_changes');
 		expect(await runDurableObjectAlarm(stub())).toBe(true);
 		expect(goal.fobs).toEqual([7]);
@@ -116,7 +121,7 @@ describe('Edge synchronization', () => {
 		expect(await runDurableObjectAlarm(stub())).toBe(false);
 	});
 
-	it('retains a newer revision committed during successful delivery until it is synced', async () => {
+	it.each(['changes', 'full'])('retains a newer revision committed during successful %s delivery until it is synced', async operation => {
 		const m = await member();
 		const normal = fetchSpy.getMockImplementation();
 		fetchSpy.mockImplementation(async (url, init) => {
@@ -124,7 +129,7 @@ describe('Edge synchronization', () => {
 			if (init.method === 'PUT') await env.DB.prepare('UPDATE members SET fob_id = 8 WHERE member_id = ?').bind(m.member_id).run();
 			return response;
 		});
-		await edgeCall(configured, 'changes');
+		await edgeCall(configured, operation);
 		expect(goal.fobs).toEqual([7]);
 		fetchSpy.mockImplementation(normal);
 		expect(await runDurableObjectAlarm(stub())).toBe(true);
@@ -158,19 +163,95 @@ describe('Edge synchronization', () => {
 		expect(await runDurableObjectAlarm(stub())).toBe(false);
 	});
 
-	it('honors a pending full snapshot when an ordinary change arrives', async () => {
-		const m = await member();
+	it('honors pending forced work when an unchanged notification arrives', async () => {
+		await member();
 		await edgeCall(configured, 'changes');
 		const normal = fetchSpy.getMockImplementation();
 		fetchSpy.mockRejectedValue(new Error('Edge offline'));
-		await expect(edgeCall(configured, 'nightly', '2026-09-13')).rejects.toThrow();
-		await env.DB.prepare('UPDATE members SET fob_id = 8 WHERE member_id = ?').bind(m.member_id).run();
+		await expect(edgeCall(configured, 'full')).rejects.toThrow();
+		await expect(edgeCall(configured, 'changes')).rejects.toThrow();
+		await runInDurableObject(stub(), async (_instance, ctx) => {
+			expect(await ctx.storage.get('fullPending')).toBe(true);
+		});
 		fetchSpy.mockImplementation(normal);
 		await edgeCall(configured, 'changes');
-		expect(writes.at(-1)).toMatchObject({ method: 'PUT', fobs: [8] });
+		expect(writes).toHaveLength(2);
+		expect(writes.at(-1)).toMatchObject({ method: 'PUT', fobs: [7] });
 		await runInDurableObject(stub(), async (_instance, ctx) => {
-			expect(await ctx.storage.get('nightlyDone')).toBe('2026-09-13');
 			expect(await ctx.storage.get('fullPending')).toBeUndefined();
+		});
+		expect(await runDurableObjectAlarm(stub())).toBe(false);
+	});
+
+	it.each(['changes', 'full'])('serializes %s behind an ambiguous forced delivery without losing pending work', async operation => {
+		await member();
+		await edgeCall(configured, 'changes');
+		const normal = fetchSpy.getMockImplementation();
+		const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+		await runInDurableObject(stub(), async (instance, ctx) => {
+			let release, started, fail = true;
+			const blocked = new Promise(resolve => { release = resolve; });
+			const delivering = new Promise(resolve => { started = resolve; });
+			fetchSpy.mockImplementation(async (url, init) => {
+				const response = await normal(url, init);
+				if (init.method === 'PUT' && fail) {
+					fail = false;
+					started();
+					await blocked;
+					throw new Error('Connection lost after commit');
+				}
+				return response;
+			});
+			const first = instance.execute('full');
+			await delivering;
+			expect(await ctx.storage.get('fullPending')).toBe(true);
+			expect(await ctx.storage.getAlarm()).not.toBeNull();
+			expect(log).not.toHaveBeenCalled();
+			const second = instance.execute(operation);
+			release();
+			expect(await first).toMatchObject({ ok: false });
+			expect(await second).toEqual({ ok: true });
+			expect(await ctx.storage.get('fullPending')).toBeUndefined();
+		});
+		expect(writes.map(write => write.version)).toEqual([1, 2, 3]);
+		expect(log).toHaveBeenCalledExactlyOnceWith(JSON.stringify({ event: 'edge.full.completed' }));
+		expect(await runDurableObjectAlarm(stub())).toBe(false);
+	});
+
+	it.each([{ date: null }, { date: '2026-09-13' }, true])('recovers durable forced work %j after reconstruction and removes obsolete keys', async pending => {
+		await member();
+		await edgeCall(configured, 'changes');
+		await runInDurableObject(stub(), async (_instance, ctx) => {
+			await ctx.storage.put({ fullPending: pending, nightlyDone: '2026-09-13' });
+			await ctx.storage.setAlarm(Date.now() + 60000);
+		});
+		const normal = fetchSpy.getMockImplementation();
+		fetchSpy.mockRejectedValue(new Error('Edge offline'));
+		await runInDurableObject(stub(), async (instance, ctx) => {
+			await new EdgeSync(ctx, instance.env).alarm();
+			expect(await ctx.storage.get('fullPending')).toBe(true);
+			expect(await ctx.storage.get('nightlyDone')).toBe('2026-09-13');
+			expect(await ctx.storage.getAlarm()).not.toBeNull();
+		});
+		fetchSpy.mockImplementation(normal);
+		await runInDurableObject(stub(), async (instance, ctx) => {
+			await new EdgeSync(ctx, instance.env).alarm();
+			expect(await ctx.storage.get('fullPending')).toBeUndefined();
+			expect(await ctx.storage.get('nightlyDone')).toBeUndefined();
+		});
+		expect(writes.map(write => write.version)).toEqual([1, 2]);
+		expect(await runDurableObjectAlarm(stub())).toBe(false);
+	});
+
+	it('retires a legacy nightly completion key without forcing idle change notifications', async () => {
+		await member();
+		await edgeCall(configured, 'changes');
+		await runInDurableObject(stub(), async (_instance, ctx) => ctx.storage.put('nightlyDone', '2026-09-13'));
+		fetchSpy.mockClear();
+		await edgeCall(configured, 'changes');
+		expect(fetchSpy).not.toHaveBeenCalled();
+		await runInDurableObject(stub(), async (_instance, ctx) => {
+			expect(await ctx.storage.get('nightlyDone')).toBeUndefined();
 		});
 		expect(await runDurableObjectAlarm(stub())).toBe(false);
 	});
@@ -390,19 +471,17 @@ describe('Edge synchronization', () => {
 		await member();
 		const normal = fetchSpy.getMockImplementation();
 		fetchSpy.mockResolvedValue(new Response(text));
-		await expect(edgeCall(configured, 'nightly', '2026-09-13')).rejects.toMatchObject({ status: 503 });
+		await expect(edgeCall(configured, 'full')).rejects.toMatchObject({ status: 503 });
 		expect(writes).toEqual([]);
 		await runInDurableObject(stub(), async (_instance, ctx) => {
 			expect(await ctx.storage.get('syncedRevision')).toBeUndefined();
-			expect(await ctx.storage.get('nightlyDone')).toBeUndefined();
-			expect(await ctx.storage.get('fullPending')).toEqual({ date: '2026-09-13' });
+			expect(await ctx.storage.get('fullPending')).toBe(true);
 			expect(await ctx.storage.getAlarm()).not.toBeNull();
 		});
 		fetchSpy.mockImplementation(normal);
 		expect(await runDurableObjectAlarm(stub())).toBe(true);
 		expect(goal.fobs).toEqual([7]);
 		await runInDurableObject(stub(), async (_instance, ctx) => {
-			expect(await ctx.storage.get('nightlyDone')).toBe('2026-09-13');
 			expect(await ctx.storage.get('fullPending')).toBeUndefined();
 		});
 		expect(await runDurableObjectAlarm(stub())).toBe(false);
@@ -519,7 +598,7 @@ describe('Edge synchronization', () => {
 		expect(message.retry).not.toHaveBeenCalled();
 		expect(writes[1].version).toBeGreaterThan(writes[0].version);
 		expect(writes[1].event_signing_key).toBe(writes[0].event_signing_key);
-		expect(log).toHaveBeenCalledWith(JSON.stringify({ event: 'edge.full.completed', date: null }));
+		expect(log).toHaveBeenCalledWith(JSON.stringify({ event: 'edge.full.completed' }));
 	});
 
 	it('retries failed operator queue messages and acknowledges only successful delivery', async () => {
@@ -600,17 +679,31 @@ describe('Edge synchronization', () => {
 		expect((await env.DB.prepare('SELECT notes FROM members WHERE member_id = ?').bind(m.member_id).first()).notes).toBe('');
 	});
 
-	it('syncs goals nightly once per Central date, including the repeated fall-back hour', async () => {
-		expect(nightlyDate(Date.parse('2026-01-15T07:00:00Z'))).toBe('2026-01-15');
-		expect(nightlyDate(Date.parse('2026-07-15T06:00:00Z'))).toBe('2026-07-15');
-		expect(nightlyDate(Date.parse('2026-07-15T07:00:00Z'))).toBeNull();
-		for (const time of ['2026-11-01T06:00:00Z', '2026-11-01T07:00:00Z']) {
-			expect(nightlyDate(Date.parse(time))).toBe('2026-11-01');
-			await worker.scheduled({ scheduledTime: Date.parse(time) }, configured);
-		}
-		expect(writes).toHaveLength(1);
+	it.each(['2026-01-15', '2026-07-15', '2026-03-08', '2026-11-01'])('forces the nightly snapshot at 07:00 UTC on %s, including redelivery', async date => {
+		expect(JSON.parse(wranglerConfig).triggers.crons).toEqual(['0 7 * * *']);
+		await member();
+		await edgeCall(configured, 'changes');
+		const event = { scheduledTime: Date.parse(`${date}T07:00:00Z`), cron: '0 7 * * *' };
+		await worker.scheduled(event, configured);
+		await worker.scheduled(event, configured);
+		expect(writes.map(write => write.version)).toEqual([1, 2, 3]);
+		expect(goal.fobs).toEqual([7]);
 		expect(fetchSpy.mock.calls.filter(([url]) => String(url).endsWith('/api/swipes'))).toHaveLength(0);
 		expect(await runDurableObjectAlarm(stub())).toBe(false);
+	});
+
+	it.each(['enabled', 'disabled', 'offline'])('cleans expired fob claims on the daily schedule with edge %s', async state => {
+		for (const [id, expires] of [['expired', now() - 1], ['live', now() + 300]]) {
+			await env.DB.prepare('INSERT INTO fob_claims(id, fob_id, created, expires) VALUES (?, 7, ?, ?)')
+				.bind(id, now() - 100, expires).run();
+		}
+		if (state === 'offline') fetchSpy.mockRejectedValue(new Error('Edge offline'));
+		const work = worker.scheduled({ scheduledTime: Date.parse('2026-07-15T07:00:00Z') },
+			state === 'disabled' ? { ...configured, EDGE_URL: '' } : configured);
+		if (state === 'offline') await expect(work).rejects.toThrow();
+		else await work;
+		expect((await env.DB.prepare('SELECT id FROM fob_claims').all()).results).toEqual([{ id: 'live' }]);
+		if (state === 'disabled') expect(fetchSpy).not.toHaveBeenCalled();
 	});
 
 	it('retries partially imported batches without duplicating swipe history', async () => {
@@ -627,18 +720,20 @@ describe('Edge synchronization', () => {
 
 	it('keeps nightly goal work pending after failure and retries', async () => {
 		await member();
+		await edgeCall(configured, 'changes');
 		const normal = fetchSpy.getMockImplementation();
 		fetchSpy.mockImplementation(() => new Response(null, { status: 502 }));
-		await expect(edgeCall(configured, 'nightly', '2026-09-13')).rejects.toThrow();
-		expect(goal).toBeNull();
+		await expect(worker.scheduled({ scheduledTime: Date.parse('2026-07-15T07:00:00Z') }, configured)).rejects.toThrow();
+		expect(writes).toHaveLength(1);
+		expect(await runDurableObjectAlarm(stub())).toBe(true);
 		await runInDurableObject(stub(), async (_instance, ctx) => {
-			expect(await ctx.storage.get('nightlyDone')).toBeUndefined();
-			expect(await ctx.storage.get('fullPending')).toEqual({ date: '2026-09-13' });
+			expect(await ctx.storage.get('fullPending')).toBe(true);
+			expect(await ctx.storage.getAlarm()).not.toBeNull();
 		});
 		fetchSpy.mockImplementation(normal);
 		await runDurableObjectAlarm(stub());
+		expect(writes).toHaveLength(2);
 		await runInDurableObject(stub(), async (_instance, ctx) => {
-			expect(await ctx.storage.get('nightlyDone')).toBe('2026-09-13');
 			expect(await ctx.storage.get('fullPending')).toBeUndefined();
 		});
 		expect(await runDurableObjectAlarm(stub())).toBe(false);

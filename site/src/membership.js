@@ -472,8 +472,8 @@ export const swipeWebhook = (request, env) => stub(env).fetch(request);
 const swipePath = '/webhooks/edge/swipes';
 const encoder = new TextEncoder();
 const unhex = value => Uint8Array.from(value.match(/../g), byte => parseInt(byte, 16));
-export async function edgeCall(env, operation, input) {
-  const result = await stub(env).execute(operation, input);
+export async function edgeCall(env, operation) {
+  const result = await stub(env).execute(operation);
   if (!result.ok) throw new HttpError(503, result.error);
   return result.value;
 }
@@ -481,13 +481,6 @@ export async function kickEdge(env) {
   if (!edgeEnabled(env)) return;
   try { await edgeCall(env, 'changes'); }
   catch (error) { logError('edge.deferred', error, {}, env); }
-}
-
-export function nightlyDate(timestamp) {
-  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23',
-  }).formatToParts(new Date(timestamp)).map(p => [p.type, p.value]));
-  return parts.hour === '01' ? `${parts.year}-${parts.month}-${parts.day}` : null;
 }
 
 const validFob = n => Number.isInteger(n) && n > 0 && n <= 4294967295;
@@ -519,13 +512,12 @@ function goalValid(goal) {
 export class EdgeSync extends DurableObject {
   constructor(ctx, env) { super(ctx, env); this.tail = Promise.resolve(); this.swipeTail = Promise.resolve(); }
 
-  async execute(operation, input) {
+  async execute(operation) {
     const work = this.tail.then(async () => {
       try {
         if (!edgeEnabled(this.env)) throw new Error('Edge sync is not configured.');
-        if (!['changes', 'full', 'nightly'].includes(operation)) throw new Error('Unknown edge operation.');
-        if (operation === 'nightly' && await this.ctx.storage.get('nightlyDone') === input) return { ok: true };
-        await this.sync(operation, input);
+        if (!['changes', 'full'].includes(operation)) throw new Error('Unknown edge operation.');
+        await this.sync(operation);
         return { ok: true };
       } catch (error) {
         logError('edge.failed', error, { operation }, this.env);
@@ -554,24 +546,19 @@ export class EdgeSync extends DurableObject {
     return edgeRequest(this.env, path, method, body);
   }
 
-  async sync(operation, input) {
-    // The alarm is the durable pending marker. Full requests also retain their
-    // mode/date atomically, so an ordinary change cannot downgrade a full retry.
-    let pending = await this.ctx.storage.get('fullPending');
-    if (operation === 'full' || operation === 'nightly') {
-      pending = { date: operation === 'nightly' ? input : pending?.date || null };
-    }
+  async sync(operation) {
+    // Keep forced work durable until delivery succeeds, even on an unchanged
+    // revision. Legacy { date } markers are truthy and recover the same way.
+    const pending = operation === 'full' || Boolean(await this.ctx.storage.get('fullPending'));
     // Writes without an intervening await are committed atomically by storage.
     await Promise.all([
       this.ctx.storage.setAlarm(Date.now() + 60000),
       ...(pending ? [this.ctx.storage.put('fullPending', pending)] : []),
     ]);
-    await this.reconcile(Boolean(pending));
-    if (pending) {
-      if (pending.date) await this.ctx.storage.put('nightlyDone', pending.date);
-      await this.ctx.storage.delete('fullPending');
-      console.log(JSON.stringify({ event: 'edge.full.completed', date: pending.date }));
-    }
+    await this.reconcile(pending);
+    // Retire the old date-dedup key only after successful reconciliation.
+    await this.ctx.storage.delete(['fullPending', 'nightlyDone']);
+    if (pending) console.log(JSON.stringify({ event: 'edge.full.completed' }));
     // A change committed during delivery remains pending. Otherwise go idle;
     // subsequent writes notify us immediately, with nightly sync as a backstop.
     const { revision } = await this.env.DB.prepare('SELECT revision FROM edge_changes WHERE id = 1').first();

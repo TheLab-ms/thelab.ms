@@ -10,7 +10,7 @@ import {
 } from './services.js';
 import {
 	cleanupFobClaims, coordinated, createMember, edgeCall, edgeEnabled, fobClaim,
-	kickEdge, nightlyDate, registerMember, swipeWebhook,
+	kickEdge, registerMember, swipeWebhook,
 } from './membership.js';
 export { Membership, EdgeSync } from './membership.js';
 
@@ -701,8 +701,7 @@ const routes = new Map([
 export default {
 	async scheduled(event, env) {
 		await cleanupFobClaims(env);
-		const date = nightlyDate(event.scheduledTime);
-		if (date && edgeEnabled(env)) await edgeCall(env, 'nightly', date);
+		if (edgeEnabled(env)) await edgeCall(env, 'full');
 	},
 	async fetch(request, env) {
 		const url = new URL(request.url);

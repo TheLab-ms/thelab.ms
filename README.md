@@ -66,6 +66,17 @@ python3 -m unittest discover -s scripts -p 'test_*.py'
 Importer checks require Python linked to SQLite 3.42+. Worker tests include a
 populated pre-upgrade D1 database and partial-batch retry coverage.
 
+### Edge synchronization
+
+Membership changes notify EdgeSync immediately. A daily **07:00 UTC (1 AM CST /
+2 AM CDT)** schedule forces a complete goal snapshot and cleans expired fob
+claims. Scheduled and [operator full syncs](edgeproxy/README.md#operator-full-sync)
+share durable forced work, retained until delivery succeeds and retried by alarm
+after 60 seconds. Ordinary notifications cannot downgrade a pending forced sync.
+Completion logs `edge.full.completed` without a date; repeated requests safely
+send another snapshot. Legacy pending objects recover automatically, and successful
+reconciliation removes obsolete nightly-date state.
+
 ### Deployment
 
 Set the **Cloudflare Workers Builds root directory to `site`** if deployment is

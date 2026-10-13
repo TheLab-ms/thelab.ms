@@ -181,15 +181,25 @@ state again and sending a fresh higher-version snapshot; changes committed durin
 delivery remain pending.
 
 An alarm is armed when sync starts, before reading D1 or contacting edgeproxy.
-Failed work retries after 60 seconds. Operator/nightly requests retain their pending mode
-and nightly date across retries. Once delivery catches up with D1, the alarm is
+Failed work retries after 60 seconds. Operator and scheduled syncs use the same
+durable forced-sync operation: the pending flag survives failures and restarts
+until remote delivery succeeds, and ordinary notifications cannot downgrade it.
+Successful forced delivery logs `edge.full.completed` (without a date).
+Once delivery catches up with D1, the alarm is
 deleted: there is no periodic idle polling. An alarm from an older deployment
 reconciles once and then follows the same retry-or-idle behavior.
 
-This relies on post-commit notifications arriving. The existing nightly full
-reconciliation at 1 AM America/Chicago is the backstop for missed notifications
-and direct database edits. Swipe uploads run independently and do not arm sync
-alarms.
+This relies on post-commit notifications arriving. Daily full reconciliation at
+**07:00 UTC (1 AM CST / 2 AM CDT)** is the backstop for missed notifications and
+direct database edits. The same schedule cleans up expired fob claims, including
+when edge sync is disabled. There is no local-date deduplication; repeated scheduled
+invocations safely deliver another higher-version snapshot. Swipe uploads run
+independently and do not arm sync alarms.
+
+Existing `fullPending` objects (with a nightly date or `null`) recover as forced
+work, even when `nightlyDone` already records that date. They are normalized to a
+boolean before retrying. Successful reconciliation removes the pending marker
+and obsolete `nightlyDone` key; no storage reset or migration is required.
 
 For the snapshot-only protocol upgrade, roll out the Worker before edgeproxy:
 the existing edge accepts full PUTs. Edgeproxy removes the PATCH route and drops
