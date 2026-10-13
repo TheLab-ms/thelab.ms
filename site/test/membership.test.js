@@ -1,8 +1,8 @@
 import { env } from 'cloudflare:workers';
-import { SELF, applyD1Migrations, reset, runInDurableObject } from 'cloudflare:test';
+import { SELF, applyD1Migrations, reset, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import worker, { currentWaiver, processMessage } from '../src/index.js';
-import { coordinated, registerMember } from '../src/membership.js';
+import worker, { currentWaiver } from '../src/index.js';
+import { coordinated, Membership, registerMember, repairMemberships, scheduleCustomer } from '../src/membership.js';
 import { hash, issueToken, loginDestination, memberToken, now, provider, queryEvents, verifyToken } from '../src/services.js';
 
 describe('Membership', () => {
@@ -44,6 +44,25 @@ describe('Membership', () => {
   const api = (path, options, bindings = env) => worker.fetch(new Request(`${env.SITE_URL}${path}`, options), bindings);
   const readMember = () => env.DB.prepare('SELECT * FROM members WHERE discord_user_id = ?').bind(id).first();
   const memberStub = async () => env.MEMBERS.get(env.MEMBERS.idFromName((await readMember()).member_id));
+  async function deliver(stub) {
+    return runInDurableObject(stub, async (instance, state) => {
+      const pending = await state.storage.get('sync');
+      if (pending?.pending && !pending.paused) {
+        await state.storage.put('sync', { ...pending, next_attempt: Date.now() - 1 });
+        await instance.alarm();
+      }
+      return state.storage.get('sync');
+    });
+  }
+  async function reconcile({ member_id, customer_id }, bindings = env) {
+    if (!member_id) member_id = (await bindings.DB.prepare('SELECT member_id FROM members WHERE stripe_customer_id = ?').bind(customer_id).first())?.member_id;
+    if (!member_id) return;
+    await coordinated(bindings, member_id, 'scheduleSync');
+    return deliver(bindings.MEMBERS.get(bindings.MEMBERS.idFromName(member_id)));
+  }
+  const schedulerEnv = send => ({ ...env, MEMBERS: { idFromName: value => value, get: memberID => ({
+    execute: async request => { await send({ member_id: memberID, ...request }); return { ok: true }; },
+  }) } });
   const checkout = async (input = {}) => {
     const member = await registerMember(env, user);
     await seedWaiver(member);
@@ -467,7 +486,8 @@ describe('Membership', () => {
       expect(events.length).toBeGreaterThan(0);
       expect(events.every(event => event.member_id === null)).toBe(true);
       expect((await api('/payment/resume', { headers: { Cookie: memberCookie } })).headers.get('Location')).toContain('discord.com/oauth2/authorize');
-      await expect(coordinated(env, member.member_id, 'sync')).resolves.toBeUndefined();
+      await expect(coordinated(env, member.member_id, 'scheduleSync')).resolves.toBeUndefined();
+      expect(await deliver(env.MEMBERS.get(env.MEMBERS.idFromName(member.member_id)))).toMatchObject({ pending: false });
     });
 
     it('deletes an unlinked member without provider calls', async () => {
@@ -525,7 +545,7 @@ describe('Membership', () => {
       mockStripe('/checkout/sessions/cs_shared', { id: 'cs_shared', status: 'open', url });
       expect(await (await adminPost(`${path}/checkout`)).text()).toContain(url);
       mockBilling(); mockSubs([{ ...subscription(), metadata: { thelab_member_id: member.member_id } }]);
-      await processMessage({ customer_id: customer }, env);
+      await reconcile({ customer_id: customer }, env);
       expect(await env.DB.prepare('SELECT stripe_subscription_state, discord_user_id FROM members').first())
         .toEqual({ stripe_subscription_state: 'active', discord_user_id: null });
       expect((await env.DB.prepare('SELECT COUNT(*) AS count FROM waivers').first()).count).toBe(0);
@@ -977,7 +997,7 @@ describe('Membership', () => {
       mockSubs([{ ...subscription(), metadata: { thelab_member_id: before.member_id }, status: 'canceled' },
         { ...subscription('active', 'sub_new'), metadata: { thelab_member_id: before.member_id } }]);
       mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${replacement}/roles/${env.DISCORD_ROLE_ID}`, {}, 'PUT', 204);
-      await processMessage({ member_id: before.member_id }, env);
+      await reconcile({ member_id: before.member_id }, env);
       expect(await env.DB.prepare('SELECT stripe_subscription_id FROM members WHERE member_id = ?').bind(before.member_id).first())
         .toEqual({ stripe_subscription_id: 'sub_new' });
     });
@@ -999,7 +1019,7 @@ describe('Membership', () => {
       await runInDurableObject(stub, async (_instance, state) => { expect(await state.storage.get('customer')).toBeUndefined(); });
     });
 
-    it.each(['customer write', 'role removal', 'queue send', 'D1 commit'])('recovers an identity transfer after failure at %s', async stage => {
+    it.each(['customer write', 'role removal', 'D1 commit'])('recovers an identity transfer after failure at %s', async stage => {
       await seed({ stripe_subscription_id: 'sub_member', stripe_subscription_state: 'active' });
       const before = await readMember(), replacement = '555555555555555555';
       const oldToken = await memberToken(env, before);
@@ -1034,17 +1054,17 @@ describe('Membership', () => {
         }
         throw new Error(`Unexpected provider request: ${method} ${url}`);
       });
-      const queued = [], send = vi.fn(async body => { failOnce('queue send'); queued.push(body); });
       const stub = await memberStub();
       await runInDurableObject(stub, async (instance, ctx) => {
         const original = instance.env;
-        instance.env = { ...original, MEMBERSHIP_QUEUE: { send } };
         try {
           await ctx.storage.put('customer', { result: { id: customer } });
           if (stage === 'D1 commit') await env.DB.exec("CREATE TRIGGER fail_transfer BEFORE UPDATE ON members WHEN NEW.discord_user_id != OLD.discord_user_id BEGIN SELECT RAISE(ABORT, 'injected commit failure'); END");
           const input = { fields: fields({ discord_user_id: replacement, stripe_subscription_id: 'sub_member' }) };
           const first = await instance.execute({ member_id: before.member_id, operation: 'updateMetadata', input });
           expect(first.ok).toBe(false);
+          expect(await ctx.storage.get('sync')).toMatchObject({ pending: true, member_id: before.member_id });
+          expect(await ctx.storage.getAlarm()).toBeTypeOf('number');
           expect(await readMember()).toMatchObject({ member_id: before.member_id, auth_version: before.auth_version, metadata_version: before.metadata_version });
           expect((await queryEvents(env)).events.some(event => event.event_type === 'DiscordAccountChanged')).toBe(false);
           if (stage === 'D1 commit') await env.DB.exec('DROP TRIGGER fail_transfer');
@@ -1056,8 +1076,7 @@ describe('Membership', () => {
       const updated = await env.DB.prepare('SELECT * FROM members WHERE member_id = ?').bind(before.member_id).first();
       expect(updated).toMatchObject({ discord_user_id: replacement, auth_version: before.auth_version + 1, metadata_version: before.metadata_version + 1 });
       expect((await api('/payment/resume', { headers: { Cookie: `thelab_member=${oldToken}` } })).headers.get('Location')).toContain('discord.com/oauth2/authorize');
-      expect(queued.length).toBeGreaterThan(0);
-      for (const message of queued) await processMessage(message, env);
+      await deliver(stub);
       expect([...roles]).toEqual([replacement]);
       expect((await env.DB.prepare('SELECT * FROM members WHERE member_id = ?').bind(before.member_id).first()))
         .toMatchObject({ stripe_subscription_state: 'active', stripe_subscription_id: 'sub_member', discord_last_synced: expect.any(Number) });
@@ -1109,7 +1128,7 @@ describe('Membership', () => {
       const member = await readMember();
       mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, {}, 'DELETE', 204).times(2);
       expect((await save(fields({ stripe_customer_id: '' }))).status).toBe(303);
-      await processMessage({ member_id: member.member_id }, env);
+      await reconcile({ member_id: member.member_id }, env);
       expect(await readMember()).toMatchObject({ stripe_customer_id: null, stripe_subscription_id: null, billing_name: '', billing_email: '' });
     });
 
@@ -1241,17 +1260,17 @@ describe('Membership', () => {
       const member = await readMember();
       mockBilling().times(2); mockSubs([subscription()]).times(2);
       mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, {}, 'PUT', 204).times(2);
-      await processMessage({ customer_id: customer }, env);
+      await reconcile({ customer_id: customer }, env);
       const first = await historyFor(member);
       expect(first.events.map(event => event.event_type).sort()).toEqual([
         'BillingEmailChanged', 'BillingNameChanged', 'MemberRegistered', 'StripeSubscriptionChanged', 'SubscriptionStatusChanged',
       ]);
       expect(JSON.parse(first.events.find(event => event.event_type === 'SubscriptionStatusChanged').details)).toEqual({ from: null, to: 'active' });
-      await processMessage({ customer_id: customer }, env);
+      await reconcile({ customer_id: customer }, env);
       expect((await historyFor(member)).events).toEqual(first.events);
       mockBilling(); mockSubs();
       mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, {}, 'DELETE', 204);
-      await processMessage({ customer_id: customer }, env);
+      await reconcile({ customer_id: customer }, env);
       const last = await historyFor(member);
       expect(last.total).toBe(first.total + 2);
       expect(JSON.parse(last.events.find(event => event.event_type === 'SubscriptionStatusChanged').details)).toEqual({ from: 'active', to: null });
@@ -1395,7 +1414,7 @@ describe('Membership', () => {
       mockBilling();
       mockStripe(`/subscriptions?customer=${customer}&status=all&limit=100`, { data: [subscription('canceled')], has_more: true });
       mockStripe(`/subscriptions?customer=${customer}&status=all&limit=100&starting_after=sub_member`, page);
-      await expect(processMessage({ customer_id: customer }, env)).rejects.toMatchObject({ status: 502 });
+      expect(await reconcile({ customer_id: customer }, env)).toMatchObject({ pending: true, error: { status: 502 } });
       expect(await readMember()).toMatchObject({ stripe_subscription_state: 'active', stripe_subscription_id: 'sub_member', stripe_synced_at: null });
     });
 
@@ -1413,7 +1432,7 @@ describe('Membership', () => {
       mockBilling('Billing Maker', 'preferred@example.com');
       mockSubs([subscription()]);
       mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, {}, 'PUT', 204);
-      await processMessage({ customer_id: customer }, env);
+      await reconcile({ customer_id: customer }, env);
       expect(await readMember()).toMatchObject({ discord_email: user.email, billing_email: 'preferred@example.com' });
     });
 
@@ -1576,7 +1595,7 @@ describe('Membership', () => {
       mockStripe('/checkout/sessions/cs_member', { ...completedSession(), ...extra });
       const send = vi.fn();
       const response = await api('/payment/success?session_id=cs_member', { headers: { Cookie: await loginCookie() } },
-        { ...env, MEMBERSHIP_QUEUE: { send } });
+        schedulerEnv(send));
       expect(response.status).toBe(403);
       expect(response.headers.get('Location')).toBeNull();
       expect(send).not.toHaveBeenCalled();
@@ -1590,7 +1609,7 @@ describe('Membership', () => {
       mockStripe('/subscriptions/sub_member', { ...subscription(), ...extra });
       const send = vi.fn();
       expect((await api('/payment/success?session_id=cs_member', { headers: { Cookie: await loginCookie() } },
-        { ...env, MEMBERSHIP_QUEUE: { send } })).status).toBe(403);
+        schedulerEnv(send))).status).toBe(403);
       expect(send).not.toHaveBeenCalled();
     });
 
@@ -1601,7 +1620,7 @@ describe('Membership', () => {
       mockStripe('/checkout/sessions/cs_member', { ...completedSession(), ...extra });
       const send = vi.fn();
       const response = await api('/payment/success?session_id=cs_member', { headers: { Cookie: await loginCookie() } },
-        { ...env, MEMBERSHIP_QUEUE: { send } });
+        schedulerEnv(send));
       expect(response.status).toBe(409);
       expect(response.headers.get('Location')).toBeNull();
       expect(send).not.toHaveBeenCalled();
@@ -1613,7 +1632,7 @@ describe('Membership', () => {
       mockStripe('/subscriptions/sub_member', subscription(status));
       const send = vi.fn();
       expect((await api('/payment/success?session_id=cs_member', { headers: { Cookie: await loginCookie() } },
-        { ...env, MEMBERSHIP_QUEUE: { send } })).status).toBe(409);
+        schedulerEnv(send))).status).toBe(409);
       expect(send).not.toHaveBeenCalled();
     });
 
@@ -1623,17 +1642,17 @@ describe('Membership', () => {
       mockStripe('/subscriptions/sub_member', subscription('trialing'));
       const send = vi.fn().mockResolvedValue(undefined);
       const response = await api('/payment/success?session_id=cs_member', { headers: { Cookie: await loginCookie() } },
-        { ...env, MEMBERSHIP_QUEUE: { send } });
+        schedulerEnv(send));
       expect(response.headers.get('Location')).toBe(`${env.SITE_URL}/welcome`);
-      expect(send).toHaveBeenCalledExactlyOnceWith({ customer_id: customer });
+      expect(send).toHaveBeenCalledExactlyOnceWith({ member_id: (await readMember()).member_id, operation: 'scheduleSync', input: {} });
     });
 
-    it('allows confirmation to retry after queue publication fails', async () => {
+    it('allows confirmation to retry after durable scheduling fails', async () => {
       await seed();
       mockStripe('/checkout/sessions/cs_member', completedSession()).times(2);
       mockStripe('/subscriptions/sub_member', subscription()).times(2);
-      const send = vi.fn().mockRejectedValueOnce(new Error('Queue unavailable')).mockResolvedValue(undefined);
-      const bindings = { ...env, MEMBERSHIP_QUEUE: { send } }, headers = { Cookie: await loginCookie() };
+      const send = vi.fn().mockRejectedValueOnce(new Error('DO unavailable')).mockResolvedValue(undefined);
+      const bindings = schedulerEnv(send), headers = { Cookie: await loginCookie() };
       const failed = await api('/payment/success?session_id=cs_member', { headers }, bindings);
       expect(failed.status).toBe(500);
       expect(failed.headers.get('Location')).toBeNull();
@@ -1647,7 +1666,7 @@ describe('Membership', () => {
       mockStripe('/checkout/sessions/cs_member', { mode: 'subscription', customer, client_reference_id: id, metadata: { thelab_discord_id: id }, status: 'complete', payment_status: paymentStatus, subscription: 'sub_member' });
       const send = vi.fn().mockResolvedValue(undefined);
       if (paymentStatus === 'paid') mockStripe('/subscriptions/sub_member', subscription());
-      const response = await api('/payment/success?session_id=cs_member', { headers: { Cookie: cookie } }, { ...env, MEMBERSHIP_QUEUE: { send } });
+      const response = await api('/payment/success?session_id=cs_member', { headers: { Cookie: cookie } }, schedulerEnv(send));
       expect(response.status).toBe(paymentStatus === 'paid' ? 303 : 409);
       if (paymentStatus === 'paid') expect(response.headers.get('Location')).toBe(`${env.SITE_URL}/welcome`);
       expect(send).toHaveBeenCalledTimes(paymentStatus === 'paid' ? 1 : 0);
@@ -1660,21 +1679,18 @@ describe('Membership', () => {
     });
   });
 
-  describe('webhooks and queued Discord reconciliation', () => {
+  describe('webhooks and durable Discord reconciliation', () => {
     it.each([id, null])('preserves a linked legacy subscription on renewal with Discord identity %s', async discordID => {
       await seed({ stripe_subscription_id: 'sub_legacy', stripe_subscription_state: 'active', discord_user_id: discordID });
       const member = await env.DB.prepare('SELECT * FROM members WHERE stripe_customer_id = ?').bind(customer).first();
       const before = await queryEvents(env, { memberID: member.member_id });
       const legacy = { ...subscription('active', 'sub_legacy'), metadata: { etag: 'legacy-etag' },
         items: { data: [{ price: { active: false, unit_amount: 4000 } }] } };
-      const send = vi.fn().mockResolvedValue(undefined);
-      expect((await api('/webhooks/stripe', await signedEvent('customer.subscription.updated', 'evt_renewal', legacy),
-        { ...env, MEMBERSHIP_QUEUE: { send } })).status).toBe(204);
-      expect(send).toHaveBeenCalledWith({ customer_id: customer });
+      expect((await api('/webhooks/stripe', await signedEvent('customer.subscription.updated', 'evt_renewal', legacy))).status).toBe(204);
       mockBilling('', 'billing@example.com').times(2);
       mockSubs([legacy]).times(2);
       if (discordID) mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${discordID}/roles/${env.DISCORD_ROLE_ID}`, {}, 'PUT', 204).times(2);
-      for (let delivery = 0; delivery < 2; delivery++) await processMessage(send.mock.calls[0][0], env);
+      for (let delivery = 0; delivery < 2; delivery++) await reconcile({ customer_id: customer });
       expect(await env.DB.prepare('SELECT * FROM members WHERE member_id = ?').bind(member.member_id).first())
         .toMatchObject({ stripe_subscription_id: 'sub_legacy', stripe_subscription_state: 'active', billing_email: 'billing@example.com' });
       const after = await queryEvents(env, { memberID: member.member_id });
@@ -1687,7 +1703,7 @@ describe('Membership', () => {
       mockBilling();
       mockSubs([{ ...subscription(status, 'sub_legacy'), metadata: {} }]);
       mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, {}, 'DELETE', 204);
-      await processMessage({ customer_id: customer }, env);
+      await reconcile({ customer_id: customer }, env);
       expect(await readMember()).toMatchObject({ stripe_subscription_id: 'sub_legacy', stripe_subscription_state: status });
     });
 
@@ -1699,7 +1715,7 @@ describe('Membership', () => {
       mockBilling();
       mockSubs([{ ...subscription('active', 'sub_legacy'), metadata }]);
       mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, {}, 'DELETE', 204);
-      await processMessage({ customer_id: customer }, env);
+      await reconcile({ customer_id: customer }, env);
       expect(await readMember()).toMatchObject({ stripe_subscription_id: null, stripe_subscription_state: null });
     });
 
@@ -1711,12 +1727,16 @@ describe('Membership', () => {
       expect(response.headers.get('Location')).toBe('https://billing.stripe.com/p/session/legacy');
     });
 
-    it('rejects a customer mapping changed after queue routing', async () => {
+    it('reconciles the current customer after a transfer between routing and delivery', async () => {
       await seed();
       const member = await readMember();
+      await scheduleCustomer(env, customer);
       await env.DB.prepare('UPDATE members SET stripe_customer_id = ? WHERE member_id = ?').bind('cus_replacement', member.member_id).run();
-      await expect(coordinated(env, member.member_id, 'sync', { customer_id: customer })).rejects.toMatchObject({ status: 409 });
-      expect(globalThis.fetch).not.toHaveBeenCalled();
+      mockStripe('/customers/cus_replacement', { id: 'cus_replacement' });
+      mockSubs([]);
+      mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, {}, 'DELETE', 204);
+      expect(await deliver(await memberStub())).toMatchObject({ pending: false });
+      expect(await readMember()).toMatchObject({ stripe_customer_id: 'cus_replacement' });
     });
 
     it.each([
@@ -1728,65 +1748,65 @@ describe('Membership', () => {
       mockBilling();
       mockSubs(statuses.map((status, index) => ({ ...subscription(status, `sub_${index}`), created: 1000 + index })));
       mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, {}, method, 204);
-      await processMessage({ customer_id: customer }, env);
+      await reconcile({ customer_id: customer }, env);
       expect(await readMember()).toMatchObject({ stripe_subscription_state: expected, stripe_subscription_id: `sub_${statuses.indexOf(expected)}` });
     });
 
-    it('queues customer updates using the Customer ID', async () => {
+    it('resolves customer updates to durable member work before acknowledging', async () => {
+      await seed();
       const send = vi.fn().mockResolvedValue(undefined);
       const response = await api('/webhooks/stripe', await signedEvent('customer.updated', 'evt_customer', { id: customer, name: 'Billing Name' }),
-        { ...env, MEMBERSHIP_QUEUE: { send } });
+        schedulerEnv(send));
       expect(response.status).toBe(204);
-      expect(send).toHaveBeenCalledWith({ customer_id: customer });
+      expect(send).toHaveBeenCalledWith({ member_id: (await readMember()).member_id, operation: 'scheduleSync', input: {} });
     });
 
     it('rejects a tampered signed event and ignores valid unrelated event types', async () => {
       const send = vi.fn();
-      const bindings = { ...env, MEMBERSHIP_QUEUE: { send } };
+      const bindings = schedulerEnv(send);
       const signed = await signedEvent();
       signed.body = signed.body.replace('cus_member', 'cus_attacker');
       expect((await api('/webhooks/stripe', signed, bindings)).status).toBe(400);
       expect((await api('/webhooks/stripe', await signedEvent('payment_intent.succeeded'), bindings)).status).toBe(204);
       expect(send).not.toHaveBeenCalled();
     });
-    it('rejects unsigned and stale webhooks without queueing', async () => {
+    it('rejects unsigned and stale webhooks without scheduling', async () => {
       const send = vi.fn();
-      const bindings = { ...env, MEMBERSHIP_QUEUE: { send } };
+      const bindings = schedulerEnv(send);
       expect((await api('/webhooks/stripe', { method: 'POST', body: '{}' }, bindings)).status).toBe(400);
       expect((await api('/webhooks/stripe', { method: 'POST', body: '{}', headers: { 'Stripe-Signature': 't=1,v1=' + '0'.repeat(64) } }, bindings)).status).toBe(400);
       expect(send).not.toHaveBeenCalled();
     });
 
-    it('acknowledges Stripe only after a successful queue send, including redelivery', async () => {
+    it('acknowledges Stripe only after durable scheduling, including redelivery', async () => {
+      await seed();
       const log = vi.spyOn(console, 'error').mockImplementation(() => {});
-      const send = vi.fn().mockRejectedValueOnce(new Error('queue unavailable')).mockResolvedValue(undefined);
-      const bindings = { ...env, MEMBERSHIP_QUEUE: { send } };
+      const send = vi.fn().mockRejectedValueOnce(new Error('DO unavailable')).mockResolvedValue(undefined);
+      const bindings = schedulerEnv(send);
       expect((await api('/webhooks/stripe', await signedEvent(), bindings)).status).toBe(500);
       expect(JSON.parse(log.mock.calls[0][0])).toMatchObject({ event: 'request.failed', path: '/webhooks/stripe',
-        error: { message: 'queue unavailable' } });
+        error: { message: 'DO unavailable' } });
       expect((await api('/webhooks/stripe', await signedEvent(), bindings)).status).toBe(204);
       expect(send).toHaveBeenCalledTimes(2);
-      expect(send).toHaveBeenLastCalledWith({ customer_id: customer });
+      expect(send).toHaveBeenLastCalledWith({ member_id: (await readMember()).member_id, operation: 'scheduleSync', input: {} });
     });
 
     it('reconciles current state for delayed cancellation events and duplicate deliveries', async () => {
       await seed();
-      const send = vi.fn().mockResolvedValue(undefined);
-      const response = await api('/webhooks/stripe', await signedEvent('customer.subscription.deleted', 'evt_oldCancellation', subscription('canceled', 'sub_old')),
-        { ...env, MEMBERSHIP_QUEUE: { send } });
+      const response = await api('/webhooks/stripe', await signedEvent('customer.subscription.deleted', 'evt_oldCancellation', subscription('canceled', 'sub_old')));
       expect(response.status).toBe(204);
-      const message = send.mock.calls[0][0];
+      const message = { customer_id: customer };
       mockBilling().times(2);
       mockSubs([subscription('active', 'sub_replacement'), subscription('canceled', 'sub_old')]).times(2);
       mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, {}, 'PUT', 204).times(2);
-      await processMessage(message, env);
+      await reconcile(message, env);
       expect(await readMember()).toMatchObject({ stripe_subscription_id: 'sub_replacement', stripe_subscription_state: 'active' });
-      await processMessage(message, env);
+      await reconcile(message, env);
       expect(await readMember()).toMatchObject({ stripe_subscription_id: 'sub_replacement', stripe_subscription_state: 'active' });
       mockBilling('Updated billing name', 'updated@example.com');
       mockSubs([subscription('canceled', 'sub_replacement')]);
       mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, {}, 'DELETE', 204);
-      await processMessage(message, env);
+      await reconcile(message, env);
       expect(await readMember()).toMatchObject({ stripe_subscription_state: 'canceled', billing_name: 'Updated billing name', billing_email: 'updated@example.com' });
     });
 
@@ -1795,80 +1815,346 @@ describe('Membership', () => {
       mockBilling().times(2);
       mockSubs([{ ...subscription(), cancel_at_period_end: true }]);
       mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, {}, 'PUT', 204);
-      await processMessage({ customer_id: customer }, env);
+      await reconcile({ customer_id: customer }, env);
       mockSubs([subscription('past_due')]);
       mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, {}, 'DELETE', 204);
-      await processMessage({ customer_id: customer }, env);
+      await reconcile({ customer_id: customer }, env);
     });
 
-    it('syncs each customer once per batch without swallowing invalid operator messages', async () => {
-      await seed();
-      await env.DB.prepare('INSERT INTO members (stripe_customer_id) VALUES (?)').bind('cus_other').run();
-      const messages = [
-        { customer_id: customer }, { customer_id: 'cus_other' },
-        { customer_id: customer, type: 'invalid' }, { customer_id: customer }, { customer_id: 'cus_other' },
-      ].map((body, i) => ({ id: `message-${i}`, body, attempts: 1, ack: vi.fn(), retry: vi.fn() }));
-      mockBilling();
-      mockSubs([subscription()]);
-      mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, () => {
-        expect(messages[0].ack).not.toHaveBeenCalled();
-        expect(messages[3].ack).not.toHaveBeenCalled();
-        return {};
-      }, 'PUT', 204);
-      mockStripe('/customers/cus_other', { id: 'cus_other', name: 'Other Member' });
-      mockSubs([]);
-      await worker.queue({ messages }, env);
-      for (const message of messages.filter(message => message.body.type === undefined)) {
-        expect(message.ack).toHaveBeenCalledOnce();
-        expect(message.retry).not.toHaveBeenCalled();
-      }
-      expect(messages[2].ack).not.toHaveBeenCalled();
-      expect(messages[2].retry).toHaveBeenCalledWith({ delaySeconds: 30 });
-      expect(globalThis.fetch).toHaveBeenCalledTimes(5);
-      expect(await readMember()).toMatchObject({ stripe_subscription_state: 'active', discord_last_synced: expect.any(Number) });
-      expect(await env.DB.prepare('SELECT billing_name FROM members WHERE stripe_customer_id = ?').bind('cus_other').first())
-        .toEqual({ billing_name: 'Other Member' });
-    });
-
-    it('retries every grouped message on Discord rate limits even when Stripe state is saved', async () => {
+    it('coalesces duplicate notifications and retries partial Discord rate limits after Stripe is saved', async () => {
       const log = vi.spyOn(console, 'error').mockImplementation(() => {});
       await seed();
       mockBilling().times(2);
       mockSubs([subscription()]);
       mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, { retry_after: 120 }, 'PUT', 429);
-      const message = { id: 'queue-message', body: { customer_id: customer }, attempts: 1, ack: vi.fn(), retry: vi.fn() };
-      const duplicate = { ...message, id: 'duplicate-message', attempts: 4, ack: vi.fn(), retry: vi.fn() };
-      const unrelated = { ...message, id: 'unrelated-message', body: { customer_id: 'cus_unrelated' }, ack: vi.fn(), retry: vi.fn() };
-      await worker.queue({ messages: [message, unrelated, duplicate] }, env);
-      expect(message.ack).not.toHaveBeenCalled();
-      expect(message.retry).toHaveBeenCalledWith({ delaySeconds: 120 });
-      expect(duplicate.ack).not.toHaveBeenCalled();
-      expect(duplicate.retry).toHaveBeenCalledWith({ delaySeconds: 240 });
-      expect(unrelated.ack).toHaveBeenCalledOnce();
-      expect(unrelated.retry).not.toHaveBeenCalled();
+      await Promise.all([scheduleCustomer(env, customer), scheduleCustomer(env, customer)]);
+      const stub = await memberStub(), start = Date.now();
+      const failed = await deliver(stub);
+      expect(failed).toMatchObject({ pending: true, attempts: 1, generation: 2, error: { status: 429 } });
+      expect(failed.next_attempt).toBeGreaterThanOrEqual(start + 120000);
+      await scheduleCustomer(env, customer);
+      expect(await coordinated(env, (await readMember()).member_id, 'syncStatus')).toMatchObject({ next_attempt: failed.next_attempt, attempts: 1 });
       expect(globalThis.fetch).toHaveBeenCalledTimes(3);
       const entries = log.mock.calls.map(([entry]) => JSON.parse(entry));
       const providerError = entries.find(entry => entry.event === 'provider.failed');
       expect(providerError).toMatchObject({ service: 'Discord', failure: 'http', provider_status: 429, retry_after: 120 });
-      expect(entries.find(entry => entry.event === 'queue.failed')).toMatchObject({ message_id: 'queue-message',
-        attempt: 1, retry_delay_seconds: 120, error_id: providerError.error_id });
+      expect(entries.find(entry => entry.event === 'membership.sync_failed')).toMatchObject({
+        attempt: 1, error_id: providerError.error_id });
       expect(await readMember()).toMatchObject({ stripe_subscription_state: 'active', stripe_synced_at: expect.any(Number), discord_last_synced: null });
       mockSubs([subscription()]);
       mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, {}, 'PUT', 204);
-      await worker.queue({ messages: [{ ...message, attempts: 2 }, { ...duplicate, attempts: 5 }] }, env);
-      expect(message.ack).toHaveBeenCalledOnce();
-      expect(duplicate.ack).toHaveBeenCalledOnce();
+      expect(await deliver(stub)).toMatchObject({ pending: false, error: null });
       expect(await readMember()).toMatchObject({ stripe_subscription_state: 'active', discord_last_synced: expect.any(Number) });
     });
 
     it('ignores unrelated customers and unrelated subscriptions on a mapped customer', async () => {
-      await processMessage({ customer_id: 'cus_unrelated' }, env);
+      await scheduleCustomer(env, 'cus_unrelated');
       await seed();
       mockBilling();
       mockSubs([{ ...subscription(), metadata: {} }]);
       mockDiscord(`/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`, {}, 'DELETE', 204);
-      await processMessage({ customer_id: customer }, env);
+      await reconcile({ customer_id: customer }, env);
       expect(await readMember()).toMatchObject({ stripe_subscription_state: null });
+    });
+  });
+
+  describe('durable sync recovery and operator controls', () => {
+    const rolePath = `/guilds/${env.DISCORD_GUILD_ID}/members/${id}/roles/${env.DISCORD_ROLE_ID}`;
+    async function adminPost(path, { token, csrf, origin = env.SITE_URL } = {}) {
+      token ??= await issueToken(env, id, 'admin');
+      csrf ??= await hash(`admin-csrf:${token}`);
+      return api(path, { method: 'POST', headers: { Cookie: `thelab_admin=${token}`, Origin: origin,
+        'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ csrf }) });
+    }
+
+    it('atomically rejects webhook acknowledgement when arming its alarm fails', async () => {
+      await seed();
+      const stub = await memberStub();
+      await runInDurableObject(stub, async (_instance, state) => {
+        const original = state.storage.transaction.bind(state.storage);
+        const transaction = vi.spyOn(state.storage, 'transaction').mockImplementation(callback => original(async tx => {
+          const setAlarm = vi.spyOn(tx, 'setAlarm').mockRejectedValueOnce(new Error('alarm storage unavailable'));
+          try { return await callback(tx); } finally { setAlarm.mockRestore(); }
+        }));
+        try {
+          expect((await api('/webhooks/stripe', await signedEvent())).status).toBe(500);
+          expect(await state.storage.get('sync')).toBeUndefined();
+          expect(await state.storage.getAlarm()).toBeNull();
+        } finally { transaction.mockRestore(); }
+      });
+      for (let i = 0; i < 3; i++) expect((await api('/webhooks/stripe', await signedEvent())).status).toBe(204);
+      await runInDurableObject(stub, async (instance, state) => {
+        expect(await state.storage.get('sync')).toMatchObject({ pending: true, generation: 3 });
+        expect(await state.storage.getAlarm()).toBeTypeOf('number');
+        const saved = await state.storage.get('sync');
+        await state.storage.put('sync', { ...saved, next_attempt: Date.now() - 1 });
+        mockBilling(); mockSubs([subscription()]); mockDiscord(rolePath, {}, 'PUT', 204);
+        // Fresh JS instance, same persisted storage: no in-memory work required.
+        await new Membership(state, instance.env).alarm();
+        expect(await state.storage.get('sync')).toMatchObject({ pending: false, generation: 3 });
+        expect(await state.storage.getAlarm()).toBeNull();
+      });
+      expect(globalThis.fetch).toHaveBeenCalledTimes(3);
+    });
+
+    it('executes through the runtime alarm entrypoint and clears its durable wakeup on completion', async () => {
+      await seed();
+      expect((await api('/webhooks/stripe', await signedEvent())).status).toBe(204);
+      const stub = await memberStub();
+      const state = await coordinated(env, (await readMember()).member_id, 'syncStatus');
+      mockBilling(); mockSubs([subscription()]); mockDiscord(rolePath, {}, 'PUT', 204);
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(state.next_attempt + 1);
+      try { expect(await runDurableObjectAlarm(stub)).toBe(true); }
+      finally { clock.mockRestore(); }
+      expect(await coordinated(env, (await readMember()).member_id, 'syncStatus')).toMatchObject({ pending: false });
+      expect(await runDurableObjectAlarm(stub)).toBe(false);
+    });
+
+    it('retains a watchdog if persisting an alarm failure itself fails, and resumes after restart', async () => {
+      await seed(); await scheduleCustomer(env, customer);
+      await runInDurableObject(await memberStub(), async (instance, state) => {
+        const saved = await state.storage.get('sync');
+        await state.storage.put('sync', { ...saved, next_attempt: Date.now() - 1 });
+        const sync = vi.spyOn(instance, 'sync').mockRejectedValueOnce(new Error('process interrupted'));
+        const original = state.storage.transaction.bind(state.storage);
+        let calls = 0;
+        const transaction = vi.spyOn(state.storage, 'transaction').mockImplementation(callback => {
+          if (++calls === 2) throw new Error('failure state unavailable');
+          return original(callback);
+        });
+        try { await expect(instance.alarm()).rejects.toThrow('failure state unavailable'); }
+        finally { sync.mockRestore(); transaction.mockRestore(); }
+        const pending = await state.storage.get('sync');
+        expect(pending).toMatchObject({ pending: true, attempts: 1 });
+        expect(await state.storage.getAlarm()).toBe(pending.next_attempt);
+        await state.storage.put('sync', { ...pending, next_attempt: Date.now() - 1 });
+        mockBilling(); mockSubs([subscription()]); mockDiscord(rolePath, {}, 'PUT', 204);
+        await new Membership(state, instance.env).alarm();
+        expect(await state.storage.get('sync')).toMatchObject({ pending: false });
+      });
+    });
+
+    it('serializes notifications and a second alarm arriving during network awaits without losing a generation', async () => {
+      await seed(); await scheduleCustomer(env, customer);
+      const member = await readMember();
+      await runInDurableObject(await memberStub(), async (instance, state) => {
+        const saved = await state.storage.get('sync');
+        await state.storage.put('sync', { ...saved, next_attempt: Date.now() - 1 });
+        let release, started;
+        const waiting = new Promise(resolve => { started = resolve; });
+        const network = new Promise(resolve => { release = resolve; });
+        mockStripe(`/customers/${customer}`, async () => { started(); await network; return { id: customer }; });
+        mockSubs([subscription()]); mockDiscord(rolePath, {}, 'PUT', 204);
+        const first = instance.alarm();
+        await waiting;
+        let acknowledged = false;
+        const notify = instance.execute({ member_id: member.member_id, operation: 'scheduleSync' }).then(result => { acknowledged = true; return result; });
+        const overlappingAlarm = instance.alarm();
+        await Promise.resolve();
+        expect(acknowledged).toBe(false);
+        expect(await state.storage.get('sync')).toMatchObject({ pending: true, generation: 1 });
+        release();
+        await Promise.all([first, notify, overlappingAlarm]);
+        expect(await state.storage.get('sync')).toMatchObject({ pending: true, generation: 2 });
+        expect(await state.storage.getAlarm()).toBeTypeOf('number');
+      });
+      mockBilling(); mockSubs([subscription('canceled')]); mockDiscord(rolePath, {}, 'DELETE', 204);
+      expect(await deliver(await memberStub())).toMatchObject({ pending: false, generation: 2 });
+      expect(await readMember()).toMatchObject({ stripe_subscription_state: 'canceled' });
+    });
+
+    it('repeats idempotent Discord writes after a lost successful response', async () => {
+      await seed(); await scheduleCustomer(env, customer);
+      mockBilling().times(2); mockSubs([subscription()]).times(2);
+      let role = false;
+      mockDiscord(rolePath, () => { role = true; throw new Error('response lost after role PUT'); }, 'PUT', 204);
+      const stub = await memberStub();
+      expect(await deliver(stub)).toMatchObject({ pending: true, attempts: 1 });
+      expect(role).toBe(true);
+      expect(await readMember()).toMatchObject({ stripe_subscription_state: 'active', discord_last_synced: null });
+      mockDiscord(rolePath, () => { expect(role).toBe(true); return {}; }, 'PUT', 204);
+      expect(await deliver(stub)).toMatchObject({ pending: false });
+      expect(await readMember()).toMatchObject({ discord_last_synced: expect.any(Number) });
+    });
+
+    it('recovers the committed identity after external transfer writes succeed but the D1 edit fails, without resubmission', async () => {
+      await seed({ stripe_subscription_id: 'sub_member', stripe_subscription_state: 'active' });
+      const member = await readMember(), replacement = '555555555555555555';
+      const roles = new Set([id]);
+      let remote = subscription();
+      vi.mocked(globalThis.fetch).mockImplementation(async (url, init = {}) => {
+        const path = new URL(url).pathname, method = init.method || 'GET';
+        if (path === `/api/v10/guilds/${env.DISCORD_GUILD_ID}/members/${replacement}`) return Response.json({ user: { id: replacement, username: 'replacement' } });
+        if (path.endsWith(`/roles/${env.DISCORD_ROLE_ID}`)) {
+          const target = path.split('/members/')[1].split('/')[0];
+          if (method === 'DELETE') roles.delete(target); else roles.add(target);
+          return new Response(null, { status: 204 });
+        }
+        if (method === 'GET' && path === '/v1/subscriptions') return Response.json({ data: [remote], has_more: false });
+        if (method === 'GET' && path === '/v1/subscriptions/sub_member') return Response.json(remote);
+        if (path === `/v1/customers/${customer}`) return Response.json({ id: customer });
+        if (method === 'POST' && path === '/v1/subscriptions/sub_member') {
+          remote = { ...remote, metadata: { thelab_member_id: member.member_id, thelab_discord_id: replacement } };
+          return Response.json(remote);
+        }
+        throw new Error(`Unexpected provider request ${method} ${path}`);
+      });
+      await env.DB.exec("CREATE TRIGGER fail_transfer BEFORE UPDATE ON members WHEN NEW.discord_user_id != OLD.discord_user_id BEGIN SELECT RAISE(ABORT, 'injected commit failure'); END");
+      await expect(coordinated(env, member.member_id, 'updateMetadata', { fields: {
+        name_override: '', notes: '', discount_type: '', stripe_customer_id: customer,
+        discord_user_id: replacement, stripe_subscription_id: 'sub_member', metadata_version: String(member.metadata_version),
+        billing: 'monthly', fob_id: '',
+      } })).rejects.toThrow();
+      expect([...roles]).toEqual([]);
+      expect(remote.metadata.thelab_discord_id).toBe(replacement);
+      expect(await readMember()).toMatchObject({ discord_user_id: id });
+      await env.DB.exec('DROP TRIGGER fail_transfer');
+      await runInDurableObject(await memberStub(), async (instance, state) => {
+        const pending = await state.storage.get('sync');
+        expect(pending).toMatchObject({ pending: true });
+        await state.storage.put('sync', { ...pending, next_attempt: Date.now() - 1 });
+        await new Membership(state, instance.env).alarm();
+        expect(await state.storage.get('sync')).toMatchObject({ pending: false });
+      });
+      expect([...roles]).toEqual([id]);
+      expect(await readMember()).toMatchObject({ stripe_subscription_state: 'active', discord_last_synced: expect.any(Number) });
+    });
+
+    it('refuses identity side effects when durable recovery scheduling fails', async () => {
+      await seed();
+      const member = await readMember();
+      await runInDurableObject(await memberStub(), async (instance) => {
+        const schedule = vi.spyOn(instance, 'requestSync').mockRejectedValueOnce(new Error('storage offline'));
+        try {
+          expect(await instance.execute({ member_id: member.member_id, operation: 'updateMetadata', input: { fields: {
+            name_override: '', notes: '', discount_type: '', stripe_customer_id: customer,
+            discord_user_id: '555555555555555555', stripe_subscription_id: '',
+            metadata_version: String(member.metadata_version), billing: 'monthly', fob_id: '',
+          } } })).toMatchObject({ ok: false });
+          expect(schedule).toHaveBeenCalledOnce();
+        } finally { schedule.mockRestore(); }
+      });
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+      expect(await readMember()).toMatchObject({ discord_user_id: id, metadata_version: member.metadata_version });
+    });
+
+    it('routes later customer notifications to the new owner while old pending work uses the released identity', async () => {
+      await seed();
+      const old = await readMember(), oldStub = await memberStub();
+      await scheduleCustomer(env, customer);
+      // Simulate the committed halves of a transfer; each edit schedules durable
+      // recovery under its own member lock in production.
+      await env.DB.prepare('UPDATE members SET stripe_customer_id = NULL, stripe_subscription_id = NULL WHERE member_id = ?').bind(old.member_id).run();
+      const transferred = await env.DB.prepare('INSERT INTO members (stripe_customer_id) VALUES (?) RETURNING member_id').bind(customer).first();
+      await scheduleCustomer(env, customer);
+      mockDiscord(rolePath, {}, 'DELETE', 204);
+      expect(await deliver(oldStub)).toMatchObject({ pending: false });
+      mockBilling(); mockSubs([{ ...subscription(), metadata: { thelab_member_id: transferred.member_id } }]);
+      expect(await deliver(env.MEMBERS.get(env.MEMBERS.idFromName(transferred.member_id)))).toMatchObject({ pending: false });
+      expect(await readMember()).toMatchObject({ stripe_subscription_state: null });
+      expect(await env.DB.prepare('SELECT stripe_subscription_state FROM members WHERE member_id = ?').bind(transferred.member_id).first()).toEqual({ stripe_subscription_state: 'active' });
+    });
+
+    it('keeps completion pending when its acknowledgement transaction fails after Discord succeeds', async () => {
+      await seed(); await scheduleCustomer(env, customer);
+      mockBilling().times(2); mockSubs([subscription()]).times(2); mockDiscord(rolePath, {}, 'PUT', 204).times(2);
+      const stub = await memberStub();
+      await runInDurableObject(stub, async (instance, state) => {
+        const saved = await state.storage.get('sync');
+        await state.storage.put('sync', { ...saved, next_attempt: Date.now() - 1 });
+        const original = state.storage.transaction.bind(state.storage);
+        let calls = 0;
+        const transaction = vi.spyOn(state.storage, 'transaction').mockImplementation(callback => original(async tx => {
+          const fail = ++calls === 2;
+          await callback(tx);
+          if (fail) throw new Error('completion commit failed');
+        }));
+        try { await instance.alarm(); } finally { transaction.mockRestore(); }
+        expect(await state.storage.get('sync')).toMatchObject({ pending: true, attempts: 1 });
+        expect(await state.storage.getAlarm()).toBeTypeOf('number');
+      });
+      expect(await deliver(stub)).toMatchObject({ pending: false });
+    });
+
+    it('pauses poison work durably, exposes escaped errors, and allows only an authenticated CSRF POST to retry', async () => {
+      await seed(); await scheduleCustomer(env, customer);
+      const member = await readMember(), stub = await memberStub();
+      await runInDurableObject(stub, async (_instance, state) => {
+        const saved = await state.storage.get('sync');
+        await state.storage.put('sync', { ...saved, attempts: 11 });
+      });
+      mockStripe(`/customers/${customer}`, {}, { status: 400 });
+      const failed = await deliver(stub);
+      expect(failed).toMatchObject({ pending: true, paused: true, attempts: 12, error: { status: 400 } });
+      expect((await api('/webhooks/stripe', await signedEvent())).status).toBe(503);
+      await repairMemberships(env);
+      await runInDurableObject(stub, async (instance, state) => {
+        expect(await state.storage.getAlarm()).toBeNull();
+        await new Membership(state, instance.env).alarm();
+        expect(await state.storage.get('sync')).toMatchObject({ paused: true, attempts: 12 });
+        await state.storage.put('sync', { ...await state.storage.get('sync'), error: { ...failed.error, message: '<script>bad</script>' } });
+      });
+      const token = await issueToken(env, id, 'admin');
+      for (const path of ['/admin/sync', `/admin/members/${member.member_id}`]) {
+        const response = await api(path, { headers: { Cookie: `thelab_admin=${token}` } });
+        expect(response.status).toBe(200);
+        const html = await response.text();
+        expect(html).toContain('Needs attention');
+        expect(html).toContain('&lt;script&gt;bad&lt;/script&gt;');
+        expect(html).toContain(failed.error.error_id);
+      }
+      for (const path of [`/admin/members/${member.member_id}/sync`, '/admin/sync/repair']) {
+        expect((await api(path, { headers: { Cookie: `thelab_admin=${token}` } })).status).toBe(405);
+        expect((await adminPost(path, { token: '' })).status).toBe(303);
+        expect((await adminPost(path, { token: await issueToken(env, id, 'member') })).status).toBe(303);
+        expect((await adminPost(path, { csrf: 'wrong' })).status).toBe(403);
+        expect((await adminPost(path, { origin: 'https://other.example' })).status).toBe(403);
+      }
+      expect(await coordinated(env, member.member_id, 'syncStatus')).toMatchObject({ paused: true });
+      expect((await adminPost(`/admin/members/${member.member_id}/sync`)).status).toBe(303);
+      expect(await coordinated(env, member.member_id, 'syncStatus')).toMatchObject({ pending: true, paused: false, attempts: 0 });
+      mockBilling(); mockSubs([subscription()]); mockDiscord(rolePath, {}, 'PUT', 204);
+      expect(await deliver(stub)).toMatchObject({ pending: false, error: null });
+    });
+
+    it('bounds repair to 100 and advances past pending or paused rows without resetting their retry state', async () => {
+      await seed(); await scheduleCustomer(env, customer);
+      const member = await readMember();
+      await runInDurableObject(await memberStub(), async (_instance, state) => {
+        await state.storage.put('sync', { ...await state.storage.get('sync'), attempts: 12, paused: true });
+        await state.storage.deleteAlarm();
+      });
+      await env.DB.batch(Array.from({ length: 101 }, (_, i) => env.DB.prepare('INSERT INTO members (stripe_customer_id) VALUES (?)').bind(`cus_repair${i}`)));
+      expect(await repairMemberships(env)).toBe(100);
+      expect(await repairMemberships(env)).toBe(2);
+      expect(await repairMemberships(env)).toBe(0);
+      expect(await coordinated(env, member.member_id, 'syncStatus')).toMatchObject({ pending: true, paused: true, attempts: 12 });
+    });
+
+    it('honors HTTP-date Retry-After beyond the backoff cap, including operator retry', async () => {
+      await seed();
+      const retryAt = Math.ceil((Date.now() + 86400000) / 1000) * 1000;
+      mockStripe(`/customers/${customer}`, {}, { status: 429, headers: { 'Retry-After': new Date(retryAt).toUTCString() } });
+      const pending = await reconcile({ customer_id: customer });
+      expect(pending.next_attempt).toBeGreaterThanOrEqual(retryAt);
+      await coordinated(env, (await readMember()).member_id, 'scheduleSync', { retry: true });
+      expect((await coordinated(env, (await readMember()).member_id, 'syncStatus')).next_attempt).toBeGreaterThanOrEqual(retryAt);
+    });
+
+    it('repairs an orphaned pending marker without resetting its generation, attempts, or backoff', async () => {
+      await seed(); await scheduleCustomer(env, customer);
+      const member = await readMember(), stub = await memberStub();
+      let saved;
+      await runInDurableObject(stub, async (_instance, state) => {
+        saved = { ...await state.storage.get('sync'), attempts: 4, next_attempt: Date.now() + 3600000 };
+        await state.storage.put('sync', saved);
+        await state.storage.deleteAlarm();
+      });
+      await coordinated(env, member.member_id, 'scheduleSync', { repair: true });
+      await runInDurableObject(stub, async (_instance, state) => {
+        expect(await state.storage.get('sync')).toEqual(saved);
+        expect(await state.storage.getAlarm()).toBe(saved.next_attempt);
+      });
     });
   });
 

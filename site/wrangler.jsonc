@@ -73,23 +73,6 @@
 			"0 7 * * *"
 		]
 	},
-	"queues": {
-		"producers": [
-			{
-				"binding": "MEMBERSHIP_QUEUE",
-				"queue": "thelab-membership"
-			}
-		],
-		"consumers": [
-			{
-				"queue": "thelab-membership",
-				"max_batch_size": 10,
-				"max_batch_timeout": 5,
-				"max_retries": 20,
-				"dead_letter_queue": "thelab-membership-failed"
-			}
-		]
-	},
 	"secrets": {
 		"required": [
 			"AUTH_SECRET",

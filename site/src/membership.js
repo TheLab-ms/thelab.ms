@@ -10,7 +10,7 @@ import {
 // Serialized membership updates and billing coordination
 // ────────────────────────────────────────────────────────────────────────
 
-// Checkout, admin edits, and queue work share a stable membership instance.
+// Checkout, admin edits, notifications, and alarms share a stable membership instance.
 // A promise chain is needed because external fetches allow DO requests to interleave.
 export class Membership extends DurableObject {
   constructor(ctx, env) {
@@ -18,12 +18,101 @@ export class Membership extends DurableObject {
     this.tail = Promise.resolve();
   }
 
-  async execute({ member_id, operation, input = {} }) {
-    const work = this.tail.then(async () => {
+  serialized(callback) {
+    const work = this.tail.then(callback);
+    this.tail = work.catch(() => {});
+    return work;
+  }
+
+  // Called directly by operations already holding the lock; never RPC back into
+  // execute. The marker and its wakeup commit together, before any side effect.
+  async requestSync(memberID, { retry = false, repair = false } = {}) {
+    return this.ctx.storage.transaction(async storage => {
+      const previous = await storage.get('sync') || { generation: 0, attempts: 0 };
+      // Repair and duplicate notifications must not bypass provider backoff or
+      // automatically revive a poison record. Operators explicitly retry it.
+      if (repair && previous.pending) {
+        // Recover a missing wakeup after exhausted platform/storage failures,
+        // retaining the original retry budget and provider delay.
+        if (!previous.paused && await storage.getAlarm() === null) {
+          await storage.setAlarm(Math.max(Date.now() + 1000, previous.next_attempt || 0));
+        }
+        return previous;
+      }
+      const state = { ...previous, member_id: memberID, pending: true,
+        generation: previous.generation + 1, requested_at: now() };
+      if (retry || !previous.pending) {
+        state.attempts = 0;
+        state.paused = false;
+        state.next_attempt = Math.max(Date.now() + 1000, previous.retry_not_before || 0);
+      }
+      await storage.put('sync', state);
+      if (!state.paused) await storage.setAlarm(state.next_attempt);
+      return state;
+    });
+  }
+
+  async alarm() {
+    return this.serialized(async () => {
+      const state = await this.ctx.storage.get('sync');
+      if (!state?.pending || state.paused) return;
+      if (state.attempts >= 12) {
+        await this.ctx.storage.transaction(async storage => {
+          await storage.put('sync', { ...state, paused: true, next_attempt: null,
+            error: state.error || { message: 'Repeated interrupted sync attempts. Review and retry.', status: 500, at: now() } });
+          await storage.deleteAlarm();
+        });
+        return;
+      }
+      // An old alarm may already be dispatched when a notification rearms it.
+      if (state.next_attempt > Date.now()) {
+        await this.ctx.storage.setAlarm(state.next_attempt);
+        return;
+      }
+      // Persist a watchdog before network I/O. A crash, lost response, or failed
+      // completion transaction leaves pending work and a wakeup, not a lost sync.
+      state.attempts++;
+      state.next_attempt = Date.now() + 60000;
+      await this.ctx.storage.transaction(async storage => {
+        await storage.put('sync', state);
+        await storage.setAlarm(state.next_attempt);
+      });
       try {
+        let member = await this.env.DB.prepare('SELECT * FROM members WHERE member_id = ?').bind(state.member_id).first();
+        if (member) {
+          if (!member.stripe_customer_id && await this.ctx.storage.get('customer')) member = await this.ensureCustomer(member);
+          await this.sync(member);
+        }
+        // All writers use the same lock, including across external awaits. A
+        // queued notification runs AFTER this commit and creates a new generation.
+        await this.ctx.storage.transaction(async storage => {
+          await storage.put('sync', { ...state, pending: false, paused: false, attempts: 0,
+            next_attempt: null, retry_not_before: null, error: null, completed_at: now() });
+          await storage.deleteAlarm();
+        });
+      } catch (error) {
+        const errorID = logError('membership.sync_failed', error, { member_id: state.member_id, attempt: state.attempts }, this.env);
+        state.error = { message: error instanceof HttpError ? error.message : 'Membership sync failed.',
+          status: error.providerStatus || error.status || 500, error_id: errorID, at: now() };
+        state.paused = state.attempts >= 12;
+        state.retry_not_before = Date.now() + 1000 * (error.retryAfter || 0);
+        state.next_attempt = state.paused ? null : Date.now() + 1000 * Math.max(error.retryAfter || 0, Math.min(43200, 30 * 2 ** Math.min(state.attempts - 1, 11)));
+        await this.ctx.storage.transaction(async storage => {
+          await storage.put('sync', state);
+          if (state.paused) await storage.deleteAlarm();
+          else await storage.setAlarm(state.next_attempt);
+        });
+      }
+    });
+  }
+
+  async execute({ member_id, operation, input = {} }) {
+    return this.serialized(async () => {
+      try {
+        if (operation === 'syncStatus') return { ok: true, value: await this.ctx.storage.get('sync') || null };
         const member = await this.env.DB.prepare('SELECT * FROM members WHERE member_id = ?').bind(member_id).first();
         if (!member) {
-          if (operation === 'sync') return { ok: true };
+          if (operation === 'scheduleSync') return { ok: true };
           throw new HttpError(404, 'Membership not found. Please sign in again.');
         }
         if (['checkout', 'refreshIdentity'].includes(operation) && member.discord_user_id !== input.user?.id) {
@@ -34,7 +123,7 @@ export class Membership extends DurableObject {
           case 'checkout': value = { url: await this.checkout(member, input) }; break;
           case 'adminCheckout': value = { url: await this.checkout(member, { shared: true }) }; break;
           case 'refreshIdentity': value = await this.refreshIdentity(member, input.user); break;
-          case 'sync': await this.sync(member, input); break;
+          case 'scheduleSync': value = await this.requestSync(member_id, input); break;
           case 'updateMetadata': await this.updateMetadata(member, input); break;
           case 'deleteMember': await this.deleteMember(member); break;
           case 'linkFob': await linkFob(this.env, member, input); break;
@@ -47,11 +136,10 @@ export class Membership extends DurableObject {
           status: error instanceof HttpError ? error.status : 500, retry_after: error.retryAfter || 0, error_id: errorID };
       }
     });
-    this.tail = work.catch(() => {});
-    return work;
   }
 
   async refreshIdentity(member, user) {
+    await this.requestSync(member.member_id);
     return this.env.DB.prepare(`UPDATE members SET discord_username = ?, discord_email = ?,
       metadata_version = metadata_version + 1 WHERE member_id = ? RETURNING *`)
       .bind(user.username, user.email.toLowerCase(), member.member_id).first();
@@ -89,12 +177,13 @@ export class Membership extends DurableObject {
 
   async checkout(member, { user, shared = false }) {
     if (!shared) member = await this.refreshIdentity(member, user);
+    else await this.requestSync(member.member_id);
     const id = member.discord_user_id;
     if (member.stripe_customer_id) {
       const subscriptions = await this.subscriptions(member);
       if (subscriptions.some(sub => isOngoingSubscription(sub.status))) {
-        // Reconcile a just-completed Checkout even if its webhook is still in flight.
-        await this.env.MEMBERSHIP_QUEUE.send({ customer_id: member.stripe_customer_id });
+        // The pending alarm reconciles a just-completed Checkout even if its
+        // webhook is still in flight.
         if (shared) throw new HttpError(409, 'This member already has an ongoing subscription. Manage it in Stripe.');
         const session = await stripe(this.env, '/billing_portal/sessions', {
           customer: member.stripe_customer_id, return_url: origin(this.env),
@@ -210,6 +299,7 @@ export class Membership extends DurableObject {
   }
 
   async deleteMember(member) {
+    await this.requestSync(member.member_id);
     const prior = await this.loadTrackedCheckout();
     if (prior?.session.status === 'open') await this.expireTrackedCheckout(prior.session);
     if (member.discord_user_id) {
@@ -235,6 +325,9 @@ export class Membership extends DurableObject {
     const discordChanged = member.discord_user_id !== value.discord_user_id;
     const customerChanged = member.stripe_customer_id !== value.stripe_customer_id;
     const identityChanged = discordChanged || customerChanged || member.stripe_subscription_id !== value.stripe_subscription_id;
+    // Persist recovery BEFORE any external write, including checkout expiry and
+    // Discord removal. If D1 save fails, reconcile the still-current D1 identity.
+    if (identityChanged) await this.requestSync(member.member_id);
     let username = member.discord_username, email = member.discord_email;
     let billingName = member.billing_name, billingEmail = member.billing_email;
     let selected;
@@ -295,8 +388,6 @@ export class Membership extends DurableObject {
         catch (error) { if (error.providerStatus !== 404) throw error; }
       }
       await this.ctx.storage.delete('customer');
-      // The queued sync uses this same stable lock, so it runs after the save.
-      await this.env.MEMBERSHIP_QUEUE.send({ member_id: member.member_id });
     }
     let result;
     try { result = await this.env.DB.prepare(`UPDATE members SET discord_user_id = ?, discord_username = ?, discord_email = ?,
@@ -326,9 +417,9 @@ export class Membership extends DurableObject {
     return url.href;
   }
 
-  async sync(member, { customer_id: customer = member.stripe_customer_id }) {
+  async sync(member) {
+    const customer = member.stripe_customer_id;
     const id = member.discord_user_id;
-    if (member.stripe_customer_id !== customer) throw new HttpError(409, 'Your billing details changed. Please reload and try again.');
     // Every delivery reconciles current Stripe state, including delayed webhooks.
     const billing = customer ? await stripe(this.env, `/customers/${customer}`) : {};
     const subscriptions = await this.subscriptions(member);
@@ -343,8 +434,10 @@ export class Membership extends DurableObject {
     if (!id) return;
     // Repeating PUT/DELETE is safe if the process crashes after Discord succeeds.
     // Retry even if the saved Stripe state matches: a previous Discord call may have failed.
-    // Failed removals/additions remain unacknowledged and are retried by the queue.
-    await discord(this.env, path, paid ? 'PUT' : 'DELETE');
+    // Failed removals/additions remain pending. A missing guild member already
+    // satisfies removal, but a failed addition still needs operator attention.
+    try { await discord(this.env, path, paid ? 'PUT' : 'DELETE'); }
+    catch (error) { if (paid || error.providerStatus !== 404) throw error; }
     await this.env.DB.prepare('UPDATE members SET discord_last_synced = ? WHERE member_id = ?').bind(now(), member.member_id).run();
   }
 }
@@ -402,6 +495,32 @@ export async function coordinated(env, memberID, operation, input = {}) {
     throw error;
   }
   return result.value;
+}
+
+export async function scheduleCustomer(env, customer) {
+  const member = await env.DB.prepare('SELECT member_id FROM members WHERE stripe_customer_id = ?').bind(customer).first();
+  // Unmapped customers (donations, Conway) are outside this app. A concurrent
+  // transfer schedules both identity edits before their external side effects;
+  // this notification always reconciles the destination object's CURRENT row.
+  if (member) {
+    const state = await coordinated(env, member.member_id, 'scheduleSync');
+    // Paused work is retained, but has no alarm. Do not ACK a mapped Stripe
+    // notification until an operator has restored an executable wakeup.
+    if (state?.paused) throw new HttpError(503, 'Membership synchronization needs operator attention.');
+  }
+}
+
+export async function repairMemberships(env) {
+  // Fair, bounded nightly sweep, including never-synced and partially synced
+  // memberships. Separate visitation time prevents a poison row starving others.
+  const { results } = await env.DB.prepare(`SELECT member_id FROM members
+    WHERE (stripe_customer_id IS NOT NULL OR discord_user_id IS NOT NULL)
+    AND sync_repair_at <= ? ORDER BY sync_repair_at, member_id LIMIT 100`).bind(now() - 86400).all();
+  for (const member of results) {
+    await coordinated(env, member.member_id, 'scheduleSync', { repair: true });
+    await env.DB.prepare('UPDATE members SET sync_repair_at = ? WHERE member_id = ?').bind(now(), member.member_id).run();
+  }
+  return results.length;
 }
 
 // ────────────────────────────────────────────────────────────────────────

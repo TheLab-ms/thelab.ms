@@ -23,7 +23,7 @@ the reference. Local Wrangler state and secrets live inside `site/`.
 ### Source layout
 
 - `src/index.js` — HTTP routes, admin pages, waiver/fob onboarding, and Worker
-  fetch/queue/scheduled entrypoints.
+  fetch/scheduled entrypoints.
 - `src/membership.js` — Membership and EdgeSync Durable Objects, billing
   coordination, fob claims, and access-list synchronization.
 - `src/services.js` — shared HTTP/authentication utilities, provider clients,
@@ -77,6 +77,44 @@ Completion logs `edge.full.completed` without a date; repeated requests safely
 send another snapshot. Legacy pending objects recover automatically, and successful
 reconciliation removes obsolete nightly-date state.
 
+### Membership synchronization
+
+Stripe webhooks resolve the customer to a membership and await its durable
+pending-sync marker **and alarm** before returning 204. Unmapped customers are
+ignored. Checkout, payment confirmation, Discord identity refresh, and admin
+identity edits schedule the same work. Identity edits persist recovery before
+external writes and before D1 commit: after an interrupted edit, reconciliation
+uses the identity actually saved in D1. Operators can reapply a rejected edit.
+
+The existing Membership Durable Object serializes notifications, edits, and alarm
+execution, including across network awaits. A storage transaction commits each
+pending generation with its wakeup. Duplicate notifications coalesce; a notification
+waiting behind an in-flight sync creates a later generation after completion, so
+an old response cannot acknowledge new work. A watchdog is persisted before
+provider calls, and completion clears pending state and alarm atomically.
+Reconciliation fetches current Stripe billing/subscriptions and repeats idempotent
+Discord role PUT/DELETE operations even when billing state was already saved.
+
+Failures retain their error reference, provider status, attempt count and next
+attempt in the DO without a retention deadline. Retries use exponential backoff
+(30 seconds up to 12 hours) and honor longer provider Retry-After values. After
+12 failed/interrupted attempts, work pauses for review; notifications and repair
+do not reset failures or bypass backoff. **Admin → Synchronization** lists durable
+state; webhooks for paused memberships return retryable 503 instead of acknowledging
+work without an armed alarm. The admin page lists
+members in pages of 25. Each member page also shows state and a **Retry membership
+sync** POST action. Retry resets the attempt budget but respects Retry-After.
+All operator actions use the existing admin session, Origin and CSRF validation.
+
+The nightly job also schedules at most 100 memberships with Stripe or Discord
+identities, least-recently visited first (minimum 24 hours between visits).
+`sync_repair_at` is only a D1 sweep cursor; pending/error state remains in the DO.
+This rotating repair catches missed billing notifications, including never-synced
+rows, without letting failing members starve others. Large rosters take multiple
+nights; the admin **Schedule next 100 stale memberships** action advances the same
+sweep immediately. Repair preserves paused work, which needs explicit per-member
+retry. No queue, DLQ, operator API secret, or additional service is required.
+
 ### Deployment
 
 Set the **Cloudflare Workers Builds root directory to `site`** if deployment is
@@ -114,7 +152,7 @@ The old `bootstrap -- --remote` mode has been replaced by this workflow.
 
 Use a separate checkout/configuration for a new deployment:
 
-1. Set the new Worker name, account, queue names and site/provider variables in
+1. Set the new Worker name, account and site/provider variables in
    `wrangler.jsonc`. Replace the production D1 entry's name and ID with the new
    database details in the next step; retain binding `DB` and `migrations_dir`.
 2. Create the database explicitly with the supported command (substitute a unique
@@ -128,7 +166,7 @@ Use a separate checkout/configuration for a new deployment:
    already exists, copy its ID from the dashboard instead of creating another.
    D1 automatic provisioning is supported, but happens during deploy, too late
    for our predeploy migration hook. Explicit creation lets migrations finish
-   before any HTTP, queue or scheduled handlers can run.
+   before any HTTP or scheduled handlers can run.
 3. Prepare independent production keys locally:
 
    ```sh
@@ -154,13 +192,51 @@ Use a separate checkout/configuration for a new deployment:
    keys in your secret manager, remove the bootstrap file, and use ordinary
    `npm run deploy` for subsequent releases.
 
-The lockfile pins Wrangler **4.131.1**. Its default automatic provisioning handles
-the named producer queue (also consumed by this Worker); the configured dead-letter
-queue is created when the consumer is registered. No queue discovery or creation
-script is needed. See [automatic provisioning](https://developers.cloudflare.com/workers/wrangler/configuration/#automatic-provisioning)
-and [Queues configuration](https://developers.cloudflare.com/workers/wrangler/configuration/#queues).
+The lockfile pins Wrangler **4.131.1**. Durable Object bindings retain their existing
+migration history and need no separate provisioning script.
 Finish provider callback/webhook configuration and attach the intended custom
 domain in Cloudflare before directing users to the new deployment.
+
+#### Queue-to-alarm cutover (existing deployment)
+
+Do not delete the old queues as part of deploying this commit. Plan a short
+maintenance window; the new Worker has no queue consumer and cannot drain old
+messages itself. Migration `0006_membership_sync.sql` is additive and compatible
+with the previous Worker.
+
+1. Before deployment, record/export the main `thelab-membership` queue and
+   `thelab-membership-failed` DLQ backlog using Cloudflare's authenticated dashboard
+   or management tooling. Retain customer/member IDs and failures for recovery.
+   Pause membership edits/checkout and Stripe webhook delivery during the drain
+   (return retryable failures or pause the endpoint; never acknowledge/drop events).
+   Keep the old consumer running until the main queue is empty; inspect the DLQ,
+   fix underlying errors, and redrive recoverable records through the old consumer.
+   Preserve any unresolved records beyond queue retention; never purge to make
+   the backlog appear healthy. Old operator `edge.sync` messages need a full edge
+   sync rather than a membership retry.
+2. Apply migrations and deploy this Worker with its queue binding/consumer removed.
+   Verify Cloudflare has detached the old consumer; keep both queue resources and
+   the exported recovery inventory. Resume Stripe delivery and membership routes.
+   Resend failed Stripe events; duplicates are safe. Check a mapped webhook returns
+   204 only when its member shows pending work or a completed alarm reconciliation.
+3. In **Admin → Synchronization**, run **Schedule next 100 stale memberships**
+   repeatedly until the sweep visits the roster (all initial cursors are zero).
+   For exported DLQ/backlog IDs, find their current membership, retry explicitly,
+   and verify Stripe/Discord completion. Document unrelated/deleted customers as
+   intentionally outside this app; transfers must be checked against current
+   ownership. Resolve paused failures, verify billing/access state and timestamps,
+   then run **Full edge sync**. Keep recovery records until all work is accounted for.
+4. Only after recovery is verified, no old producers/consumer remain, and both
+   old backlogs are drained/accounted for, delete the main queue and DLQ through
+   Cloudflare management tooling. The removed `resync-edge.sh` is replaced by the
+   authenticated admin full-sync action.
+
+Rollback before queue deletion requires restoring the previous consumer/bindings.
+Its code does not process DO pending records: preserve/export the admin recovery
+inventory and reconcile those members explicitly when returning to this release.
+Do not reset DO storage or replay ambiguous Stripe billing writes older than the
+existing 23-hour idempotency guard. Cutover steps are operational guidance only;
+repository checks and dry-run bundling make no live cloud changes.
 
 
 ## Edge proxy

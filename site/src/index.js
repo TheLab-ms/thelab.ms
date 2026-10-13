@@ -10,7 +10,7 @@ import {
 } from './services.js';
 import {
 	cleanupFobClaims, coordinated, createMember, edgeCall, edgeEnabled, fobClaim,
-	kickEdge, registerMember, swipeWebhook,
+	kickEdge, registerMember, repairMemberships, scheduleCustomer, swipeWebhook,
 } from './membership.js';
 export { Membership, EdgeSync } from './membership.js';
 
@@ -20,7 +20,7 @@ export { Membership, EdgeSync } from './membership.js';
 
 export function page(title, content, csrf, status = 200, env = {}) {
 	return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>${e(title)} | TheLab admin</title><link rel="icon" href="/assets/favicon.svg"><link rel="stylesheet" href="/style.css"></head>
-    <body class="membership-page admin-page"><main class="container membership-main admin-main"><header class="admin-header"><a class="membership-brand" href="/">TheLab</a><nav aria-label="Admin navigation"><a href="/admin">Members</a><a href="/admin/events">Member history</a></nav>${csrf ? `<div class="admin-toolbar-actions"><form method="post" action="/admin/logout"><input type="hidden" name="csrf" value="${e(csrf)}"><button class="btn btn-outline" type="submit">Log Out</button></form></div>` : ''}</header><h1>${e(title)}</h1>${content}</main></body></html>`, {
+    <body class="membership-page admin-page"><main class="container membership-main admin-main"><header class="admin-header"><a class="membership-brand" href="/">TheLab</a><nav aria-label="Admin navigation"><a href="/admin">Members</a><a href="/admin/events">Member history</a><a href="/admin/sync">Synchronization</a></nav>${csrf ? `<div class="admin-toolbar-actions"><form method="post" action="/admin/logout"><input type="hidden" name="csrf" value="${e(csrf)}"><button class="btn btn-outline" type="submit">Log Out</button></form></div>` : ''}</header><h1>${e(title)}</h1>${content}</main></body></html>`, {
 		status,
 		headers: {
 			// no-referrer can turn the Origin of a native form POST into "null".
@@ -249,9 +249,9 @@ async function history(request, env, csrf, member) {
 
 export async function adminRequest(request, env, context = requestContext(request)) {
 	const url = new URL(request.url), path = url.pathname;
-	const match = path.match(/^\/admin\/members\/([1-9][0-9]{16,19}|[a-f0-9]{32})(\/events|\/checkout|\/delete)?$/);
+	const match = path.match(/^\/admin\/members\/([1-9][0-9]{16,19}|[a-f0-9]{32})(\/events|\/checkout|\/delete|\/sync)?$/);
 	const creating = path === '/admin/members/new';
-	const methods = path === '/admin' || path === '/admin/' || path === '/admin/events' || match?.[2] === '/events' ? ['GET'] : path === '/admin/logout' || ['/checkout', '/delete'].includes(match?.[2]) ? ['POST'] : match || creating ? ['GET', 'POST'] : [];
+	const methods = path === '/admin' || path === '/admin/' || path === '/admin/events' || path === '/admin/sync' || match?.[2] === '/events' ? ['GET'] : ['/admin/logout', '/admin/edge/resync', '/admin/sync/repair'].includes(path) || ['/checkout', '/delete', '/sync'].includes(match?.[2]) ? ['POST'] : match || creating ? ['GET', 'POST'] : [];
 	if (!methods.length) {
 		logError('admin.rejected', new HttpError(404, 'Admin page not found.'), context, env);
 		return page('Not found', '<p>This admin page does not exist. <a href="/admin">Return to members</a>.</p>', null, 404);
@@ -276,6 +276,15 @@ export async function adminRequest(request, env, context = requestContext(reques
 		// Admin tokens are issued only after the OAuth role check. Trust that
 		// authorization until the signed session expires, without a Discord round trip.
 		if (path === '/admin/events') return await history(request, env, csrf);
+		if (path === '/admin/edge/resync') {
+			await edgeCall(env, 'full');
+			return redirect('/admin/sync?edge=1');
+		}
+		if (path === '/admin/sync/repair') {
+			const count = await repairMemberships(env);
+			return redirect(`/admin/sync?repaired=${count}`);
+		}
+		if (path === '/admin/sync') return await syncPage(request, env, csrf);
 		if (creating) {
 			if (!fields) return newMember(null, csrf, env);
 			try {
@@ -290,6 +299,10 @@ export async function adminRequest(request, env, context = requestContext(reques
 		const member = await env.DB.prepare(`SELECT *, COALESCE(${fobEnabledSQL}, 0) AS fob_enabled
       FROM members WHERE ${match[1].length === 32 ? 'member_id' : 'discord_user_id'} = ?`).bind(match[1]).first();
 		if (!member) throw new HttpError(404, 'Member not found.');
+		if (match[2] === '/sync') {
+			await coordinated(env, member.member_id, 'scheduleSync', { retry: true });
+			return redirect(`${memberPath(member)}?sync=1`);
+		}
 		if (match[2] === '/delete') {
 			await coordinated(env, member.member_id, 'deleteMember');
 			return redirect('/admin');
@@ -331,11 +344,36 @@ export async function adminRequest(request, env, context = requestContext(reques
 		const [events, waivers] = await Promise.all([
 			recentMemberEvents(env, member.member_id), memberWaivers(env, member),
 		]);
-		return editor(member, null, csrf, env, url.searchParams.get('saved') === '1' ? 'Member metadata saved.' : url.searchParams.get('created') === '1' ? 'Member created. Open Billing info to generate a checkout link.' : '', 200, events, waivers);
+		const sync = await coordinated(env, member.member_id, 'syncStatus');
+		const syncPanel = syncControls(member, sync, csrf);
+		return editor(member, null, csrf, env, url.searchParams.get('sync') === '1' ? 'Synchronization scheduled.' : url.searchParams.get('saved') === '1' ? 'Member metadata saved.' : url.searchParams.get('created') === '1' ? 'Member created. Open Billing info to generate a checkout link.' : '', 200, events, syncPanel + waivers);
 	} catch (error) {
 		logError('admin.failed', error, context, env);
 		return page('Admin access', `<p role="alert">${e(error instanceof HttpError ? error.message : 'Admin is temporarily unavailable. Please try again.')}</p><p><a href="${e(path + url.search)}">Retry</a> · <a href="/admin">Return to members</a> · <a href="/admin/login">Sign in again</a></p>`, csrf, error instanceof HttpError ? error.status : 500, env);
 	}
+}
+
+function syncControls(member, sync, csrf) {
+	return `<section class="card admin-section"><h2>Membership synchronization</h2><p>${sync?.pending ? sync.paused ? 'Needs attention — automatic retries paused.' : 'Pending' : sync?.completed_at ? 'Synchronized' : 'Not yet synchronized'} · Attempts: ${sync?.attempts || 0}</p>
+	${sync?.completed_at ? `<p>Last completed: ${e(date(sync.completed_at))}</p>` : ''}
+	${sync?.next_attempt ? `<p>Next attempt: ${e(date(sync.next_attempt / 1000))}</p>` : ''}
+	${sync?.error ? `<p role="alert">${e(sync.error.message)} (status ${e(sync.error.status)}; reference ${e(sync.error.error_id)}) · ${e(date(sync.error.at))}</p>` : ''}
+	<form method="post" action="/admin/members/${e(member.member_id)}/sync"><input type="hidden" name="csrf" value="${e(csrf)}"><button class="btn btn-outline" type="submit">Retry membership sync</button></form></section>`;
+}
+
+async function syncPage(request, env, csrf) {
+	const params = new URL(request.url).searchParams;
+	const after = params.get('after') || '';
+	if (after && !/^[a-f0-9]{32}$/.test(after)) throw new HttpError(400, 'Invalid synchronization page.');
+	const { results } = await env.DB.prepare('SELECT member_id, name_override, discord_username, email FROM members WHERE member_id > ? ORDER BY member_id LIMIT 26').bind(after).all();
+	const members = results.slice(0, 25);
+	const rows = await Promise.all(members.map(async member => `<article><h2><a href="${e(memberPath(member))}">${e(memberName(member))}</a></h2>${syncControls(member, await coordinated(env, member.member_id, 'syncStatus'), csrf)}</article>`));
+	return page('Synchronization', `<p>Durable pending work and failures are retained until resolved. Automatic retries pause after 12 failed attempts; fix provider or identity errors, then retry the member. Times are UTC.</p>
+	${params.has('edge') ? '<p role="status">Full edge snapshot delivered.</p>' : ''}${/^(?:[0-9]|[1-9][0-9]|100)$/.test(params.get('repaired') || '') ? `<p role="status">Repair visited ${e(params.get('repaired'))} memberships. Zero means this sweep is complete.</p>` : ''}
+	<form method="post" action="/admin/edge/resync"><input type="hidden" name="csrf" value="${e(csrf)}"><button class="btn btn-outline" type="submit">Full edge sync</button></form>
+	<form method="post" action="/admin/sync/repair"><input type="hidden" name="csrf" value="${e(csrf)}"><button class="btn btn-outline" type="submit">Schedule next 100 stale memberships</button></form>
+	<p>Repair visits at most 100 memberships not visited in the last 24 hours. It preserves backoff and paused failures. Repeat to cover the remaining memberships during recovery.</p>${rows.join('')}
+	<nav><a href="/admin/sync">First page</a>${results.length > 25 ? ` · <a href="/admin/sync?after=${members.at(-1).member_id}">Next page</a>` : ''}</nav>`, csrf, 200, env);
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -643,7 +681,7 @@ async function success(request, env) {
 	const subscription = await stripe(env, `/subscriptions/${subscriptionID}`);
 	if (subscription.customer !== member.stripe_customer_id || subscription.metadata?.thelab_discord_id !== member.discord_user_id) throw new HttpError(403, 'This subscription does not belong to your membership.');
 	if (!grantsMembership(subscription.status)) throw new HttpError(409, 'Your membership payment is still being processed. Please try again shortly.');
-	await env.MEMBERSHIP_QUEUE.send({ customer_id: member.stripe_customer_id });
+	await coordinated(env, member.member_id, 'scheduleSync');
 	return redirect(`${origin(env)}/welcome`);
 }
 
@@ -657,29 +695,9 @@ async function webhook(request, env) {
 	const object = event.data.object;
 	const customer = event.type === 'customer.updated' ? object.id : typeof object.customer === 'string' ? object.customer : object.customer?.id;
 	if (!/^cus_[A-Za-z0-9]+$/.test(customer || '')) throw new HttpError(400, 'Stripe event has no customer.');
-	// Acknowledge only after enqueueing so Stripe retries failed sends.
-	await env.MEMBERSHIP_QUEUE.send({ customer_id: customer });
+	// Resolve ownership and commit BOTH pending work and its alarm before ACK.
+	await scheduleCustomer(env, customer);
 	return new Response(null, { status: 204 });
-}
-
-export async function processMessage(body, env) {
-	// Operator messages are published through the authenticated Cloudflare API.
-	if (body?.type !== undefined) {
-		if (body.type !== 'edge.sync' || body.mode !== 'full' || Object.keys(body).some(key => !['type', 'mode'].includes(key))) {
-			throw new HttpError(400, 'Invalid queue message.');
-		}
-		await edgeCall(env, 'full');
-		return;
-	}
-	if (body?.member_id && /^[a-f0-9]{32}$/.test(body.member_id) && !body.customer_id) {
-		await coordinated(env, body.member_id, 'sync');
-		return;
-	}
-	if (!body || !/^cus_[A-Za-z0-9]+$/.test(body.customer_id || '')) throw new HttpError(400, 'Invalid queue message.');
-	const member = await env.DB.prepare('SELECT member_id FROM members WHERE stripe_customer_id = ?').bind(body.customer_id).first();
-	// Other Stripe customers (e.g. donations or Conway) are outside this app.
-	if (!member) return;
-	await coordinated(env, member.member_id, 'sync', { customer_id: body.customer_id });
 }
 
 const routes = new Map([
@@ -701,7 +719,7 @@ const routes = new Map([
 export default {
 	async scheduled(event, env) {
 		await cleanupFobClaims(env);
-		if (edgeEnabled(env)) await edgeCall(env, 'full');
+		await Promise.all([repairMemberships(env), edgeEnabled(env) ? edgeCall(env, 'full') : undefined]);
 	},
 	async fetch(request, env) {
 		const url = new URL(request.url);
@@ -731,24 +749,6 @@ export default {
 				response.headers.append('Set-Cookie', `thelab_oauth=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${request.url.startsWith('https:') ? '; Secure' : ''}`);
 			}
 			return response;
-		}
-	},
-	async queue(batch, env) {
-		// Reconcile current Stripe state once per customer in this batch. Operator
-		// and invalid messages stay separate so they retain their own validation.
-		const groups = Map.groupBy(batch.messages, message => message.body?.type === undefined
-			&& /^cus_[A-Za-z0-9]+$/.test(message.body?.customer_id || '') ? message.body.customer_id : message);
-		for (const messages of groups.values()) {
-			try {
-				await processMessage(messages[0].body, env);
-				for (const message of messages) message.ack();
-			} catch (error) {
-				for (const message of messages) {
-					const delaySeconds = Math.min(43200, Math.max(error.retryAfter || 0, 30 * 2 ** Math.min(message.attempts - 1, 10)));
-					logError('queue.failed', error, { message_id: message.id, attempt: message.attempts, retry_delay_seconds: delaySeconds }, env);
-					message.retry({ delaySeconds });
-				}
-			}
 		}
 	},
 };

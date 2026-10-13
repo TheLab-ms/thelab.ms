@@ -2,7 +2,7 @@ import { env } from 'cloudflare:workers';
 import { applyD1Migrations, reset, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EdgeSync, cleanupFobClaims, coordinated, edgeCall, fobClaim } from '../src/membership.js';
-import worker, { processMessage } from '../src/index.js';
+import worker from '../src/index.js';
 import { edgeJWKS, edgeToken, hash, issueToken, loginDestination, memberToken, now, randomToken, verifyOAuthState, verifyToken } from '../src/services.js';
 import wranglerConfig from '../wrangler.jsonc?raw';
 
@@ -570,57 +570,43 @@ describe('Edge synchronization', () => {
 		expect(execute).not.toHaveBeenCalled();
 	});
 
-	it('removes browser-triggered sync even for signed-in admins', async () => {
-		await member();
-		const token = await issueToken(env, '333333333333333333', 'admin');
-		for (const method of ['GET', 'POST']) {
-			const response = await worker.fetch(new Request(`${env.SITE_URL}/admin/edge/resync`, {
-				method, headers: {
-					Cookie: `thelab_admin=${token}`, Origin: env.SITE_URL, 'Content-Type': 'application/x-www-form-urlencoded',
-				}, ...(method === 'POST' ? { body: new URLSearchParams({ csrf: await hash(`admin-csrf:${token}`) }) } : {})
-			}), configured);
-			expect(response.status).toBe(404);
-		}
-		expect(fetchSpy).not.toHaveBeenCalled();
-		expect(writes).toHaveLength(0);
-	});
+	async function operatorSync({ token, csrf, origin = env.SITE_URL, method = 'POST' } = {}) {
+		token ??= await issueToken(env, '333333333333333333', 'admin');
+		csrf ??= await hash(`admin-csrf:${token}`);
+		return worker.fetch(new Request(`${env.SITE_URL}/admin/edge/resync`, { method,
+			headers: { Cookie: `thelab_admin=${token}`, Origin: origin, 'Content-Type': 'application/x-www-form-urlencoded' },
+			...(method === 'POST' ? { body: new URLSearchParams({ csrf }) } : {}),
+		}), configured);
+	}
 
-	it('accepts operator full-sync queue messages and safely handles redelivery', async () => {
+	it('accepts authenticated CSRF-protected operator full syncs and safely handles redelivery', async () => {
 		await member();
 		const log = vi.spyOn(console, 'log').mockImplementation(() => { });
-		const message = { id: 'operator-sync', body: { type: 'edge.sync', mode: 'full' }, attempts: 1, ack: vi.fn(), retry: vi.fn() };
 		for (let delivery = 0; delivery < 2; delivery++) {
-			await worker.queue({ messages: [message] }, configured);
+			expect((await operatorSync()).status).toBe(303);
 			expect(writes[delivery]).toMatchObject({ method: 'PUT', fobs: [7] });
 			expect(await runDurableObjectAlarm(stub())).toBe(false);
 		}
-		expect(message.ack).toHaveBeenCalledTimes(2);
-		expect(message.retry).not.toHaveBeenCalled();
 		expect(writes[1].version).toBeGreaterThan(writes[0].version);
 		expect(writes[1].event_signing_key).toBe(writes[0].event_signing_key);
 		expect(log).toHaveBeenCalledWith(JSON.stringify({ event: 'edge.full.completed' }));
 	});
 
-	it('retries failed operator queue messages and acknowledges only successful delivery', async () => {
+	it('retains failed operator full sync for alarm retry after the HTTP response', async () => {
 		await member();
 		const normal = fetchSpy.getMockImplementation();
 		fetchSpy.mockRejectedValue(new Error('Edge offline'));
-		const message = { id: 'operator-sync', body: { type: 'edge.sync', mode: 'full' }, attempts: 1, ack: vi.fn(), retry: vi.fn() };
-		await worker.queue({ messages: [message] }, configured);
-		expect(message.ack).not.toHaveBeenCalled();
-		expect(message.retry).toHaveBeenCalledWith({ delaySeconds: 30 });
+		expect((await operatorSync()).status).toBe(503);
 		fetchSpy.mockImplementation(normal);
-		await worker.queue({ messages: [message] }, configured);
-		expect(message.ack).toHaveBeenCalledOnce();
+		expect(await runDurableObjectAlarm(stub())).toBe(true);
 		expect(goal.fobs).toEqual([7]);
 		expect(await runDurableObjectAlarm(stub())).toBe(false);
 	});
 
 	it.each([
-		{ type: 'edge.sync' }, { type: 'edge.sync', mode: 'changes' }, { type: 'unknown', mode: 'full' },
-		{ type: 'edge.sync', mode: 'full', customer_id: 'cus_unrelated' },
-	])('rejects malformed operator messages: %j', async body => {
-		await expect(processMessage(body, configured)).rejects.toMatchObject({ status: 400 });
+		[{ token: '' }, 303], [{ csrf: 'wrong' }, 403], [{ origin: 'https://other.example' }, 403], [{ method: 'GET' }, 405],
+	])('rejects unauthorized or invalid operator requests: %j', async (options, status) => {
+		expect((await operatorSync(options)).status).toBe(status);
 		expect(fetchSpy).not.toHaveBeenCalled();
 	});
 

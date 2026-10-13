@@ -515,9 +515,11 @@ export async function provider(url, init, service, env = {}) {
     throw fail(new HttpError(502, `${service} is temporarily unavailable. Please try again.`), 'invalid_response');
   }
   if (!response.ok) {
-    const delay = Number(response.headers.get('Retry-After') || data.retry_after || 0);
+    const retryAfter = response.headers.get('Retry-After');
+    const delay = retryAfter && !Number.isFinite(Number(retryAfter))
+      ? (Date.parse(retryAfter) - Date.now()) / 1000 : Number(retryAfter || data.retry_after || 0);
     // Never log provider bodies, OAuth codes, or tokens.
-    throw fail(new HttpError(502, `${service} is temporarily unavailable. Please try again.`, Number.isFinite(delay) ? Math.min(43200, Math.max(0, Math.ceil(delay))) : 0), 'http');
+    throw fail(new HttpError(502, `${service} is temporarily unavailable. Please try again.`, Number.isFinite(delay) ? Math.max(0, Math.ceil(delay)) : 0), 'http');
   }
   return data;
 }

@@ -208,15 +208,15 @@ committed goal, version, signing key, and swipe history. No D1 migration is need
 
 ## Operator full sync
 
-From the repository root, schedule a full sync with:
+Sign in to the site's existing admin UI, open **Synchronization**, and submit
+**Full edge sync**. This CSRF-protected POST uses the existing authenticated admin
+session and the same durable forced work as the nightly schedule. Success reports
+delivery; if the edge is unavailable, the page reports an error and EdgeSync retains
+the forced snapshot for alarm retry. Repeating the action is safe. Completion logs
+`edge.full.completed`.
 
-```sh
-bash site/scripts/resync-edge.sh
-```
-
-The script uses the installed Wrangler to discover the account and
-`thelab-membership` queue, then publishes through the management API. It reuses
-your `wrangler login` OAuth credentials or `CLOUDFLARE_API_TOKEN`; the credential
-must have Queues Write permission. Set `ACCOUNT_ID` (or `CLOUDFLARE_ACCOUNT_ID`)
-when you have multiple accounts; `QUEUE_ID` can also be supplied explicitly.
-Start the log tail below **before** running the script to confirm completion.
+The queue-publishing `resync-edge.sh` has been removed. No Cloudflare queue, new
+operator secret, or separate operator service is required. Membership billing and
+Discord retry controls are on the same admin page. See the root
+[cutover guide](../README.md#queue-to-alarm-cutover-existing-deployment) before
+removing the old main queue or DLQ.
