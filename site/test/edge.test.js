@@ -27,11 +27,12 @@ describe('Edge synchronization', () => {
 			expect(String(url)).toBe('https://edge.example/api/goal');
 			if (init.method === 'GET') return goal ? Response.json(goal) : new Response(null, { status: 503 });
 			const body = JSON.parse(init.body); writes.push({ method: init.method, ...body });
-			if (init.method === 'PUT') goal = body;
-			else {
-				expect(body.base_version).toBe(goal.version);
-				goal = { ...goal, version: body.version, fobs: [...goal.fobs.filter(id => !body.remove.includes(id)), ...body.add].sort((a, b) => a - b) };
+			expect(init.method).toBe('PUT');
+			expect(Object.keys(body).sort()).toEqual(['event_signing_key', 'fobs', 'version']);
+			if (goal && (body.version < goal.version || (body.version === goal.version && JSON.stringify(body) !== JSON.stringify(goal)))) {
+				return new Response(null, { status: 409 });
 			}
+			goal = body;
 			return new Response(null, { status: 204 });
 		});
 	});
@@ -152,7 +153,8 @@ describe('Edge synchronization', () => {
 			expect(await Promise.all([first, second])).toEqual([{ ok: true }, { ok: true }]);
 		});
 		expect(goal.fobs).toEqual([8]);
-		expect(writes.map(write => write.method)).toEqual(['PUT', 'PATCH']);
+		expect(writes.map(write => ({ method: write.method, version: write.version, fobs: write.fobs })))
+			.toEqual([{ method: 'PUT', version: 1, fobs: [7] }, { method: 'PUT', version: 2, fobs: [8] }]);
 		expect(await runDurableObjectAlarm(stub())).toBe(false);
 	});
 
@@ -173,7 +175,7 @@ describe('Edge synchronization', () => {
 		expect(await runDurableObjectAlarm(stub())).toBe(false);
 	});
 
-	it.each(['active', 'trialing'])('allows %s with a signed waiver; pushes diffs for changes and empty revocation', async status => {
+	it.each(['active', 'trialing'])('allows %s with a signed waiver; pushes snapshots for changes and empty revocation', async status => {
 		const subscribed = await member(7, status);
 		await member(8, 'past_due');
 		const unsigned = await member(9, status, false);
@@ -183,7 +185,7 @@ describe('Edge synchronization', () => {
 		expect(writes).toHaveLength(1);
 		await env.DB.prepare(`UPDATE members SET stripe_subscription_state = 'past_due' WHERE member_id = ?`).bind(subscribed.member_id).run();
 		await edgeCall(configured, 'changes');
-		expect(writes[1]).toMatchObject({ method: 'PATCH', add: [], remove: [7] });
+		expect(writes[1]).toMatchObject({ method: 'PUT', fobs: [] });
 		expect(goal.fobs).toEqual([]);
 		await env.DB.prepare(`INSERT INTO waivers(member_id, version, content, name, email, agreements) VALUES (?, 1, 'Terms', 'Maker', 'maker@example.com', '[]')`).bind(unsigned.member_id).run();
 		await edgeCall(configured, 'changes');
@@ -266,7 +268,7 @@ describe('Edge synchronization', () => {
 
 		expect((await save({ non_billable: 'on', legacy_billing: 'on' })).status).toBe(303);
 		expect(goal.fobs).toEqual([7]);
-		expect(writes.at(-1)).toMatchObject({ method: 'PATCH', add: [7], remove: [] });
+		expect(writes.at(-1)).toMatchObject({ method: 'PUT', fobs: [7] });
 		expect(await read()).toMatchObject({ non_billable: 1, legacy_billing: 1 });
 		const html = await get();
 		expect(html).toContain('>Fob enabled</span>');
@@ -291,7 +293,7 @@ describe('Edge synchronization', () => {
 
 		expect((await save({ legacy_billing: 'on' })).status).toBe(303);
 		expect(await get()).toContain('>Fob disabled</span>');
-		expect(writes.at(-1)).toMatchObject({ method: 'PATCH', add: [], remove: [7] });
+		expect(writes.at(-1)).toMatchObject({ method: 'PUT', fobs: [] });
 		expect(goal.fobs).toEqual([]);
 		await env.DB.prepare(`INSERT INTO waivers(member_id, version, content, name, email, agreements)
       VALUES (?, 1, 'Terms', 'Maker', 'maker@example.com', '[]')`).bind(m.member_id).run();
@@ -321,7 +323,7 @@ describe('Edge synchronization', () => {
 		const normal = fetchSpy.getMockImplementation();
 		fetchSpy.mockImplementation(async (url, init) => {
 			const response = await normal(url, init);
-			if (init.method === 'PATCH') {
+			if (init.method === 'PUT') {
 				await env.DB.prepare('UPDATE members SET fob_id = 11 WHERE member_id = ?').bind(m.member_id).run();
 				throw new Error('Connection lost after commit');
 			}
@@ -333,6 +335,45 @@ describe('Edge synchronization', () => {
 		await runDurableObjectAlarm(stub());
 		expect(goal.fobs).toEqual([11]);
 		expect(goal.version).toBeGreaterThan(writes[1].version);
+		expect(await runDurableObjectAlarm(stub())).toBe(false);
+	});
+
+	it.each([false, true])('recovers after DO reconstruction when a failed PUT committed remotely: %s', async committed => {
+		await member();
+		const normal = fetchSpy.getMockImplementation();
+		fetchSpy.mockImplementation(async (url, init) => {
+			if (init.method !== 'PUT') return normal(url, init);
+			if (committed) await normal(url, init);
+			throw new Error('Connection lost');
+		});
+		await expect(edgeCall(configured, 'changes')).rejects.toThrow();
+		let attempted, secret;
+		await runInDurableObject(stub(), async (_instance, ctx) => {
+			attempted = await ctx.storage.get('version');
+			secret = await ctx.storage.get('eventSigningKey');
+			expect(attempted).toBe(1);
+			expect(await ctx.storage.get('syncedRevision')).toBeUndefined();
+			expect(await ctx.storage.get('eventKeyDelivered')).toBeUndefined();
+			expect(await ctx.storage.getAlarm()).not.toBeNull();
+		});
+		expect(goal?.version ?? 0).toBe(committed ? 1 : 0);
+		fetchSpy.mockImplementation(normal).mockClear();
+		await runInDurableObject(stub(), async (instance, ctx) => {
+			// Discard all in-memory coordination, retaining only durable state.
+			await new EdgeSync(ctx, instance.env).alarm();
+		});
+		expect(fetchSpy.mock.calls.map(([, init]) => init.method)).toEqual(['GET', 'PUT']);
+		expect(goal).toEqual({ version: attempted + 1, fobs: [7], event_signing_key: secret });
+		expect(await runDurableObjectAlarm(stub())).toBe(false);
+	});
+
+	it('sends a complete snapshot for a new revision even when eligibility is unchanged', async () => {
+		const m = await member();
+		await edgeCall(configured, 'changes');
+		await env.DB.prepare("UPDATE members SET stripe_subscription_state = 'trialing' WHERE member_id = ?").bind(m.member_id).run();
+		await edgeCall(configured, 'changes');
+		expect(writes).toHaveLength(2);
+		expect(writes[1]).toEqual({ ...writes[0], version: writes[0].version + 1 });
 		expect(await runDurableObjectAlarm(stub())).toBe(false);
 	});
 
@@ -383,14 +424,14 @@ describe('Edge synchronization', () => {
 		expect(await runDurableObjectAlarm(stub())).toBe(false);
 	});
 
-	it('rereads remote state after a PATCH conflict and retries with a fresh base version', async () => {
+	it('rereads remote state after a PUT conflict and retries with a higher-version snapshot', async () => {
 		const m = await member();
 		await edgeCall(configured, 'changes');
 		await env.DB.prepare('UPDATE members SET fob_id = 8 WHERE member_id = ?').bind(m.member_id).run();
 		const normal = fetchSpy.getMockImplementation(), previous = goal.version;
 		fetchSpy.mockImplementation(async (url, init) => {
-			if (init.method !== 'PATCH') return normal(url, init);
-			expect(JSON.parse(init.body).base_version).toBe(previous);
+			if (init.method !== 'PUT') return normal(url, init);
+			expect(JSON.parse(init.body).version).toBe(previous + 1);
 			goal = { ...goal, version: previous + 10, fobs: [7, 9] };
 			return new Response(null, { status: 409 });
 		});
@@ -398,7 +439,7 @@ describe('Edge synchronization', () => {
 		expect(writes).toHaveLength(1);
 		fetchSpy.mockImplementation(normal);
 		expect(await runDurableObjectAlarm(stub())).toBe(true);
-		expect(writes.at(-1)).toMatchObject({ method: 'PATCH', base_version: previous + 10, version: previous + 11, add: [8], remove: [7, 9] });
+		expect(writes.at(-1)).toMatchObject({ method: 'PUT', version: previous + 11, fobs: [8] });
 		expect(goal.fobs).toEqual([8]);
 		expect(await runDurableObjectAlarm(stub())).toBe(false);
 	});
@@ -640,7 +681,7 @@ describe('Edge synchronization', () => {
 		await pushSwipes();
 	});
 
-	it('provisions a key on upgrade with no membership changes and preserves it through diffs and full sync', async () => {
+	it('provisions a key on upgrade with no membership changes and includes it in every snapshot', async () => {
 		const m = await member();
 		const revision = (await env.DB.prepare('SELECT revision FROM edge_changes').first()).revision;
 		goal = { version: 10, fobs: [7] };
@@ -651,7 +692,7 @@ describe('Edge synchronization', () => {
 		expect(writes[0]).toMatchObject({ method: 'PUT', version: 11, fobs: [7] });
 		await env.DB.prepare('UPDATE members SET fob_id = 8 WHERE member_id = ?').bind(m.member_id).run();
 		await edgeCall(configured, 'changes');
-		expect(writes[1].method).toBe('PATCH');
+		expect(writes[1]).toMatchObject({ method: 'PUT', fobs: [8], event_signing_key: secret });
 		expect(goal.event_signing_key).toBe(secret);
 		await edgeCall(configured, 'full');
 		expect(goal.event_signing_key).toBe(secret);

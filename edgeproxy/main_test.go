@@ -41,70 +41,74 @@ func pushVersion(t *testing.T, e *edge, version int, fobs string, want int) {
 	}
 }
 
-func TestGoalDiff(t *testing.T) {
+func TestGoalSnapshot(t *testing.T) {
 	e := testEdge(t)
 	_, cloud := e.routes()
 	if got := jwtRequest(cloud, "GET", "/api/goal", "").Code; got != 503 {
 		t.Fatal(got)
 	}
 	pushVersion(t, e, 1, "[7,8]", 204)
-	patch := `{"base_version":1,"version":2,"add":[9],"remove":[7]}`
-	for _, body := range []string{patch, patch} {
-		if w := jwtRequest(cloud, "PATCH", "/api/goal", body); w.Code != 204 {
-			t.Fatal(w.Code, w.Body.String())
-		}
+	for range 2 {
+		pushVersion(t, e, 2, "[9,8,9]", 204)
 	}
 	e = restartEdge(t, e)
 	_, cloud = e.routes()
-	if got := jwtRequest(cloud, "PATCH", "/api/goal", patch).Code; got != 204 {
-		t.Fatal(got)
-	}
-	for _, tc := range []struct {
-		body   string
-		status int
-	}{
-		{`{"base_version":1,"version":3,"add":[],"remove":[8]}`, 409},
-		{`{"base_version":1,"version":2,"add":[10],"remove":[7]}`, 409},
-		{`{"base_version":2,"version":3,"add":[8],"remove":[8]}`, 400},
-		{`{"base_version":2,"version":3,"add":null,"remove":[]}`, 400},
-	} {
-		if w := jwtRequest(cloud, "PATCH", "/api/goal", tc.body); w.Code != tc.status {
-			t.Fatal(w.Code, w.Body.String())
-		}
-	}
+	pushVersion(t, e, 2, "[8,9]", 204)
+	pushVersion(t, e, 1, "[8,9]", 409)
+	pushVersion(t, e, 2, "[8,10]", 409)
 	w := jwtRequest(cloud, "GET", "/api/goal", "")
 	if w.Code != 200 || w.Body.String() != fmt.Sprintf("{\"version\":2,\"fobs\":[8,9],\"event_signing_key\":%q}\n", testEventKey) {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	if got := jwtRequest(cloud, "PATCH", "/api/goal", `{"base_version":2,"version":3,"add":[],"remove":[8,9]}`).Code; got != 204 {
-		t.Fatal(got)
-	}
+	pushVersion(t, e, 3, "[]", 204)
 	lan, _ := e.routes()
 	if w := request(lan, "POST", "/api/fobs", "[]"); w.Body.String() != "[]\n" {
 		t.Fatal(w.Body.String())
 	}
 }
 
-func TestGoalDiffValidation(t *testing.T) {
+func TestGoalSnapshotUpgrade(t *testing.T) {
+	e := testEdge(t)
+	pushVersion(t, e, 2, "[8,9]", 204)
+	addSwipes(t, e, 1)
+	events := readSwipes(t, e)
+	_, cloud := e.routes()
+	before := jwtRequest(cloud, "GET", "/api/goal", "").Body.String()
+	// An older process has already applied this patch to the authoritative goal.
+	execSQL(t, e, "CREATE TABLE goal_patch (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), patch TEXT NOT NULL)")
+	execSQL(t, e, "INSERT INTO goal_patch VALUES (1, ?)", `{"base_version":1,"version":2,"add":[9],"remove":[7]}`)
+	for range 2 {
+		e = restartEdge(t, e)
+		_, cloud = e.routes()
+		if got := jwtRequest(cloud, "GET", "/api/goal", "").Body.String(); got != before {
+			t.Fatalf("upgrade changed committed goal/key: %s", got)
+		}
+		var count int
+		if err := e.db.QueryRow("SELECT count(*) FROM sqlite_master WHERE name = 'goal_patch'").Scan(&count); err != nil || count != 0 {
+			t.Fatalf("obsolete replay table retained: %d %v", count, err)
+		}
+		if !reflect.DeepEqual(events, readSwipes(t, e)) || pendingCount(t, e) != 1 {
+			t.Fatal("upgrade changed pending swipe history")
+		}
+	}
+	pushVersion(t, e, 1, "[7,8]", 409)
+	pushVersion(t, e, 2, "[8,9]", 204)
+	pushVersion(t, e, 3, "[]", 204)
+}
+
+func TestGoalSnapshotValidation(t *testing.T) {
 	e := testEdge(t)
 	_, cloud := e.routes()
-	valid := `{"base_version":0,"version":1,"add":[],"remove":[]}`
-	if w := jwtRequest(cloud, "PATCH", "/api/goal", valid); w.Code != 503 {
-		t.Fatalf("uninitialized PATCH: %d %s", w.Code, w.Body.String())
-	}
+	valid := fmt.Sprintf(`{"version":1,"fobs":[],"event_signing_key":%q}`, testEventKey)
 	pushVersion(t, e, 0, "[7]", 204)
 	before := jwtRequest(cloud, "GET", "/api/goal", "").Body.String()
 	check := func(t *testing.T, body string) {
 		t.Helper()
-		if w := jwtRequest(cloud, "PATCH", "/api/goal", body); w.Code != 400 {
-			t.Fatalf("invalid PATCH accepted: %d %s", w.Code, w.Body.String())
+		if w := jwtRequest(cloud, "PUT", "/api/goal", body); w.Code != 400 {
+			t.Fatalf("invalid snapshot accepted: %d %s", w.Code, w.Body.String())
 		}
 		if got := jwtRequest(cloud, "GET", "/api/goal", "").Body.String(); got != before {
-			t.Fatalf("invalid PATCH changed goal: %s", got)
-		}
-		var count int
-		if err := e.db.QueryRow("SELECT count(*) FROM goal_patch").Scan(&count); err != nil || count != 0 {
-			t.Fatalf("invalid PATCH recorded: %d %v", count, err)
+			t.Fatalf("invalid snapshot changed goal: %s", got)
 		}
 	}
 	for _, body := range []string{"{", "null", "[]", "{}", valid + " {}", valid + strings.Repeat(" ", 16<<10)} {
@@ -114,10 +118,8 @@ func TestGoalDiffValidation(t *testing.T) {
 		field  string
 		values []string
 	}{
-		{"base_version", []string{"", "null", "-1", "1", "2", "1.5", `"0"`, "9007199254740992"}},
-		{"version", []string{"", "null", "-1", "0", "1.5", `"1"`, "9007199254740992"}},
-		{"add", []string{"", "null", "{}", "[0]", "[-1]", "[4294967296]", "[1.5]", `["7"]`, "[" + strings.Repeat("1,", 512) + "1]"}},
-		{"remove", []string{"", "null", "{}", "[0]", "[-1]", "[4294967296]", "[1.5]", `["7"]`, "[" + strings.Repeat("1,", 512) + "1]"}},
+		{"version", []string{"", "null", "-1", "1.5", `"1"`, "9007199254740992"}},
+		{"fobs", []string{"", "null", "{}", "[0]", "[-1]", "[4294967296]", "[1.5]", `["7"]`, "[" + strings.Repeat("1,", 512) + "1]"}},
 		{"extra", []string{"true"}},
 	} {
 		for i, value := range tc.values {
@@ -139,18 +141,13 @@ func TestGoalDiffValidation(t *testing.T) {
 			})
 		}
 	}
-	// Both ends of the safe-integer range are usable, including an empty diff.
-	for _, body := range []string{valid, `{"base_version":1,"version":9007199254740991,"add":[4294967295],"remove":[7]}`} {
-		if w := jwtRequest(cloud, "PATCH", "/api/goal", body); w.Code != 204 {
-			t.Fatalf("valid boundary rejected: %d %s", w.Code, w.Body.String())
-		}
-	}
+	pushVersion(t, e, 1, "[]", 204)
+	pushVersion(t, e, 9007199254740991, "[4294967295]", 204)
 	assertGoal(t, restartEdge(t, e), 9007199254740991, "[4294967295]\n")
 }
 
-func TestGoalDiffCapacity(t *testing.T) {
+func TestGoalSnapshotCapacity(t *testing.T) {
 	e := testEdge(t)
-	_, cloud := e.routes()
 	pushVersion(t, e, 0, "[]", 204)
 	ids := make([]uint32, 512)
 	for i := range ids {
@@ -160,82 +157,50 @@ func TestGoalDiffCapacity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	initial := fmt.Sprintf(`{"base_version":0,"version":1,"add":%s,"remove":[]}`, encoded)
-	if w := jwtRequest(cloud, "PATCH", "/api/goal", initial); w.Code != 204 {
-		t.Fatal(w.Code, w.Body.String())
-	}
-	overflow := `{"base_version":1,"version":2,"add":[513],"remove":[]}`
-	if w := jwtRequest(cloud, "PATCH", "/api/goal", overflow); w.Code != 400 || !strings.Contains(w.Body.String(), "512") {
-		t.Fatalf("overflow accepted: %d %s", w.Code, w.Body.String())
-	}
+	pushVersion(t, e, 1, string(encoded), 204)
+	overflow, _ := json.Marshal(append(append([]uint32{}, ids...), 513))
+	pushVersion(t, e, 2, string(overflow), 400)
 	e = restartEdge(t, e)
 	assertGoal(t, e, 1, string(encoded)+"\n")
-	_, cloud = e.routes()
-	if w := jwtRequest(cloud, "PATCH", "/api/goal", initial); w.Code != 204 {
-		t.Fatal("overflow replaced the prior replay record", w.Code)
-	}
-	// Capacity is checked after removals and deduplication, not before.
-	patch := `{"base_version":1,"version":2,"add":[513,512,513],"remove":[1,1]}`
-	canonical := `{"base_version":1,"version":2,"add":[512,513],"remove":[1]}`
-	for _, body := range []string{patch, canonical} {
-		if w := jwtRequest(cloud, "PATCH", "/api/goal", body); w.Code != 204 {
-			t.Fatalf("capacity-preserving diff/replay rejected: %d %s", w.Code, w.Body.String())
-		}
-	}
+	pushVersion(t, e, 1, string(encoded), 204)
 	for i := range ids {
 		ids[i]++
 	}
 	encoded, _ = json.Marshal(ids)
+	for range 2 {
+		pushVersion(t, e, 2, string(encoded), 204)
+	}
 	assertGoal(t, e, 2, string(encoded)+"\n")
-	// A single diff can replace all 512 entries.
-	remove := string(encoded)
+	// A single snapshot can replace all 512 entries.
 	for i := range ids {
 		ids[i] += 512
 	}
 	encoded, _ = json.Marshal(ids)
-	patch = fmt.Sprintf(`{"base_version":2,"version":3,"add":%s,"remove":%s}`, encoded, remove)
-	if w := jwtRequest(cloud, "PATCH", "/api/goal", patch); w.Code != 204 {
-		t.Fatal(w.Code, w.Body.String())
-	}
+	pushVersion(t, e, 3, string(encoded), 204)
 	assertGoal(t, restartEdge(t, e), 3, string(encoded)+"\n")
 }
 
-func TestGoalDiffRollback(t *testing.T) {
-	for _, failure := range []string{"goal update", "patch insert", "patch update"} {
+func TestGoalSnapshotRollback(t *testing.T) {
+	for _, failure := range []string{"INSERT", "UPDATE"} {
 		t.Run(failure, func(t *testing.T) {
 			e := testEdge(t)
 			pushVersion(t, e, 0, "[7]", 204)
 			_, cloud := e.routes()
-			previous := `{"base_version":0,"version":1,"add":[8],"remove":[7]}`
-			if w := jwtRequest(cloud, "PATCH", "/api/goal", previous); w.Code != 204 {
-				t.Fatal(w.Code)
-			}
 			before := jwtRequest(cloud, "GET", "/api/goal", "").Body.String()
-			var priorPatch string
-			if err := e.db.QueryRow("SELECT patch FROM goal_patch").Scan(&priorPatch); err != nil {
-				t.Fatal(err)
-			}
-			operation := map[string]string{"goal update": "UPDATE ON goal", "patch insert": "INSERT ON goal_patch", "patch update": "UPDATE ON goal_patch"}[failure]
-			execSQL(t, e, "CREATE TRIGGER reject_diff BEFORE "+operation+" BEGIN SELECT RAISE(ABORT, 'injected diff failure'); END")
-			patch := `{"base_version":1,"version":2,"add":[9],"remove":[8]}`
-			if w := jwtRequest(cloud, "PATCH", "/api/goal", patch); w.Code != 500 {
+			execSQL(t, e, "CREATE TRIGGER reject_goal BEFORE "+failure+" ON goal BEGIN SELECT RAISE(ABORT, 'injected goal failure'); END")
+			snapshot := fmt.Sprintf(`{"version":2,"fobs":[9],"event_signing_key":%q}`, strings.Repeat("ab", 32))
+			if w := jwtRequest(cloud, "PUT", "/api/goal", snapshot); w.Code != 500 {
 				t.Fatalf("failed write acknowledged: %d %s", w.Code, w.Body.String())
 			}
 			e = restartEdge(t, e)
 			_, cloud = e.routes()
 			if got := jwtRequest(cloud, "GET", "/api/goal", "").Body.String(); got != before {
-				t.Fatalf("failed diff changed persisted goal/key: %s", got)
+				t.Fatalf("failed snapshot changed persisted goal/key: %s", got)
 			}
-			var storedPatch string
-			if err := e.db.QueryRow("SELECT patch FROM goal_patch").Scan(&storedPatch); err != nil || storedPatch != priorPatch {
-				t.Fatalf("failed diff changed replay record: %q %v", storedPatch, err)
-			}
-			if w := jwtRequest(cloud, "PATCH", "/api/goal", previous); w.Code != 204 {
-				t.Fatal("previous diff no longer replayable", w.Code)
-			}
-			execSQL(t, e, "DROP TRIGGER reject_diff")
+			execSQL(t, e, "DROP TRIGGER reject_goal")
+			pushVersion(t, e, 0, "[7]", 204)
 			for range 2 {
-				if w := jwtRequest(cloud, "PATCH", "/api/goal", patch); w.Code != 204 {
+				if w := jwtRequest(cloud, "PUT", "/api/goal", snapshot); w.Code != 204 {
 					t.Fatal("retry failed", w.Code, w.Body.String())
 				}
 			}
@@ -244,43 +209,45 @@ func TestGoalDiffRollback(t *testing.T) {
 	}
 }
 
-func TestConcurrentGoalDiffsAndFullUpdates(t *testing.T) {
-	for _, mode := range []string{"competing diffs", "same-version full", "newer full"} {
+func TestConcurrentGoalSnapshots(t *testing.T) {
+	for _, mode := range []string{"same version", "newer version", "identical"} {
 		t.Run(mode, func(t *testing.T) {
 			e := testEdge(t)
 			pushVersion(t, e, 1, "[7]", 204)
 			_, cloud := e.routes()
-			patch := `{"base_version":1,"version":2,"add":[8],"remove":[7]}`
-			method, other := "PATCH", `{"base_version":1,"version":2,"add":[9],"remove":[7]}`
+			snapshot := fmt.Sprintf(`{"version":2,"fobs":[8],"event_signing_key":%q}`, testEventKey)
 			version := 2
 			rotated := strings.Repeat("ab", 32)
-			if mode != "competing diffs" {
-				if mode == "newer full" {
-					version = 3
-				}
-				method, other = "PUT", fmt.Sprintf(`{"version":%d,"fobs":[9],"event_signing_key":%q}`, version, rotated)
+			if mode == "newer version" {
+				version = 3
+			}
+			other := fmt.Sprintf(`{"version":%d,"fobs":[9],"event_signing_key":%q}`, version, rotated)
+			if mode == "identical" {
+				other = snapshot
 			}
 			start := make(chan struct{})
 			var wg sync.WaitGroup
 			var results [2]*httptest.ResponseRecorder
-			wg.Go(func() { <-start; results[0] = jwtRequest(cloud, "PATCH", "/api/goal", patch) })
-			wg.Go(func() { <-start; results[1] = jwtRequest(cloud, method, "/api/goal", other) })
+			wg.Go(func() { <-start; results[0] = jwtRequest(cloud, "PUT", "/api/goal", snapshot) })
+			wg.Go(func() { <-start; results[1] = jwtRequest(cloud, "PUT", "/api/goal", other) })
 			close(start)
 			wg.Wait()
-			wantFobs, wantKey := "[9]\n", testEventKey
-			if mode == "newer full" {
+			wantFobs, wantKey := "[9]\n", rotated
+			if mode == "identical" {
+				if results[0].Code != 204 || results[1].Code != 204 {
+					t.Fatalf("identical snapshots conflicted: %d, %d", results[0].Code, results[1].Code)
+				}
+				wantFobs, wantKey = "[8]\n", testEventKey
+			} else if mode == "newer version" {
 				if results[1].Code != 204 || (results[0].Code != 204 && results[0].Code != 409) {
 					t.Fatalf("unexpected statuses: %d, %d", results[0].Code, results[1].Code)
 				}
-				wantKey = rotated
 			} else {
 				if !((results[0].Code == 204 && results[1].Code == 409) || (results[0].Code == 409 && results[1].Code == 204)) {
 					t.Fatalf("expected exactly one winner: %d, %d", results[0].Code, results[1].Code)
 				}
 				if results[0].Code == 204 {
-					wantFobs = "[8]\n"
-				} else if mode == "same-version full" {
-					wantKey = rotated
+					wantFobs, wantKey = "[8]\n", testEventKey
 				}
 			}
 			e = restartEdge(t, e)
@@ -290,12 +257,12 @@ func TestConcurrentGoalDiffsAndFullUpdates(t *testing.T) {
 			if err := e.db.QueryRow("SELECT event_signing_key FROM goal").Scan(&key); err != nil || key != wantKey {
 				t.Fatalf("concurrent update changed signing key: %q %v", key, err)
 			}
-			for i, req := range []struct{ method, body string }{{"PATCH", patch}, {method, other}} {
+			for i, body := range []string{snapshot, other} {
 				want := results[i].Code
-				if mode == "newer full" && i == 0 {
+				if mode == "newer version" && i == 0 {
 					want = 409
 				}
-				if w := jwtRequest(cloud, req.method, "/api/goal", req.body); w.Code != want {
+				if w := jwtRequest(cloud, "PUT", "/api/goal", body); w.Code != want {
 					t.Fatalf("replay %d: got %d, want %d", i, w.Code, want)
 				}
 			}
@@ -378,7 +345,7 @@ func TestAPIValidationAndRoutes(t *testing.T) {
 		method, path string
 		want         int
 	}{
-		{"POST", "/api/goal", 405}, {"POST", "/api/goal/versioned", 404},
+		{"POST", "/api/goal", 405}, {"PATCH", "/api/goal", 405}, {"POST", "/api/goal/versioned", 404},
 		{"GET", "/machines/stream/test", 404}, {"GET", "/", 404},
 		{"POST", "/api/fobs", 404}, {"POST", "/api/kiosk/claims", 404},
 	} {
@@ -1365,7 +1332,7 @@ func TestGoalEventKey(t *testing.T) {
 	}
 	e = restartEdge(t, e)
 	_, cloud = e.routes()
-	if got := jwtRequest(cloud, "PATCH", "/api/goal", `{"base_version":2,"version":3,"add":[8],"remove":[]}`).Code; got != 204 {
+	if got := jwtRequest(cloud, "PUT", "/api/goal", fmt.Sprintf(`{"version":3,"fobs":[7,8],"event_signing_key":%q}`, rotated)).Code; got != 204 {
 		t.Fatal(got)
 	}
 	var goal struct {

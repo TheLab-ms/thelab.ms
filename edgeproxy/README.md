@@ -105,7 +105,7 @@ Controller requests accept up to 512 swipes within a 32 KiB JSON body.
 ## Goal state and authentication
 
 The Worker generates and persists a random 32-byte HMAC key in its `EdgeSync`
-Durable Object before delivering it in an authenticated full goal update:
+Durable Object before delivering it in an authenticated `PUT /api/goal` snapshot:
 
 ```json
 {
@@ -115,8 +115,12 @@ Durable Object before delivering it in an authenticated full goal update:
 }
 ```
 
-Edgeproxy persists this key atomically with the goal. Fob-only PATCH requests
-preserve it; changing the key requires a higher-version full goal. The key is
+Every snapshot includes the complete authorized fob set (at most 512 IDs) and
+the signing key. Edgeproxy persists the version, fobs, and key atomically before
+returning `204`. Repeating the same version with the same normalized fob set and
+key is idempotent, including after restart. Older versions or different contents
+at the same version return `409`; changing the key requires a higher version.
+Versions are nonnegative safe integers, up to 9007199254740991. The key is
 returned only by the authenticated goal API, never in controller responses.
 It is separate from the Ed25519 key used to sign controller fob lists.
 
@@ -150,10 +154,20 @@ Manual/nightly sync now reconciles goal state only. The old edgeproxy
 
 Billing updates, admin edits/deletions, waiver signatures, and fob assignments
 notify EdgeSync immediately after committing to D1. EdgeSync serializes delivery
-and sends versioned diffs (or a full snapshot when necessary).
+and exclusively sends versioned full `PUT /api/goal` snapshots. A change notification
+whose D1 revision is already acknowledged goes idle without network traffic;
+operator and nightly full syncs force delivery even when that revision is unchanged.
+
+Before each delivery, authenticated `GET /api/goal` reads the committed remote
+version (`503` means no goal has been received). EdgeSync then reads the D1 revision
+and authorized fobs together and persists a version greater than both the remote
+version and its last local attempt before sending the snapshot. Only a `204`
+acknowledges that D1 revision. Lost responses and conflicts retry by reading remote
+state again and sending a fresh higher-version snapshot; changes committed during
+delivery remain pending.
 
 An alarm is armed when sync starts, before reading D1 or contacting edgeproxy.
-Failed work retries after 60 seconds. Full snapshots retain their pending mode
+Failed work retries after 60 seconds. Operator/nightly requests retain their pending mode
 and nightly date across retries. Once delivery catches up with D1, the alarm is
 deleted: there is no periodic idle polling. An alarm from an older deployment
 reconciles once and then follows the same retry-or-idle behavior.
@@ -162,6 +176,11 @@ This relies on post-commit notifications arriving. The existing nightly full
 reconciliation at 1 AM America/Chicago is the backstop for missed notifications
 and direct database edits. Swipe uploads run independently and do not arm sync
 alarms.
+
+For the snapshot-only protocol upgrade, roll out the Worker before edgeproxy:
+the existing edge accepts full PUTs. Edgeproxy removes the PATCH route and drops
+the obsolete `goal_patch` replay table automatically at startup, preserving the
+committed goal, version, signing key, and swipe history. No D1 migration is needed.
 
 ## Operator full sync
 

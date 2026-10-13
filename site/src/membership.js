@@ -588,11 +588,10 @@ export class EdgeSync extends DurableObject {
       await this.ctx.storage.put('eventSigningKey', eventKey);
     }
     const response = await this.request('/api/goal');
-    let previous = { version: 0, fobs: [] }, initialized = false;
+    let previous = { version: 0, fobs: [] };
     if (response.status === 200) {
       previous = JSON.parse(response.text);
       if (!goalValid(previous)) throw new Error('Invalid edge goal.');
-      initialized = true;
     } else if (response.status !== 503) throw new Error(`Edge goal read failed (${response.status}).`);
     // Read revision and goal together, AFTER reading edge state. New changes during
     // delivery retain a newer revision and cannot be accidentally acknowledged.
@@ -604,14 +603,11 @@ export class EdgeSync extends DurableObject {
     if (fobs.length > 512) throw new Error('Authorized fob set exceeds edge capacity (512).');
     const version = Math.max(previous.version, await this.ctx.storage.get('version') || 0) + 1;
     if (!Number.isSafeInteger(version)) throw new Error('Edge version exhausted.');
-    const add = fobs.filter(id => !previous.fobs.includes(id)), remove = previous.fobs.filter(id => !fobs.includes(id));
-    const snapshot = full || !initialized || previous.event_signing_key !== eventKey;
-    if (snapshot || add.length || remove.length) {
-      await this.ctx.storage.put('version', version);
-      const result = await this.request('/api/goal', snapshot ? 'PUT' : 'PATCH',
-        snapshot ? { version, fobs, event_signing_key: eventKey } : { base_version: previous.version, version, add, remove });
-      if (result.status !== 204) throw new Error(`Edge goal write failed (${result.status}).`);
-    }
+    // Persist before delivery; GET on retry recovers even an ambiguously committed
+    // snapshot. Advance past both local attempts and the remote committed version.
+    await this.ctx.storage.put('version', version);
+    const result = await this.request('/api/goal', 'PUT', { version, fobs, event_signing_key: eventKey });
+    if (result.status !== 204) throw new Error(`Edge goal write failed (${result.status}).`);
     await this.ctx.storage.put('syncedRevision', revisionRows.results[0].revision);
     await this.ctx.storage.put('eventKeyDelivered', true);
   }

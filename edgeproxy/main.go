@@ -138,7 +138,6 @@ func (e *edge) routes() (http.Handler, http.Handler) {
 	})
 	tunnel.HandleFunc("PUT /api/goal", e.goal)
 	tunnel.HandleFunc("GET /api/goal", e.getGoal)
-	tunnel.HandleFunc("PATCH /api/goal", e.patchGoal)
 	tunnel.HandleFunc("GET /api/kiosk/claim", e.getKioskClaim)
 	tunnel.HandleFunc("GET /api/printers", e.printers.status)
 	tunnel.HandleFunc("GET /machines/images/{image}", e.printers.snapshot)
@@ -484,7 +483,7 @@ CREATE TABLE IF NOT EXISTS goal (
   version INTEGER NOT NULL CHECK (version BETWEEN 0 AND 9007199254740991),
   fobs TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS goal_patch (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), patch TEXT NOT NULL);
+DROP TABLE IF EXISTS goal_patch;
 CREATE TABLE IF NOT EXISTS printer_config (
   singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
   config TEXT NOT NULL
@@ -837,88 +836,6 @@ func (e *edge) getGoal(w http.ResponseWriter, r *http.Request) {
 		EventKey string          `json:"event_signing_key,omitempty"`
 	}{version, fobs, eventKey})
 }
-
-func (e *edge) patchGoal(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		Base    *int64   `json:"base_version"`
-		Version *int64   `json:"version"`
-		Add     []uint32 `json:"add"`
-		Remove  []uint32 `json:"remove"`
-	}
-	if !readJSON(w, r, &input, 16<<10) {
-		return
-	}
-	if input.Base == nil || input.Version == nil || *input.Base < 0 || *input.Version <= *input.Base || *input.Version > 9007199254740991 ||
-		input.Add == nil || input.Remove == nil || len(input.Add) > 512 || len(input.Remove) > 512 || slices.Contains(input.Add, 0) || slices.Contains(input.Remove, 0) {
-		http.Error(w, "invalid goal diff", 400)
-		return
-	}
-	slices.Sort(input.Add)
-	input.Add = slices.Compact(input.Add)
-	slices.Sort(input.Remove)
-	input.Remove = slices.Compact(input.Remove)
-	for _, id := range input.Add {
-		if slices.Contains(input.Remove, id) {
-			http.Error(w, "overlapping goal diff", 400)
-			return
-		}
-	}
-	patch, _ := json.Marshal(input)
-	err := e.transaction(r.Context(), func(tx *sql.Tx) error {
-		var version int64
-		var body []byte
-		if err := tx.QueryRow("SELECT version, fobs FROM goal WHERE singleton = 1").Scan(&version, &body); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return errNoGoal
-			}
-			return err
-		}
-		if version == *input.Version {
-			var previous string
-			err := tx.QueryRow("SELECT patch FROM goal_patch WHERE singleton = 1").Scan(&previous)
-			if err == nil && previous == string(patch) {
-				return nil
-			}
-			if err != nil && !errors.Is(err, sql.ErrNoRows) {
-				return err
-			}
-			return errGoalConflict
-		}
-		if version != *input.Base {
-			return errGoalConflict
-		}
-		var ids []uint32
-		if err := json.Unmarshal(body, &ids); err != nil {
-			return err
-		}
-		ids = slices.DeleteFunc(ids, func(id uint32) bool { return slices.Contains(input.Remove, id) })
-		ids = append(ids, input.Add...)
-		slices.Sort(ids)
-		ids = slices.Compact(ids)
-		if len(ids) > 512 {
-			return errGoalCapacity
-		}
-		body, _ = json.Marshal(ids)
-		body = append(body, '\n')
-		if _, err := tx.Exec("UPDATE goal SET version = ?, fobs = ? WHERE singleton = 1", *input.Version, string(body)); err != nil {
-			return err
-		}
-		_, err := tx.Exec("INSERT INTO goal_patch VALUES (1, ?) ON CONFLICT(singleton) DO UPDATE SET patch = excluded.patch", string(patch))
-		return err
-	})
-	if errors.Is(err, errGoalCapacity) {
-		http.Error(w, err.Error(), 400)
-		return
-	}
-	if err != nil {
-		storageError(w, err)
-		return
-	}
-	log.Printf("goal diff stored base_version=%d version=%d added=%d removed=%d", *input.Base, *input.Version, len(input.Add), len(input.Remove))
-	w.WriteHeader(http.StatusNoContent)
-}
-
-var errGoalCapacity = errors.New("goal exceeds 512 fobs")
 
 func (e *edge) fobs(w http.ResponseWriter, r *http.Request) {
 	var input []struct {
