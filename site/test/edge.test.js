@@ -451,13 +451,23 @@ describe('Edge synchronization', () => {
 		await env.DB.prepare('UPDATE fob_assignments SET ended = 2000 WHERE member_id = ?').bind(first.member_id).run();
 		const second = await member();
 		await env.DB.prepare('UPDATE fob_assignments SET started = 2000 WHERE member_id = ?').bind(second.member_id).run();
-		swipes = [1500, 2500].map((time, i) => ({ id: `swipe-${i}`, time: new Date(time * 1000).toISOString(), fob: 7, allowed: true, controller: '192.168.1.2' }));
+		swipes = [1999.999, 2000].map((time, i) => ({ id: `swipe-${i}`, time: new Date(time * 1000).toISOString(), fob: 7, allowed: true, controller: '192.168.1.2' }));
 		swipes.push({ ...swipes[0], id: 'unknown', fob: 99, allowed: false });
 		await pushSwipes();
 		await pushSwipes();
-		const { results } = await env.DB.prepare('SELECT id, member_id FROM edge_swipes ORDER BY id').all();
+		const { results } = await env.DB.prepare("SELECT source_event_id AS id, member_id FROM member_events WHERE event_type = 'FobSwipe' ORDER BY source_event_id").all();
 		expect(results).toEqual([{ id: 'swipe-0', member_id: first.member_id }, { id: 'swipe-1', member_id: second.member_id }, { id: 'unknown', member_id: null }]);
 		expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM member_events WHERE event_type = 'FobSwipe'").first()).n).toBe(3);
+		const original = (await env.DB.prepare("SELECT * FROM member_events WHERE event_type = 'FobSwipe' ORDER BY source_event_id").all()).results;
+		for (const [i, event] of original.entries()) {
+			expect(event.created).toBe(Math.floor(Date.parse(swipes[i].time) / 1000));
+			expect(JSON.parse(event.details)).toEqual({ ...swipes[i], allowed: swipes[i].allowed ? 1 : 0 });
+		}
+		// Retry after ownership and payload changes must retain the original evidence.
+		await env.DB.prepare('UPDATE fob_assignments SET member_id = NULL').run();
+		swipes = swipes.map(event => ({ ...event, allowed: !event.allowed, controller: 'changed' }));
+		await pushSwipes();
+		expect((await env.DB.prepare("SELECT * FROM member_events WHERE event_type = 'FobSwipe' ORDER BY source_event_id").all()).results).toEqual(original);
 	});
 
 	it('renders cached swipes across admin pages without contacting edgeproxy', async () => {
@@ -604,13 +614,15 @@ describe('Edge synchronization', () => {
 	});
 
 	it('retries partially imported batches without duplicating swipe history', async () => {
-		swipes = Array.from({ length: 101 }, (_, i) => ({ id: `batch-${i}`, time: new Date().toISOString(), controller: '192.168.1.2', fob: 7, allowed: true }));
-		await env.DB.exec(`CREATE TRIGGER fail_swipe BEFORE INSERT ON edge_swipes WHEN NEW.id = 'batch-100' BEGIN SELECT RAISE(ABORT, 'injected failure'); END`);
+		swipes = Array.from({ length: 125 }, (_, i) => ({ id: `batch-${i}`, time: new Date().toISOString(), controller: '192.168.1.2', fob: 7, allowed: true }));
+		await env.DB.exec(`CREATE TRIGGER fail_swipe BEFORE INSERT ON member_events WHEN NEW.source_event_id = 'batch-110' BEGIN SELECT RAISE(ABORT, 'injected failure'); END`);
 		await expect(pushSwipes()).rejects.toMatchObject({ status: 500 });
-		expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM edge_swipes').first()).n).toBe(100);
+		const original = (await env.DB.prepare("SELECT * FROM member_events WHERE event_type = 'FobSwipe' ORDER BY id").all()).results;
+		expect(original).toHaveLength(100);
 		await env.DB.exec('DROP TRIGGER fail_swipe');
 		await pushSwipes();
-		expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM member_events WHERE event_type = 'FobSwipe'").first()).n).toBe(101);
+		expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM member_events WHERE event_type = 'FobSwipe'").first()).n).toBe(125);
+		expect((await env.DB.prepare("SELECT * FROM member_events WHERE event_type = 'FobSwipe' ORDER BY id LIMIT 100").all()).results).toEqual(original);
 	});
 
 	it('keeps nightly goal work pending after failure and retries', async () => {
@@ -636,7 +648,7 @@ describe('Edge synchronization', () => {
 		swipes = [{ id: 'valid', time: new Date().toISOString(), controller: '192.168.1.2', fob: 7, allowed: true },
 		{ id: 'invalid', time: 'yesterday', controller: '192.168.1.2', fob: 0, allowed: 'yes' }];
 		await expect(pushSwipes()).rejects.toMatchObject({ status: 400 });
-		expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM edge_swipes').first()).n).toBe(0);
+		expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM member_events WHERE event_type = 'FobSwipe'").first()).n).toBe(0);
 	});
 
 	it('delivers all 512 authorized fobs and rejects overflow without truncating the goal', async () => {
@@ -660,7 +672,7 @@ describe('Edge synchronization', () => {
 		expect((await worker.fetch(request, configured)).status).toBe(413);
 		swipes = Array.from({ length: 513 }, (_, i) => ({ id: `large-${i}`, time: new Date().toISOString(), controller: 'door', fob: 7, allowed: true }));
 		await expect(pushSwipes()).rejects.toMatchObject({ status: 400 });
-		expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM edge_swipes').first()).n).toBe(0);
+		expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM member_events WHERE event_type = 'FobSwipe'").first()).n).toBe(0);
 		swipes = [];
 		await pushSwipes();
 	});
@@ -677,7 +689,7 @@ describe('Edge synchronization', () => {
 		const request = new Request(signed, { body });
 		expect(request.headers.has('Content-Length')).toBe(false);
 		expect((await worker.fetch(request, configured)).status).toBe(413);
-		expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM edge_swipes').first()).n).toBe(0);
+		expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM member_events WHERE event_type = 'FobSwipe'").first()).n).toBe(0);
 		await pushSwipes();
 	});
 
@@ -708,9 +720,9 @@ describe('Edge synchronization', () => {
 		expect((await worker.fetch(new Request(signed, { body: '[]' }), configured)).status).toBe(401);
 		const withBOM = await signedRequest();
 		expect((await worker.fetch(new Request(withBOM, { body: '\uFEFF' + JSON.stringify(swipes) }), configured)).status).toBe(401);
-		expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM edge_swipes').first()).n).toBe(0);
+		expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM member_events WHERE event_type = 'FobSwipe'").first()).n).toBe(0);
 		await pushSwipes();
-		expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM edge_swipes').first()).n).toBe(1);
+		expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM member_events WHERE event_type = 'FobSwipe'").first()).n).toBe(1);
 	});
 
 	it('accepts the shared Go HMAC test vector and ingests while goal delivery is pending', async () => {

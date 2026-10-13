@@ -20,6 +20,8 @@ class ImportConwayTest(unittest.TestCase):
         self.directory = Path(temporary.name)
         self.members = [self.member(1), self.member(2)]
         self.waivers = [{"id": "2", "version": "1", "created": "100", "name": "Signer", "email": "1@example.org"}]
+        self.events = []
+        self.swipes = []
 
     def member(self, source_id, **values):
         row = dict.fromkeys((
@@ -37,8 +39,8 @@ class ImportConwayTest(unittest.TestCase):
         for table, rows, headers in (
             ("members", self.members, self.members[0].keys()),
             ("waivers", self.waivers, self.waivers[0].keys()),
-            ("member_events", [], ("id", "created", "member", "event", "details")),
-            ("fob_swipes", [], ("uid", "timestamp", "fob_id", "member", "allowed")),
+            ("member_events", self.events, ("id", "created", "member", "event", "details")),
+            ("fob_swipes", self.swipes, ("uid", "timestamp", "fob_id", "member", "allowed", "controller", "fob_client")),
         ):
             with (self.directory / f"{table}.csv").open("w", newline="") as output:
                 writer = csv.DictWriter(output, fieldnames=headers)
@@ -60,6 +62,43 @@ class ImportConwayTest(unittest.TestCase):
 
     def metadata(self, member):
         return json.loads(member["notes"].split("Conway source metadata: ", 1)[1])
+
+    def test_swipes_preserve_source_ids_details_and_historical_owners(self):
+        self.members[1]["fob_id"] = "7"
+        self.events = [{"id": "1", "created": "100", "member": "1", "event": "FobSwipe", "details": "old payload"}]
+        self.swipes = [
+            {"uid": "1", "timestamp": "100", "fob_id": "7", "member": "1", "allowed": "1", "controller": "Door Ω"},
+            {"uid": "unlinked", "timestamp": "200", "fob_id": "7", "member": "99", "allowed": "0", "fob_client": "3"},
+            {"uid": "unknown", "timestamp": "0", "fob_id": "7", "member": "", "allowed": "0"},
+            {"uid": "future", "timestamp": "201", "fob_id": "7", "member": "1", "allowed": "1"},
+        ]
+        db, stats = self.load()
+        self.assertEqual(stats["swipes"], 3)
+        self.assertEqual(stats["swipes_outside_window"], 1)
+        self.assertEqual(stats["orphan_swipes"], 2)
+        self.assertEqual(db.execute("SELECT count(*) FROM member_events").fetchone()[0], 4)
+        owner = db.execute("SELECT member_id FROM members WHERE email = '1@example.org'").fetchone()[0]
+        swipe = db.execute("SELECT * FROM member_events WHERE source_event_id = 'conway:1'").fetchone()
+        self.assertEqual(swipe["member_id"], owner)
+        self.assertEqual(swipe["created"], 100)
+        self.assertEqual(json.loads(swipe["details"]), {
+            "id": "conway:1", "time": "1970-01-01T00:01:40.000Z", "controller": "Door Ω", "fob": 7, "allowed": 1,
+        })
+        for uid, controller in (("unlinked", "Conway client 3"), ("unknown", "Conway (unknown controller)")):
+            row = db.execute("SELECT * FROM member_events WHERE source_event_id = ?", ("conway:" + uid,)).fetchone()
+            self.assertIsNone(row["member_id"])
+            self.assertEqual(json.loads(row["details"])["controller"], controller)
+        event = db.execute("SELECT * FROM member_events WHERE event_type = 'ConwayEvent'").fetchone()
+        self.assertIsNone(event["source_event_id"])
+        self.assertEqual(json.loads(event["details"]), self.events[0])
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute("INSERT INTO member_events(source_event_id, event_type) VALUES ('conway:1', 'FobSwipe')")
+
+    def test_duplicate_swipe_uids_still_fail(self):
+        swipe = {"uid": "same", "timestamp": "100", "fob_id": "7", "member": "1", "allowed": "1"}
+        self.swipes = [swipe, dict(swipe)]
+        with self.assertRaisesRegex(ValueError, "duplicate Conway swipe UID"):
+            self.build()
 
     def test_missing_shared_waiver_preserves_eligibility_without_signature(self):
         for member in self.members:

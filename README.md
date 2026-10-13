@@ -38,6 +38,32 @@ Source files use named sections to keep related code together. Dependencies flow
 from entrypoints to state coordination to shared services. Numbered D1 migrations
 retain their deployed history.
 
+### Swipe history
+
+Door swipes are retained in `member_events` as `FobSwipe` rows. The nullable,
+unique `source_event_id` deduplicates edge retries; `details` retains the original
+ID, timestamp, controller, fob and decision. Ownership is resolved against fob
+assignment intervals at swipe time. Conway imports retain the exported owner
+and use `conway:<uid>` source IDs.
+
+Migration `0005_swipe_events.sql` backfills source IDs in place, recovers any
+`edge_swipes` rows missing from history, then removes that table and its trigger.
+Existing history IDs, timestamps, owners and details are preserved, with no
+retention cutoff. Ambiguous duplicate swipe IDs fail the migration for inspection.
+Apply this migration with swipe ingestion paused and release the matching Worker
+before resuming delivery; the old Worker requires the removed table. Edge delivery
+retries remain idempotent across the upgrade.
+
+Run Worker and importer checks from `site/`:
+
+```sh
+npm test
+python3 -m unittest discover -s scripts -p 'test_*.py'
+```
+
+Importer checks require Python linked to SQLite 3.42+. Worker tests include a
+populated pre-upgrade D1 database and partial-batch retry coverage.
+
 ### Deployment
 
 Set the **Cloudflare Workers Builds root directory to `site`** if deployment is

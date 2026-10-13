@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Validate Conway CSV exports and generate SQL for an empty, migrated D1 database.
 
-Usage (run from the repository root):
+Usage (run from site/):
     Requires Python 3.10+ linked to SQLite 3.42+, plus npm ci for Wrangler.
 
     1. Create an ignored conway-import/ directory. While signed into Conway as
@@ -37,6 +37,11 @@ Scope and mapping:
     They preserve Conway's signed-waiver eligibility as legacy_waiver_signed,
     without creating signature records or inventing signature evidence.
 
+    Swipes are stored directly as FobSwipe member_events, with source_event_id
+    and details.id both set to conway:<uid>. The exported historical owner is
+    retained, independent of current fob assignments. ConwayEvent rows retain
+    the original CSV payload; their IDs are not swipe deduplication keys.
+
     Stripe subscription IDs and states are copied from the snapshot. PayPal
     subscriptions become legacy billing; both use the imported waiver eligibility
     for fob access. Pending/unsupported discounts and
@@ -65,7 +70,7 @@ import sys
 from datetime import datetime, timezone
 
 ROOT = Path(__file__).resolve().parents[1]
-TABLES = ("members", "waivers", "member_events", "edge_swipes", "fob_assignments", "fob_claims")
+TABLES = ("members", "waivers", "member_events", "fob_assignments", "fob_claims")
 DISCOUNTS = {value.lower(): value for value in ("", "military", "retired", "firstResponder", "student", "family")}
 LEGACY_WAIVER = (
     "# Imported Conway waiver record\n\n"
@@ -277,13 +282,17 @@ def build_import(directory, as_of):
         if not cutoff <= created <= as_of:
             stats["swipes_outside_window"] += 1
             continue
-        insert("edge_swipes", {
+        details = {
             "id": "conway:" + row["uid"],
             "time": datetime.fromtimestamp(created, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
             "controller": row.get("controller") or ("Conway client " + row["fob_client"] if row.get("fob_client") else "Conway (unknown controller)"),
             "fob": integer(row["fob_id"], "fob_swipes.fob_id", minimum=1, maximum=4294967295),
             "allowed": flag(row["allowed"], "fob_swipes.allowed"),
+        }
+        insert("member_events", {
+            "source_event_id": details["id"], "created": created, "event_type": "FobSwipe",
             "member_id": member_link(row["member"], "orphan_swipes"),
+            "details": json.dumps(details, ensure_ascii=False, separators=(",", ":")),
         })
         stats["swipes"] += 1
     if db.execute("PRAGMA foreign_key_check").fetchall():

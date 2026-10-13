@@ -655,12 +655,14 @@ export class EdgeSync extends DurableObject {
     }
     for (let i = 0; i < events.length; i += 50) {
       await this.env.DB.batch(events.slice(i, i + 50).map(event => this.env.DB.prepare(`
-        INSERT INTO edge_swipes(id, time, controller, fob, allowed, member_id)
-        VALUES (?, ?, ?, ?, ?, (SELECT member_id FROM fob_assignments WHERE fob = ? AND started <= ?
-          AND (ended IS NULL OR ended > ?) ORDER BY started DESC, id DESC LIMIT 1)) ON CONFLICT(id) DO NOTHING`)
-        .bind(event.id, event.time, event.controller, event.fob, event.allowed ? 1 : 0, event.fob,
+        INSERT INTO member_events(source_event_id, created, event_type, details, member_id)
+        VALUES (?, CAST(unixepoch(?) AS INTEGER), 'FobSwipe',
+          json_object('id', ?, 'time', ?, 'controller', ?, 'fob', ?, 'allowed', ?),
+          (SELECT member_id FROM fob_assignments WHERE fob = ? AND started <= ?
+            AND (ended IS NULL OR ended > ?) ORDER BY started DESC, id DESC LIMIT 1))
+        ON CONFLICT(source_event_id) DO NOTHING`)
+        .bind(event.id, event.time, event.id, event.time, event.controller, event.fob, event.allowed ? 1 : 0, event.fob,
           Date.parse(event.time) / 1000, Date.parse(event.time) / 1000)));
     }
-    await this.ctx.storage.put('swipesSyncedAt', Date.now());
   }
 }
