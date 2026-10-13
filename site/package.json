@@ -22,8 +22,5 @@
   },
   "overrides": {
     "sharp": "^0.35.4"
-  },
-  "dependencies": {
-    "ical.js": "^2.2.1"
   }
 }

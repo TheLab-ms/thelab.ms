@@ -36,7 +36,6 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Source+Code+Pro:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
-  <link rel="stylesheet" href="calendar.css">
 </head>
 <body>
 
@@ -73,7 +72,6 @@
       <ul class="nav-menu" id="nav-menu">
         <li><a href="#about" class="nav-link">About</a></li>
         <li><a href="#equipment" class="nav-link">Facilities</a></li>
-        <li><a href="#events" class="nav-link">Events</a></li>
         <li><a href="#support" class="nav-link">Give</a></li>
         <li><a href="#membership" class="nav-link nav-cta">Join</a></li>
       </ul>
@@ -327,52 +325,6 @@
     </div>
   </section>
 
-  <!-- ======= EVENTS ======= -->
-  <section class="section events section-divider-top" id="events" aria-labelledby="events-title">
-    <div class="container">
-      <div class="section-header">
-        <h2 class="section-title" id="events-title">Events at TheLab</h2>
-        <div class="section-line"></div>
-        <p class="section-subtitle">Come learn, make, and meet the community.</p>
-      </div>
-      <div class="calendar" id="calendar">
-        <div class="calendar-toolbar">
-          <h3 id="calendar-month">This month</h3>
-          <div class="calendar-controls">
-            <div class="calendar-navigation" role="group" aria-label="Calendar navigation">
-              <button type="button" id="calendar-prev" aria-label="Previous month" disabled>‹</button>
-              <button type="button" id="calendar-today" disabled>Today</button>
-              <button type="button" id="calendar-next" aria-label="Next month" disabled>›</button>
-            </div>
-            <div class="calendar-views" role="group" aria-label="Calendar view">
-              <button type="button" id="calendar-month-view" aria-pressed="true">Month</button>
-              <button type="button" id="calendar-list-view" aria-pressed="false">List</button>
-            </div>
-          </div>
-        </div>
-        <p class="calendar-status" id="calendar-status" role="status">Loading events…</p>
-        <button type="button" class="calendar-retry" id="calendar-retry" hidden>Retry loading events</button>
-        <div id="calendar-content" class="calendar-content" aria-busy="true"></div>
-        <noscript><p class="calendar-notice">Enable JavaScript to browse events here, or use the Google Calendar link below.</p></noscript>
-        <div class="calendar-footer">
-          <span>All times Central</span>
-          <div>
-            <a href="https://calendar.google.com/calendar/embed?src=c_abee0e8a8cc80a68542127e93f8009413b06eb0f7cb95aa534dc49d5963394b5%40group.calendar.google.com&amp;ctz=America%2FChicago" target="_blank" rel="noopener noreferrer">Google Calendar <span aria-hidden="true">↗</span><span class="sr-only"> (opens in a new tab)</span></a>
-            <a href="https://calendar.google.com/calendar/u/0/r?cid=c_abee0e8a8cc80a68542127e93f8009413b06eb0f7cb95aa534dc49d5963394b5%40group.calendar.google.com" target="_blank" rel="noopener noreferrer">Subscribe<span class="sr-only"> in Google Calendar (opens in a new tab)</span></a>
-          </div>
-        </div>
-      </div>
-    </div>
-    <dialog class="calendar-dialog" id="calendar-dialog" aria-labelledby="calendar-dialog-title">
-      <div class="calendar-dialog-header">
-        <p class="calendar-eyebrow">At TheLab</p>
-        <form method="dialog"><button type="submit" aria-label="Close event details" autofocus>×</button></form>
-      </div>
-      <h3 id="calendar-dialog-title"></h3>
-      <div id="calendar-dialog-body"></div>
-    </dialog>
-  </section>
-
   <!-- ======= MEMBERSHIP ======= -->
   <section class="section membership" id="membership">
     <div class="container">
@@ -513,6 +465,5 @@
   </footer>
 
   <script src="script.js"></script>
-  <script src="calendar.js" defer></script>
 </body>
 </html>

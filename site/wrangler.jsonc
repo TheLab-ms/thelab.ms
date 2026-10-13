@@ -13,7 +13,6 @@
 		"directory": "static",
 		"binding": "ASSETS",
 		"run_worker_first": [
-			"/calendar/data",
 			"/.well-known/edge-jwks.json",
 			"/admin",
 			"/admin/*",
