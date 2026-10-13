@@ -31,8 +31,10 @@ the reference. Local Wrangler state and secrets live inside `site/`.
 - `static/style.css` and `static/script.js` — shared styles and page-specific
   browser behavior. Images and public HTML live alongside them.
 - `static/machines.js` and `static/machines.css` — member-only printer dashboard
-  behavior and styles. The Worker serves the page and status; browsers fetch
-  authenticated camera frames directly from the edge proxy.
+  behavior and styles. The Worker serves the page and checks eligibility for
+  60-second read-only tokens, renewed around 45 seconds. Visible tabs fetch status
+  and camera frames directly from the edge every five seconds. Status and image
+  access revocation takes at most 60 seconds; hidden tabs pause refreshes.
 
 Source files use named sections to keep related code together. Dependencies flow
 from entrypoints to state coordination to shared services. Numbered D1 migrations

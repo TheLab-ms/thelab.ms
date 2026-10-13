@@ -766,7 +766,10 @@ func TestProtectedPrinterStatusAndSnapshot(t *testing.T) {
 		frame: []byte{0xff, 0xd8, 0xff, 0xd9}, frameAt: time.Now(),
 	}}
 	_, cloud := e.routes()
-	w := jwtRequest(cloud, "GET", "/api/printers", "")
+	w := request(cloud, "GET", "/api/printers", "", "Authorization", "Bearer "+workerTestToken(printerClaims()), "Origin", "https://thelab.example")
+	if w.Code != 200 || w.Header().Get("Access-Control-Allow-Origin") != "https://thelab.example" {
+		t.Fatal("authorized status unavailable")
+	}
 	for _, want := range []string{"Printing", "2h 5m", `\u003cscript\u003eMaker\u003c/script\u003e`, "/machines/images/camera.jpg"} {
 		if !strings.Contains(w.Body.String(), want) {
 			t.Fatalf("missing %s: %s", want, w.Body.String())
@@ -788,7 +791,7 @@ func TestProtectedPrinterStatusAndSnapshot(t *testing.T) {
 	if image.Header().Get("Access-Control-Allow-Origin") != "https://thelab.example" {
 		t.Fatal("cross-origin image unavailable")
 	}
-	for _, path := range []string{"/api/printers", "/api/goal", "/api/kiosk/claim"} {
+	for _, path := range []string{"/api/goal", "/api/kiosk/claim"} {
 		r := httptest.NewRequest("GET", path, nil)
 		r.Header.Set("Authorization", "Bearer "+workerTestToken(printerClaims()))
 		w := httptest.NewRecorder()
@@ -834,5 +837,84 @@ func TestProtectedPrinterStatusAndSnapshot(t *testing.T) {
 	p.data.UpdatedAt = time.Time{}
 	if e.printers.cards()[0].Status != "Waiting for printer" {
 		t.Fatal("missing initial state")
+	}
+}
+
+func TestPrinterReadPermissionsAndCORS(t *testing.T) {
+	e := testEdge(t)
+	_, cloud := e.routes()
+	for _, path := range []string{"/api/printers", "/machines/images/missing.jpg"} {
+		for _, origin := range []string{"https://thelab.example", "https://evil.example", "null", ""} {
+			for _, method := range []string{"GET", "HEAD", "POST", "PUT", "OPTIONS"} {
+				r := httptest.NewRequest(method, path, nil)
+				r.Header.Set("Origin", origin)
+				r.Header.Set("Access-Control-Request-Method", "GET")
+				r.Header.Set("Access-Control-Request-Headers", "authorization")
+				if method != "OPTIONS" {
+					r.Header.Set("Authorization", "Bearer "+workerTestToken(printerClaims()))
+				}
+				w := httptest.NewRecorder()
+				cloud.ServeHTTP(w, r)
+				want := 401
+				if method == "GET" && (origin == "" || origin == "https://thelab.example") {
+					want = 200
+					if path != "/api/printers" {
+						want = 404
+					}
+				} else if method == "OPTIONS" && origin == "https://thelab.example" {
+					want = 204
+				}
+				if w.Code != want || w.Header().Get("Cache-Control") != "no-store" || w.Header().Get("Vary") != "Origin" {
+					t.Fatalf("%s %s origin=%q: %d %v", method, path, origin, w.Code, w.Header())
+				}
+				allowed := ""
+				if origin == "https://thelab.example" {
+					allowed = origin
+				}
+				if w.Header().Get("Access-Control-Allow-Origin") != allowed || w.Header().Get("Access-Control-Allow-Credentials") != "" {
+					t.Fatal("invalid CORS headers", w.Header())
+				}
+			}
+		}
+		for _, change := range []struct{ method, headers string }{{"PUT", "authorization"}, {"GET", "authorization, x-extra"}, {"GET", ""}} {
+			r := httptest.NewRequest("OPTIONS", path, nil)
+			r.Header.Set("Origin", "https://thelab.example")
+			r.Header.Set("Access-Control-Request-Method", change.method)
+			r.Header.Set("Access-Control-Request-Headers", change.headers)
+			w := httptest.NewRecorder()
+			cloud.ServeHTTP(w, r)
+			if w.Code != 401 || w.Header().Get("Access-Control-Allow-Methods") != "" {
+				t.Fatal("overbroad preflight accepted")
+			}
+		}
+		for _, change := range []struct {
+			key   string
+			value any
+		}{{"exp", time.Now().Unix()}, {"exp", time.Now().Unix() + 61}, {"scope", "edge:api"},
+			{"scope", "printers:read edge:api"}, {"sub", "edge-sync"}, {"aud", "https://evil.example"}, {"iss", "https://evil.example"}} {
+			claims := printerClaims()
+			claims[change.key] = change.value
+			w := request(cloud, "GET", path, "", "Authorization", "Bearer "+workerTestToken(claims), "Origin", "https://thelab.example")
+			if w.Code != 401 || w.Header().Get("Access-Control-Allow-Origin") != "https://thelab.example" {
+				t.Fatal("invalid token accepted or denial unreadable", path, change.key)
+			}
+		}
+		for _, token := range []string{"", workerTestToken(printerClaims()) + "x"} {
+			if request(cloud, "GET", path, "", "Authorization", "Bearer "+token).Code != 401 {
+				t.Fatal("invalid signature accepted")
+			}
+		}
+	}
+	for _, path := range []string{"/api/goal", "/api/kiosk/claim", "/api/printers/extra", "/api/printers/"} {
+		for _, method := range []string{"GET", "PUT", "OPTIONS"} {
+			w := request(cloud, method, path, "", "Authorization", "Bearer "+workerTestToken(printerClaims()), "Origin", "https://thelab.example")
+			if w.Code != 401 || w.Header().Get("Access-Control-Allow-Origin") != "" {
+				t.Fatal("printer scope escaped read routes", method, path)
+			}
+		}
+	}
+	e.workerAuth = nil
+	if request(cloud, "GET", "/api/printers", "", "Authorization", "Bearer "+workerTestToken(printerClaims())).Code != 401 {
+		t.Fatal("unconfigured status auth failed open")
 	}
 }

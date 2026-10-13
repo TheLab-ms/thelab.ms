@@ -143,21 +143,29 @@ func (e *edge) routes() (http.Handler, http.Handler) {
 	tunnel.HandleFunc("GET /machines/images/{image}", e.printers.snapshot)
 	return logRequests("lan", lan), logRequests("tunnel", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		if strings.HasPrefix(r.URL.Path, "/machines/images/") {
+		status := r.URL.Path == "/api/printers"
+		if status || strings.HasPrefix(r.URL.Path, "/machines/images/") {
 			w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive")
 			w.Header().Set("Referrer-Policy", "no-referrer")
 			w.Header().Set("X-Content-Type-Options", "nosniff")
 			w.Header().Set("Vary", "Origin")
+			if origin := r.Header.Get("Origin"); origin != "" && (e.workerAuth == nil || origin != e.workerAuth.issuer) {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
 			if e.workerAuth != nil && r.Header.Get("Origin") == e.workerAuth.issuer {
 				w.Header().Set("Access-Control-Allow-Origin", e.workerAuth.issuer)
-				if r.Method == http.MethodOptions {
+				if r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") == "GET" &&
+					strings.EqualFold(strings.TrimSpace(r.Header.Get("Access-Control-Request-Headers")), "Authorization") {
 					w.Header().Set("Access-Control-Allow-Methods", "GET")
 					w.Header().Set("Access-Control-Allow-Headers", "Authorization")
 					w.WriteHeader(http.StatusNoContent)
 					return
 				}
 			}
-			if r.Method != http.MethodGet || e.workerAuth.validateScopeAt(r, time.Now().Unix(), "printers:read") != nil {
+			// Keep privileged status reads compatible with an older Worker during rollout.
+			if r.Method != http.MethodGet || (e.workerAuth.validateScopeAt(r, time.Now().Unix(), "printers:read") != nil &&
+				!(status && e.workerAuth.verify(r))) {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}

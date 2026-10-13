@@ -344,10 +344,11 @@ export async function verifyToken(env, token, audience) {
   } catch { return null; }
 }
 
-export async function signedInMember(request, env) {
+export async function signedInMember(request, env, columns = '*') {
   const claims = await verifyToken(env, cookie(request, 'thelab_member'), 'member');
   if (!claims || typeof claims.member_id !== 'string' || !Number.isInteger(claims.auth_version)) return null;
-  return env.DB.prepare('SELECT * FROM members WHERE member_id = ? AND discord_user_id = ? AND auth_version = ?')
+  // Callers may project policy alongside identity in the same D1 snapshot.
+  return env.DB.prepare(`SELECT ${columns} FROM members WHERE member_id = ? AND discord_user_id = ? AND auth_version = ?`)
     .bind(claims.member_id, claims.sub, claims.auth_version).first();
 }
 

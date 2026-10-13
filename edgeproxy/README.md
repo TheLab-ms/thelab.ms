@@ -1,25 +1,34 @@
 # Printer monitoring
 
 The printer dashboard lives at **`https://thelab.ms/machines`** on the Worker.
-Discord sign-in is required. The page and every `/machines/data` refresh check
+Discord sign-in is required. The page and every `/machines/data` token request check
 the current D1 access policy: non-billable members, or legacy-billing / active /
-trialing members with a signed waiver. An assigned key fob is not required.
+trialing members with a signed waiver. Session identity and eligibility are read
+in one D1 query. An assigned key fob is not required. `/machines/data` returns
+only the edge origin and a scoped token, without contacting the edge.
 
 The tunnel listener exposes printer data, not dashboard HTML:
 
 - `GET /api/printers`: names, status, remaining time, report time, and image paths;
-  requires the Worker's privileged `edge:api` JWT. Credentials and LAN addresses
-  are never included. The Worker fetches this small JSON response every refresh.
+  accepts a `printers:read` JWT (and the Worker's privileged `edge:api` JWT for
+  rollout compatibility). Credentials, internal errors, and LAN addresses are
+  never included. Browsers fetch and validate this JSON directly from the edge.
 - `GET /machines/images/{serial}.jpg`: latest JPEG frame; requires a
   `printers:read` JWT in the Authorization header. Browsers fetch these directly
   from the edge and display blob URLs. The Worker never fetches image bytes.
-- Image CORS preflights allow `GET` and `Authorization` only from
-  `CONWAYEDGE_WORKER_ISSUER`. Image requests still require a valid token.
+- Status and image CORS preflights allow `GET` and `Authorization` only from
+  `CONWAYEDGE_WORKER_ISSUER`. Requests still require a valid token; requests with
+  another Origin are rejected. No cross-origin cookies are used.
 
-The Worker issues a new read-only image token after each successful eligibility
-check and status fetch. Tokens use the existing Ed25519 signing key and JWKS,
+The Worker issues a new read-only status/image token after each successful
+eligibility check. Visible tabs renew around **45 seconds**, while status and
+images refresh every **5 seconds**. Hidden tabs cancel in-flight requests and
+pause timers; on return they refresh immediately, renewing first when due or
+expired. Page lifecycle transitions clear images and prevent late responses
+from restoring stale content. Tokens use the existing Ed25519 signing key and JWKS,
 are audience-bound to the edge origin, and expire after **60 seconds**. Existing
-tokens can remain usable for that lifetime after membership access is revoked;
+tokens can remain usable for **at most 60 seconds** after membership or session
+access is revoked, for both status and images;
 further renewals are denied. Printer tokens cannot access goal or kiosk APIs.
 Tokens stay in browser memory and Authorization headers, never query strings or
 browser storage. Protected responses use `Cache-Control: no-store`.
@@ -32,17 +41,22 @@ browser storage. Protected responses use `Cache-Control: no-store`.
   (normally `https://thelab.ms`), including for CORS.
 - Reuse `EDGE_JWT_PRIVATE_KEY` and the Worker's `/.well-known/edge-jwks.json`.
   No new secrets or database migrations are required.
-- Deploy the rebuilt edge proxy, then the Worker. The old public edge dashboard
-  and its browser assets are removed; there is no compatibility redirect.
+- Deploy the rebuilt edge proxy first so `/api/printers` accepts scoped browser
+  tokens and CORS, then deploy the Worker and its matching static assets. The
+  edge retains privileged status reads for the previous Worker during rollout.
+  Already-open dashboards using the previous script need a page reload when
+  `/machines/data` switches to the token-only response.
 
 Verify that an eligible member can open `/machines`, that browser network tools
-show JPEG requests going directly to the edge with Bearer authorization, and that
-an unauthenticated image request returns `401`. Ineligible members receive `403`
-from the Worker. Status and frames refresh every five seconds; access denial
-clears the dashboard, and connection failures hide old images.
+show status JSON and JPEG requests going directly to the edge with Bearer
+authorization, with `/machines/data` called around every 45 seconds. Anonymous
+status/image requests return `401`; ineligible members receive `403` from the
+Worker. Verify hidden tabs stop requests and resume after token expiry. Access
+denial clears the dashboard; connection failures and expiry hide stale content.
 
 Run the browser tests from `site/` with `npm run test:browser`, the Worker tests
-with `npm test`, and edge tests from `edgeproxy/` with `go test ./...`.
+with `npm test`, and edge tests from `edgeproxy/` with `go test -race ./...` and
+`node --test app_test.mjs`.
 
 # Edge proxy kiosk
 

@@ -10,7 +10,7 @@ import {
 } from './services.js';
 import {
 	cleanupFobClaims, coordinated, createMember, edgeCall, edgeEnabled, fobClaim,
-	kickEdge, nightlyDate, registerMember, swipeWebhook, edgeRequest,
+	kickEdge, nightlyDate, registerMember, swipeWebhook,
 } from './membership.js';
 export { Membership, EdgeSync } from './membership.js';
 
@@ -533,7 +533,7 @@ export async function bindFob(request, env) {
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// Member-only printer dashboard; camera bytes travel directly from edge to browser
+// Member-only printer dashboard; status and images travel directly from edge to browser
 // ────────────────────────────────────────────────────────────────────────
 
 export function printerOrigin(env) {
@@ -546,30 +546,16 @@ export function printerOrigin(env) {
 
 export async function printerAccess(request, env) {
 	const data = new URL(request.url).pathname === '/machines/data';
-	const member = await signedInMember(request, env);
+	const member = await signedInMember(request, env, `member_id, COALESCE(${memberAccessSQL}, 0) AS printer_access`);
 	if (!member) {
 		if (data) throw new HttpError(401, 'Sign in again to view the printers.');
 		return startLogin(request, env, 'member');
 	}
-	const eligible = await env.DB.prepare(`SELECT member_id FROM members WHERE member_id = ?
-      AND discord_user_id = ? AND auth_version = ? AND ${memberAccessSQL}`)
-		.bind(member.member_id, member.discord_user_id, member.auth_version).first();
-	if (!eligible) throw new HttpError(403, 'An active membership with access eligibility is required to view the printers.');
+	if (!member.printer_access) throw new HttpError(403, 'An active membership with access eligibility is required to view the printers.');
 	const edge = printerOrigin(env);
-	if (data) {
-		const response = await edgeRequest(env, '/api/printers');
-		if (response.status !== 200) throw new HttpError(503, 'Machine status is temporarily unavailable.');
-		let cards;
-		try { cards = JSON.parse(response.text); } catch { /* Validate below. */ }
-		if (!Array.isArray(cards) || cards.length > 32 || cards.some(card => !card
-			|| ['Name', 'Status', 'Remaining', 'Updated', 'Image'].some(key => typeof card[key] !== 'string')
-			|| typeof card.Unavailable !== 'boolean'
-			|| !/^\/machines\/images\/[^/?#]+\.jpg$/.test(card.Image)
-			|| new URL(card.Image, edge).origin !== edge)) throw new HttpError(502, 'Invalid printer status response.');
-		return json({ cards, edge, token: await edgeToken(env, member.member_id) });
-	}
+	if (data) return json({ edge, token: await edgeToken(env, member.member_id) });
 	return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex, nofollow, noarchive"><title>Machines | TheLab</title><link rel="icon" href="/assets/favicon.svg"><link rel="stylesheet" href="/machines.css"><script src="/machines.js" defer></script></head>
-      <body><main id="dashboard"><header><a class="brand" href="/">THELAB</a><h1>Machines</h1><p>Check machine status and follow your 3D prints from wherever you are.</p><p id="refresh-status" role="status">Loading printers…</p><p id="access-help" hidden><a href="/machines">Sign in or check access again</a></p></header><noscript>Enable JavaScript to view printer status and camera images.</noscript><section id="printers" class="grid" aria-label="Printers"></section><footer class="muted">Remaining times are printer estimates. Status and still images refresh every 5 seconds.</footer></main></body></html>`, {
+      <body><main id="dashboard"><header><a class="brand" href="/">THELAB</a><h1>Machines</h1><p>Check machine status and follow your 3D prints from wherever you are.</p><p id="refresh-status" role="status">Loading printers…</p><p id="access-help" hidden><a href="/machines">Sign in or check access again</a></p></header><noscript>Enable JavaScript to view printer status and camera images.</noscript><section id="printers" class="grid" aria-label="Printers"></section><footer class="muted">Remaining times are printer estimates. Status and still images refresh every 5 seconds while this page is visible. Revoking membership access ends status and image access within 60 seconds.</footer></main></body></html>`, {
 		headers: {
 			'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
 			'X-Robots-Tag': 'noindex, nofollow, noarchive', 'X-Content-Type-Options': 'nosniff',

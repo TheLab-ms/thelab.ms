@@ -996,20 +996,13 @@ describe('Printer access', () => {
 	const api = (path = '/machines', session = cookie, bindings = config) => worker.fetch(new Request(`${config.SITE_URL}${path}`, {
 		headers: session ? { Cookie: session } : {},
 	}), bindings);
-	const card = { Name: '<script>Maker</script>', Status: 'Printing', Remaining: '2h 5m', Updated: 'Last report: 12:00:00 UTC', Image: '/machines/images/camera.jpg', Unavailable: false };
 	beforeEach(async () => {
 		await reset();
 		await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
 		member = await env.DB.prepare(`INSERT INTO members (discord_user_id, stripe_subscription_state, legacy_waiver_signed)
           VALUES ('333333333333333333', 'active', 1) RETURNING *`).first();
 		cookie = `thelab_member=${await memberToken(config, member)}`;
-		fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
-			expect(String(url)).toBe('https://edge.example/api/printers');
-			expect(init.redirect).toBe('manual');
-			const claims = JSON.parse(atob(init.headers.Authorization.split('.')[1].replaceAll('-', '+').replaceAll('_', '/')));
-			expect(claims.scope).toBe('edge:api');
-			return Response.json([card]);
-		});
+		fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Edge offline'));
 	});
 	afterEach(() => vi.restoreAllMocks());
 
@@ -1029,7 +1022,7 @@ describe('Printer access', () => {
 		expect(fetchSpy).not.toHaveBeenCalled();
 	});
 
-	it('serves the page locally and issues only read-only, verifiable 60-second image credentials', async () => {
+	it('serves the page locally and issues only read-only, verifiable 60-second status/image credentials', async () => {
 		const page = await api();
 		expect(page.status).toBe(200);
 		expect(page.headers.get('Location')).toBeNull();
@@ -1040,7 +1033,7 @@ describe('Printer access', () => {
 		const response = await api('/machines/data');
 		expect(response.headers.get('Cache-Control')).toBe('no-store');
 		const result = await response.json();
-		expect(result.cards).toEqual([card]);
+		expect(result).not.toHaveProperty('cards');
 		expect(result.edge).toBe(config.EDGE_URL);
 		const decode = value => Uint8Array.from(atob(value.replaceAll('-', '+').replaceAll('_', '/')), c => c.charCodeAt(0));
 		const [header, payload, signature] = result.token.split('.');
@@ -1050,7 +1043,7 @@ describe('Printer access', () => {
 		const jwks = await (await edgeJWKS(null, config)).json();
 		const key = await crypto.subtle.importKey('jwk', jwks.keys[0], 'Ed25519', false, ['verify']);
 		expect(await crypto.subtle.verify('Ed25519', key, decode(signature), new TextEncoder().encode(`${header}.${payload}`))).toBe(true);
-		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		expect(fetchSpy).not.toHaveBeenCalled();
 	});
 
 	it.each([
@@ -1073,7 +1066,7 @@ describe('Printer access', () => {
 		expect((await api('/machines/data')).status).toBe(403);
 		await env.DB.prepare('UPDATE members SET auth_version = auth_version + 1').run();
 		expect((await api('/machines/data')).status).toBe(401);
-		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		expect(fetchSpy).not.toHaveBeenCalled();
 	});
 
 	it('rejects admin sessions, expired sessions, and deleted member sessions', async () => {
@@ -1087,14 +1080,19 @@ describe('Printer access', () => {
 		expect(fetchSpy).not.toHaveBeenCalled();
 	});
 
-	it('fails closed on edge outages, redirects and malformed status without issuing credentials', async () => {
-		for (const response of [new Response(null, { status: 302 }), new Response(null, { status: 503 }), Response.json({}),
-			Response.json([{ ...card, Image: 'https://evil.example/frame.jpg' }])]) {
-			fetchSpy.mockResolvedValueOnce(response);
-			const result = await api('/machines/data');
-			expect(result.status).toBeGreaterThanOrEqual(500);
-			expect(await result.json()).not.toHaveProperty('token');
+	it('checks session identity and eligibility with one D1 query per page or token request', async () => {
+		const prepare = vi.fn(sql => env.DB.prepare(sql));
+		const bindings = { ...config, DB: { prepare } };
+		for (const path of ['/machines', '/machines/data']) {
+			prepare.mockClear();
+			expect((await api(path, cookie, bindings)).status).toBe(200);
+			expect(prepare).toHaveBeenCalledTimes(1);
+			expect(prepare.mock.calls[0][0]).toContain('AS printer_access');
 		}
+		prepare.mockClear();
+		expect((await api('/machines/data', null, bindings)).status).toBe(401);
+		expect(prepare).not.toHaveBeenCalled();
+		expect(fetchSpy).not.toHaveBeenCalled();
 	});
 
 	it('rejects unsafe or incomplete dashboard configuration', async () => {
