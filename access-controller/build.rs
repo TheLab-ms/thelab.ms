@@ -1,21 +1,24 @@
-//! Build script for compile-time configuration injection.
-//!
-//! Set environment variables before building to configure the firmware:
-//!
-//!   CONWAY_SSID=MyWiFi \
-//!   CONWAY_PASSWORD=secret123 \
-//!   CONWAY_HOST=192.168.1.68 \
-//!   CONWAY_PORT=8080 \
-//!   CONWAY_UNLOCK_SECRET=mysecret \
-//!   cargo build --release
-//!
-//! Or use the build.sh wrapper script.
+//! Validates the build-time network configuration (see network.env.example).
 
 fn main() {
-    // Re-run build script if these environment variables change
-    println!("cargo::rerun-if-env-changed=CONWAY_SSID");
-    println!("cargo::rerun-if-env-changed=CONWAY_PASSWORD");
-    println!("cargo::rerun-if-env-changed=CONWAY_HOST");
-    println!("cargo::rerun-if-env-changed=CONWAY_PORT");
-    println!("cargo::rerun-if-env-changed=CONWAY_UNLOCK_SECRET");
+    for var in [
+        "CONWAY_SSID",
+        "CONWAY_PASSWORD",
+        "CONWAY_HOST",
+        "CONWAY_PORT",
+    ] {
+        println!("cargo::rerun-if-env-changed={var}");
+    }
+    let require = |var: &str| {
+        std::env::var(var).unwrap_or_else(|_| panic!("{var} must be set; see network.env.example"))
+    };
+    require("CONWAY_SSID");
+    require("CONWAY_PASSWORD");
+    require("CONWAY_HOST")
+        .parse::<std::net::Ipv4Addr>()
+        .expect("CONWAY_HOST must be an IPv4 address");
+    let port = std::env::var("CONWAY_PORT").unwrap_or_else(|_| "8080".into());
+    port.parse::<u16>()
+        .expect("CONWAY_PORT must be a port number");
+    println!("cargo::rustc-env=CONWAY_PORT={port}");
 }

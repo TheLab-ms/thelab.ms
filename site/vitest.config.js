@@ -5,8 +5,8 @@ export default defineConfig(async () => ({
   plugins: [cloudflareTest({
     wrangler: { configPath: './wrangler.jsonc' },
     miniflare: {
+      // The test pool's bundled runtime trails Wrangler's; keep this within its supported range.
       compatibilityDate: '2026-08-15',
-      compatibilityFlags: ['nodejs_compat'],
       bindings: {
         SITE_URL: 'https://thelab.example',
         // Edge tests supply their own URL and signing key; other tests stay offline.
@@ -20,7 +20,6 @@ export default defineConfig(async () => ({
         DISCORD_ADMIN_ROLE_ID: '444444444444444444',
         STRIPE_SECRET_KEY: 'sk_test_fake',
         STRIPE_WEBHOOK_SECRET: 'whsec_fake',
-        TURNSTILE_SITE_KEY: 'test-site-key',
         TURNSTILE_SECRET_KEY: 'test-turnstile-secret',
         TEST_MIGRATIONS: await readD1Migrations('./migrations'),
       },

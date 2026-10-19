@@ -9,23 +9,9 @@
 			"invocation_logs": false
 		}
 	},
+	// Matching assets are served first; everything else reaches the Worker.
 	"assets": {
-		"directory": "static",
-		"binding": "ASSETS",
-		"run_worker_first": [
-			"/.well-known/edge-jwks.json",
-			"/admin",
-			"/admin/*",
-			"/signup",
-			"/waiver",
-			"/login/*",
-			"/payment/*",
-			"/machines",
-			"/machines/*",
-			"/kiosk",
-			"/keyfob/*",
-			"/webhooks/*"
-		]
+		"directory": "static"
 	},
 	"d1_databases": [
 		{
@@ -35,18 +21,7 @@
 			"database_id": "3e4bca68-f6db-4ef5-8e92-c80a38f02aa1"
 		}
 	],
-	"durable_objects": {
-		"bindings": [
-			{
-				"name": "MEMBERS",
-				"class_name": "Membership"
-			},
-			{
-				"name": "EDGE_SYNC",
-				"class_name": "EdgeSync"
-			}
-		]
-	},
+	// Durable Object history; no classes remain.
 	"migrations": [
 		{
 			"tag": "v1",
@@ -66,13 +41,20 @@
 			"deleted_classes": [
 				"Wiki"
 			]
+		},
+		{
+			"tag": "v4-remove-edge-sync",
+			"deleted_classes": [
+				"EdgeSync"
+			]
+		},
+		{
+			"tag": "v5-remove-membership",
+			"deleted_classes": [
+				"Membership"
+			]
 		}
 	],
-	"triggers": {
-		"crons": [
-			"0 7 * * *"
-		]
-	},
 	"secrets": {
 		"required": [
 			"AUTH_SECRET",
@@ -86,9 +68,7 @@
 	},
 	"vars": {
 		"SITE_URL": "https://thelab.ms",
-		"TURNSTILE_SITE_KEY": "0x4AAAAAAA-xMVuWzfkR2PKz",
 		"EDGE_URL": "https://edgeproxy.thelab.ms",
-		"EDGE_JWT_PUBLIC_KEYS": "[]",
 		"DISCORD_GUILD_ID": "690314626289631294",
 		"DISCORD_ROLE_ID": "1252789548073619458",
 		"DISCORD_ADMIN_ROLE_ID": "814154862777335876",

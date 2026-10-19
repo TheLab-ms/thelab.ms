@@ -4,14 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
-	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
-	_ "embed"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -22,16 +19,13 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
-	qrcode "github.com/skip2/go-qrcode"
 	_ "modernc.org/sqlite"
 )
 
@@ -40,84 +34,33 @@ import (
 // ────────────────────────────────────────────────────────────────────────
 
 func main() {
-	if err := run(); err != nil {
-		log.Fatal(err)
-	}
-}
-
-func run() error {
-	lan := flag.String("lan", ":80", "LAN controller/config listen address")
-	tunnel := flag.String("tunnel", ":8080", "cloudflared origin listen address (loopback or trusted subnet)")
+	lan := flag.String("lan", ":80", "LAN listen address (controllers, kiosk, printer configuration)")
+	tunnel := flag.String("tunnel", ":8080", "cloudflared origin listen address (Worker and printer APIs)")
 	data := flag.String("data", "/data", "persistent data directory (one process only)")
 	flag.Parse()
-	log.Printf("edge proxy starting data=%q", *data)
-	e, err := openEdge(*data)
+	auth, err := newWorkerAuth(os.Getenv("CONWAYEDGE_WORKER_ISSUER"), os.Getenv("CONWAYEDGE_PUBLIC_URL"))
 	if err != nil {
-		return err
+		log.Fatal(err)
 	}
-	defer e.close()
-	e.workerAuth, err = loadWorkerAuth(os.Getenv("CONWAYEDGE_WORKER_ISSUER"), os.Getenv("CONWAYEDGE_PUBLIC_URL"))
+	e, err := openEdge(*data, auth)
 	if err != nil {
-		return err
+		log.Fatal(err)
 	}
-	e.signingKey, err = loadSigningSeed(os.Getenv("CONWAYEDGE_SIGNING_SEED"))
-	if err != nil {
-		return err
-	}
-	log.Printf("edge proxy authentication configured worker=%t fob_signing=%t", e.workerAuth != nil, e.signingKey != nil)
 	lanHandler, tunnelHandler := e.routes()
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	go e.workerAuth.run(ctx)
-	senderDone := make(chan struct{})
-	go func() {
-		defer close(senderDone)
-		e.runSwipeSender(ctx)
-	}()
-	defer func() { stop(); <-senderDone }()
-	local, err := net.Listen("tcp", *lan)
-	if err != nil {
-		return err
-	}
-	defer local.Close()
-	cloud, err := net.Listen("tcp", *tunnel)
-	if err != nil {
-		return err
-	}
-	defer cloud.Close()
-	// The tunnel listener may bind a trusted subnet for a separate cloudflared
-	// host. Firewall it to that host; machine APIs also verify Worker JWTs.
-	errors := make(chan error, 2)
-	for _, endpoint := range []struct {
-		listener net.Listener
-		handler  http.Handler
-	}{{local, lanHandler}, {cloud, tunnelHandler}} {
-		server := &http.Server{
-			Handler:           endpoint.handler,
-			ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
-			WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
-			MaxHeaderBytes: 16 << 10,
-			BaseContext:    func(net.Listener) context.Context { return ctx },
-		}
-		defer func() {
-			shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := server.Shutdown(shutdown); err != nil {
-				_ = server.Close()
-			}
-		}()
-		go func() { errors <- server.Serve(endpoint.listener) }()
-		log.Printf("listening on %s", endpoint.listener.Addr())
-	}
-	select {
-	case <-ctx.Done():
-		log.Printf("edge proxy shutting down: %v", ctx.Err())
-		return nil
-	case err := <-errors:
-		log.Printf("edge proxy listener stopped: %v", err)
-		stop()
-		return err
-	}
+	go e.run(context.Background())
+	errs := make(chan error, 2)
+	go func() { errs <- serve(*lan, lanHandler) }()
+	go func() { errs <- serve(*tunnel, tunnelHandler) }()
+	// SQLite commits are durable and swipe IDs make uploads idempotent, so an
+	// abrupt exit loses nothing.
+	log.Fatal(<-errs)
+}
+
+func serve(addr string, handler http.Handler) error {
+	log.Printf("listening on %s", addr)
+	server := &http.Server{Addr: addr, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
+		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
+	return server.ListenAndServe()
 }
 
 func secretEqual(a, b string) bool {
@@ -127,371 +70,161 @@ func secretEqual(a, b string) bool {
 
 func (e *edge) routes() (http.Handler, http.Handler) {
 	lan, tunnel := http.NewServeMux(), http.NewServeMux()
-	lan.HandleFunc("POST /api/fobs", e.fobs)
-	for _, path := range []string{"/kiosk", "/kiosk/app.js", "/kiosk/style.css", "/kiosk/favicon.svg"} {
-		lan.HandleFunc("GET "+path, kioskAsset)
+	lan.HandleFunc("POST /api/fobs", e.controller)
+	lan.HandleFunc("/{$}", e.configure)
+	// Only these exact paths are forwarded with the edge credential.
+	for _, route := range []string{"GET /kiosk", "GET /kiosk/app.js", "GET /kiosk/style.css", "GET /assets/favicon.svg", "POST /kiosk/claims"} {
+		lan.HandleFunc(route, e.kiosk)
 	}
-	lan.HandleFunc("POST /kiosk/claims", e.issueKioskClaim)
-	lan.HandleFunc("/{$}", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "no-store")
-		e.configure(w, r)
-	})
-	tunnel.HandleFunc("PUT /api/goal", e.goal)
-	tunnel.HandleFunc("GET /api/goal", e.getGoal)
-	tunnel.HandleFunc("GET /api/kiosk/claim", e.getKioskClaim)
+	tunnel.HandleFunc("PUT /api/fobs", e.putFobs)
 	tunnel.HandleFunc("GET /api/printers", e.printers.status)
 	tunnel.HandleFunc("GET /machines/images/{image}", e.printers.snapshot)
-	return logRequests("lan", lan), logRequests("tunnel", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return lan, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		status := r.URL.Path == "/api/printers"
-		if status || strings.HasPrefix(r.URL.Path, "/machines/images/") {
-			w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive")
-			w.Header().Set("Referrer-Policy", "no-referrer")
-			w.Header().Set("X-Content-Type-Options", "nosniff")
-			w.Header().Set("Vary", "Origin")
-			if origin := r.Header.Get("Origin"); origin != "" && (e.workerAuth == nil || origin != e.workerAuth.issuer) {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		scope := "edge:api"
+		if r.URL.Path == "/api/printers" || strings.HasPrefix(r.URL.Path, "/machines/images/") {
+			// Browsers read printer data directly with short-lived member tokens.
+			scope = "printers:read"
+			w.Header().Set("Access-Control-Allow-Origin", e.auth.issuer)
+			if r.Method == http.MethodOptions {
+				w.Header().Set("Access-Control-Allow-Methods", "GET")
+				w.Header().Set("Access-Control-Allow-Headers", "Authorization")
+				w.WriteHeader(http.StatusNoContent)
 				return
 			}
-			if e.workerAuth != nil && r.Header.Get("Origin") == e.workerAuth.issuer {
-				w.Header().Set("Access-Control-Allow-Origin", e.workerAuth.issuer)
-				if r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") == "GET" &&
-					strings.EqualFold(strings.TrimSpace(r.Header.Get("Access-Control-Request-Headers")), "Authorization") {
-					w.Header().Set("Access-Control-Allow-Methods", "GET")
-					w.Header().Set("Access-Control-Allow-Headers", "Authorization")
-					w.WriteHeader(http.StatusNoContent)
-					return
-				}
-			}
-			// Keep privileged status reads compatible with an older Worker during rollout.
-			if r.Method != http.MethodGet || (e.workerAuth.validateScopeAt(r, time.Now().Unix(), "printers:read") != nil &&
-				!(status && e.workerAuth.verify(r))) {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-		} else if !e.workerAuth.verify(r) {
+		}
+		if !e.auth.verify(r, scope) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		tunnel.ServeHTTP(w, r)
-	}))
-}
-
-// ────────────────────────────────────────────────────────────────────────
-// Request logging
-// ────────────────────────────────────────────────────────────────────────
-
-type requestLogWriter struct {
-	http.ResponseWriter
-	status, bytes int
-}
-
-// Preserve ResponseController support, including camera write deadlines.
-func (w *requestLogWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
-
-func (w *requestLogWriter) WriteHeader(status int) {
-	if w.status != 0 {
-		return
-	}
-	if status >= 200 || status == http.StatusSwitchingProtocols {
-		w.status = status
-	}
-	w.ResponseWriter.WriteHeader(status)
-}
-
-func (w *requestLogWriter) Write(body []byte) (int, error) {
-	if w.status == 0 {
-		w.WriteHeader(http.StatusOK)
-	}
-	n, err := w.ResponseWriter.Write(body)
-	w.bytes += n
-	return n, err
-}
-
-func logRequests(listener string, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		response := &requestLogWriter{ResponseWriter: w}
-		completed := false
-		defer func() {
-			status := response.status
-			if status == 0 && completed {
-				status = http.StatusOK
-			}
-			// Queries, headers, and bodies can contain credentials or controller data.
-			log.Printf("HTTP request listener=%s method=%q path=%q remote=%q status=%d bytes=%d duration=%s completed=%t",
-				listener, r.Method, r.URL.EscapedPath(), r.RemoteAddr, status, response.bytes, time.Since(start), completed)
-		}()
-		next.ServeHTTP(response, r)
-		completed = true
 	})
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// Worker authentication and key refresh
+// Worker authentication
 // ────────────────────────────────────────────────────────────────────────
 
-const workerKeyRefresh = 5 * time.Minute
-const workerKeyMaxAge = time.Hour
-const workerKeyRetry = 5 * time.Second
-const workerKeyRetryMax = time.Minute
-const workerClockSkew = int64(5) // Seconds; expiration and the 60-second lifetime remain strict.
+const (
+	keyRefresh = 5 * time.Minute // Refetch keys this often while in use.
+	keyRetry   = time.Minute     // Minimum time between key downloads.
+	keyMaxAge  = time.Hour       // Stop trusting keys that cannot be refreshed.
+)
+
+var clock = time.Now // Replaced by tests that verify fixed tokens.
 
 type workerAuth struct {
 	issuer, audience   string
+	client             *http.Client
 	mu                 sync.Mutex
 	keys               map[string]ed25519.PublicKey
-	expires, attempted time.Time
-	client             *http.Client
+	fetched, attempted time.Time
 }
 
-func loadWorkerAuth(issuer, audience string) (*workerAuth, error) {
-	if issuer == "" && audience == "" {
-		return nil, nil
-	}
+func newWorkerAuth(issuer, audience string) (*workerAuth, error) {
 	for _, value := range []string{issuer, audience} {
 		u, err := url.Parse(value)
-		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || value != "https://"+u.Host {
-			return nil, fmt.Errorf("Worker issuer and public URL must be HTTPS origins without trailing slashes")
+		if err != nil || u.Scheme != "https" || u.Host == "" || value != "https://"+u.Host {
+			return nil, errors.New("CONWAYEDGE_WORKER_ISSUER and CONWAYEDGE_PUBLIC_URL must be HTTPS origins without trailing slashes")
 		}
 	}
 	return &workerAuth{issuer: issuer, audience: audience, client: &http.Client{
-		Timeout:       5 * time.Second,
+		Timeout:       10 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}}, nil
 }
 
-// Caller holds mu. Failures never extend the last successful key set's lifetime.
-func (a *workerAuth) refresh(ctx context.Context) (err error) {
-	a.attempted = time.Now()
-	log.Printf("Worker JWKS download started issuer=%q", a.issuer)
-	defer func() {
-		if err != nil {
-			if ctx.Err() == nil {
-				log.Printf("Worker JWKS download failed issuer=%q duration=%s error=%q", a.issuer, time.Since(a.attempted), err)
-			}
+// key downloads the Worker's JWKS on demand: when the cache is old or an
+// unknown key ID appears (for example after rotation), at most once a minute.
+func (a *workerAuth) key(kid string) ed25519.PublicKey {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if (a.keys[kid] == nil || time.Since(a.fetched) > keyRefresh) && time.Since(a.attempted) >= keyRetry {
+		a.attempted = time.Now()
+		if keys, err := a.download(); err != nil {
+			log.Printf("Worker JWKS download failed: %v", err)
 		} else {
-			log.Printf("Worker JWKS download succeeded issuer=%q keys=%d duration=%s", a.issuer, len(a.keys), time.Since(a.attempted))
-		}
-	}()
-	req, err := http.NewRequestWithContext(ctx, "GET", a.issuer+"/.well-known/edge-jwks.json", nil)
-	if err != nil {
-		return err
-	}
-	response, err := a.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("JWKS returned %d", response.StatusCode)
-	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, 65537))
-	if err != nil {
-		return err
-	}
-	if len(body) > 65536 {
-		return fmt.Errorf("JWKS too large")
-	}
-	var jwks struct {
-		Keys []struct{ Kid, Kty, Crv, Alg, Use, X string } `json:"keys"`
-	}
-	if json.Unmarshal(body, &jwks) != nil || jwks.Keys == nil || len(jwks.Keys) > 32 {
-		return fmt.Errorf("invalid JWKS")
-	}
-	keys := make(map[string]ed25519.PublicKey)
-	for _, key := range jwks.Keys {
-		if key.Kty != "OKP" || key.Crv != "Ed25519" || key.Alg != "EdDSA" || key.Use != "sig" || key.Kid == "" {
-			continue
-		}
-		x, err := base64.RawURLEncoding.Strict().DecodeString(key.X)
-		if err != nil || len(x) != ed25519.PublicKeySize || keys[key.Kid] != nil {
-			return fmt.Errorf("invalid or duplicate JWKS key")
-		}
-		keys[key.Kid] = ed25519.PublicKey(x)
-	}
-	// An empty key set deliberately revokes all keys.
-	a.keys, a.expires = keys, time.Now().Add(workerKeyMaxAge)
-	return nil
-}
-
-func (a *workerAuth) refreshKeys(ctx context.Context) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.refresh(ctx)
-}
-
-func (a *workerAuth) run(ctx context.Context) {
-	a.runRefresh(ctx, workerKeyRefresh)
-}
-
-func (a *workerAuth) runRefresh(ctx context.Context, interval time.Duration) {
-	if a == nil {
-		return
-	}
-	timer := time.NewTimer(0)
-	defer timer.Stop()
-	retry := workerKeyRetry
-	for ctx.Err() == nil {
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-			if ctx.Err() != nil {
-				return
-			}
-			delay := interval
-			if err := a.refreshKeys(ctx); err != nil {
-				delay = retry
-				retry = min(retry*2, workerKeyRetryMax)
-				if ctx.Err() == nil {
-					log.Printf("Worker JWKS retry scheduled in=%s", delay)
-				}
-			} else {
-				retry = workerKeyRetry
-			}
-			timer.Reset(delay)
+			a.keys, a.fetched = keys, a.attempted
 		}
 	}
-}
-
-func (a *workerAuth) key(ctx context.Context, kid string) ed25519.PublicKey {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if (a.keys[kid] == nil || !time.Now().Before(a.expires)) && time.Since(a.attempted) >= time.Minute {
-		_ = a.refresh(ctx)
-	}
-	if !time.Now().Before(a.expires) {
+	if time.Since(a.fetched) > keyMaxAge {
 		return nil
 	}
 	return a.keys[kid]
 }
 
-func (a *workerAuth) verify(r *http.Request) bool {
-	return a.verifyAt(r, time.Now().Unix())
-}
-
-func (a *workerAuth) verifyAt(r *http.Request, now int64) bool {
-	if err := a.validateAt(r, now); err != nil {
-		log.Printf("Worker authentication rejected method=%q path=%q reason=%q", r.Method, r.URL.EscapedPath(), err)
-		return false
-	}
-	return true
-}
-
-func (a *workerAuth) validateAt(r *http.Request, now int64) error {
-	return a.validateScopeAt(r, now, "edge:api")
-}
-
-func (a *workerAuth) validateScopeAt(r *http.Request, now int64, scope string) error {
-	if a == nil {
-		return fmt.Errorf("Worker authentication is not configured")
-	}
-	values := r.Header.Values("Authorization")
-	if len(values) != 1 || len(values[0]) > 4096 || !strings.HasPrefix(values[0], "Bearer ") {
-		return fmt.Errorf("missing or invalid Bearer authorization")
-	}
-	parts := strings.Split(strings.TrimPrefix(values[0], "Bearer "), ".")
-	if len(parts) != 3 {
-		return fmt.Errorf("malformed JWT")
-	}
-	decode := base64.RawURLEncoding.Strict().DecodeString
-	header, err := decode(parts[0])
+func (a *workerAuth) download() (map[string]ed25519.PublicKey, error) {
+	response, err := a.client.Get(a.issuer + "/.well-known/edge-jwks.json")
 	if err != nil {
-		return fmt.Errorf("malformed JWT header encoding")
+		return nil, err
 	}
-	var metadata struct{ Alg, Typ, Kid string }
-	if decodeJSON(header, &metadata) != nil || metadata.Alg != "EdDSA" || metadata.Typ != "JWT" || metadata.Kid == "" {
-		return fmt.Errorf("unsupported or malformed JWT header")
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("JWKS returned %d", response.StatusCode)
 	}
-	key := a.key(r.Context(), metadata.Kid)
-	if key == nil {
-		return fmt.Errorf("signing key unavailable (unknown key ID or expired JWKS cache)")
+	var jwks struct {
+		Keys []struct{ Kid, Kty, Crv, X string }
 	}
-	sig, err := decode(parts[2])
-	if err != nil || !ed25519.Verify(key, []byte(parts[0]+"."+parts[1]), sig) {
-		return fmt.Errorf("invalid JWT signature")
+	if err := json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&jwks); err != nil {
+		return nil, err
 	}
-	payload, err := decode(parts[1])
-	if err != nil {
-		return fmt.Errorf("malformed JWT payload encoding")
-	}
-	var claims struct {
-		Issuer    string `json:"iss"`
-		Audience  string `json:"aud"`
-		Subject   string `json:"sub"`
-		Scope     string `json:"scope"`
-		Issued    int64  `json:"iat"`
-		Expires   int64  `json:"exp"`
-		NotBefore int64  `json:"nbf"`
-	}
-	if json.Unmarshal(payload, &claims) != nil {
-		return fmt.Errorf("malformed JWT claims")
-	}
-	// Only report claim values after signature verification. Never log the token.
-	if claims.Issuer != a.issuer {
-		return fmt.Errorf("issuer mismatch: got %q, want CONWAYEDGE_WORKER_ISSUER=%q (Worker SITE_URL)", claims.Issuer, a.issuer)
-	}
-	if claims.Audience != a.audience {
-		return fmt.Errorf("audience mismatch: got %q, want CONWAYEDGE_PUBLIC_URL=%q (Worker EDGE_URL)", claims.Audience, a.audience)
-	}
-	if claims.Scope != scope || (scope == "edge:api" && claims.Subject != "edge-sync") ||
-		(scope == "printers:read" && !validMemberSubject(claims.Subject)) {
-		return fmt.Errorf("invalid JWT subject or scope")
-	}
-	if claims.Issued <= 0 || claims.Expires <= claims.Issued || claims.Expires-claims.Issued > 60 {
-		return fmt.Errorf("invalid JWT lifetime: iat=%d exp=%d", claims.Issued, claims.Expires)
-	}
-	if claims.Issued > now+workerClockSkew || claims.NotBefore > now+workerClockSkew {
-		return fmt.Errorf("JWT is not yet valid; check edge clock: now=%d iat=%d nbf=%d skew_allowance=%ds", now, claims.Issued, claims.NotBefore, workerClockSkew)
-	}
-	if claims.Expires <= now {
-		return fmt.Errorf("JWT expired; check edge clock or request delay: now=%d exp=%d", now, claims.Expires)
-	}
-	return nil
-}
-
-func validMemberSubject(subject string) bool {
-	if len(subject) != 32 {
-		return false
-	}
-	for _, c := range subject {
-		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
-			return false
+	keys := make(map[string]ed25519.PublicKey)
+	for _, key := range jwks.Keys {
+		x, err := base64.RawURLEncoding.DecodeString(key.X)
+		if err == nil && key.Kty == "OKP" && key.Crv == "Ed25519" && key.Kid != "" && len(x) == ed25519.PublicKeySize {
+			keys[key.Kid] = x
 		}
 	}
-	return true
+	return keys, nil
+}
+
+// verify accepts only a Worker-signed EdDSA JWT for this edge, with the given
+// scope and a lifetime of at most 60 seconds.
+func (a *workerAuth) verify(r *http.Request, scope string) bool {
+	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	parts := strings.Split(token, ".")
+	if !ok || len(token) > 4096 || len(parts) != 3 {
+		return false
+	}
+	var header struct{ Alg, Kid string }
+	var claims struct {
+		Iss, Aud, Scope string
+		Iat, Exp        int64
+	}
+	if decodeSegment(parts[0], &header) != nil || header.Alg != "EdDSA" {
+		return false
+	}
+	key := a.key(header.Kid)
+	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if key == nil || err != nil || !ed25519.Verify(key, []byte(parts[0]+"."+parts[1]), signature) || decodeSegment(parts[1], &claims) != nil {
+		return false
+	}
+	now := clock().Unix()
+	// Allow five seconds of clock skew for issue time; expiry stays strict.
+	return claims.Iss == a.issuer && claims.Aud == a.audience && claims.Scope == scope &&
+		claims.Iat <= now+5 && claims.Exp > now && claims.Exp-claims.Iat <= 60
+}
+
+func decodeSegment(segment string, value any) error {
+	data, err := base64.RawURLEncoding.DecodeString(segment)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, value)
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// SQLite state and transactions
+// SQLite state
 // ────────────────────────────────────────────────────────────────────────
-
-const swipeRetention = 7 * 24 * time.Hour
-
-var (
-	errGoalConflict = errors.New("older or conflicting goal version")
-	errNoGoal       = errors.New("no goal received yet")
-)
-
-type edge struct {
-	db         *sql.DB
-	configMu   sync.Mutex // Orders configuration commits and printer lifecycle changes.
-	config     []printerConfig
-	csrf       string
-	printers   printerSet
-	signingKey ed25519.PrivateKey
-	workerAuth *workerAuth
-	swipeWake  chan struct{}
-}
 
 const schema = `
-CREATE TABLE IF NOT EXISTS goal (
+CREATE TABLE IF NOT EXISTS access (
   singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-  version INTEGER NOT NULL CHECK (version BETWEEN 0 AND 9007199254740991),
-  fobs TEXT NOT NULL
+  revision INTEGER NOT NULL,
+  fobs TEXT NOT NULL,
+  key TEXT NOT NULL
 );
-DROP TABLE IF EXISTS goal_patch;
 CREATE TABLE IF NOT EXISTS printer_config (
   singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
   config TEXT NOT NULL
@@ -502,22 +235,29 @@ CREATE TABLE IF NOT EXISTS swipes (
   id TEXT NOT NULL UNIQUE,
   time INTEGER NOT NULL,
   controller TEXT NOT NULL,
-  fob INTEGER NOT NULL CHECK (fob BETWEEN 1 AND 4294967295),
-  allowed INTEGER NOT NULL CHECK (allowed IN (0, 1))
+  fob INTEGER NOT NULL,
+  allowed INTEGER NOT NULL
 );
-DROP INDEX IF EXISTS pending_swipes;
-DROP INDEX IF EXISTS swipe_history;
-CREATE INDEX IF NOT EXISTS swipe_expiry ON swipes(time);
-CREATE TABLE IF NOT EXISTS kiosk_claims (
-  id TEXT PRIMARY KEY,
-  fob INTEGER NOT NULL CHECK (fob BETWEEN 1 AND 4294967295),
-  created INTEGER NOT NULL,
-  expires INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS kiosk_claim_expiry ON kiosk_claims(expires);
+DROP TABLE IF EXISTS goal;
+DROP TABLE IF EXISTS goal_patch;
+DROP TABLE IF EXISTS kiosk_claims;
 `
 
-func openEdge(dir string) (*edge, error) {
+type edge struct {
+	db       *sql.DB
+	auth     *workerAuth
+	client   *http.Client // Outbound requests to the Worker.
+	configMu sync.Mutex   // Orders configuration commits and printer lifecycle changes.
+	config   []printerConfig
+	csrf     string
+	printers printerSet
+	wake     chan struct{}
+	syncMu   sync.Mutex
+	// In memory, so every restart starts out of date and requests a sync.
+	lastPush, lastSyncRequest time.Time
+}
+
+func openEdge(dir string, auth *workerAuth) (*edge, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}
@@ -533,80 +273,29 @@ func openEdge(dir string) (*edge, error) {
 	if err := f.Close(); err != nil {
 		return nil, err
 	}
-	u := url.URL{Scheme: "file", Path: path}
-	q := url.Values{"_pragma": {"journal_mode(WAL)", "synchronous(FULL)", "busy_timeout(5000)"}}
-	u.RawQuery = q.Encode()
+	u := url.URL{Scheme: "file", Path: path, RawQuery: url.Values{"_pragma": {"journal_mode(WAL)", "synchronous(FULL)", "busy_timeout(5000)"}}.Encode()}
 	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	e := &edge{db: db, csrf: rand.Text(), swipeWake: make(chan struct{}, 1)}
-	if err := e.initialize(); err != nil {
+	e := &edge{db: db, auth: auth, csrf: rand.Text(), wake: make(chan struct{}, 1), client: &http.Client{
+		Timeout:       20 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}}
+	var data []byte
+	if _, err = db.Exec(schema); err == nil {
+		err = db.QueryRow("SELECT config FROM printer_config").Scan(&data)
+	}
+	if err == nil {
+		e.config, err = parsePrinters(data)
+	}
+	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("open edge database: %w", err)
 	}
 	e.printers.replace(e.config)
 	return e, nil
-}
-
-func (e *edge) initialize() error {
-	return e.transaction(context.Background(), func(tx *sql.Tx) error {
-		if _, err := tx.Exec(schema); err != nil {
-			return err
-		}
-		// Upgrade the acknowledgment-based store without changing retained events.
-		var acknowledged int
-		if err := tx.QueryRow("SELECT count(*) FROM pragma_table_info('swipes') WHERE name = 'acknowledged'").Scan(&acknowledged); err != nil {
-			return err
-		}
-		if acknowledged != 0 {
-			if _, err := tx.Exec("ALTER TABLE swipes DROP COLUMN acknowledged"); err != nil {
-				return err
-			}
-		}
-		// New and upgraded stores enqueue all retained history for idempotent delivery.
-		for _, column := range []struct{ table, name, definition string }{
-			{"goal", "event_signing_key", "TEXT NOT NULL DEFAULT ''"},
-			{"swipes", "delivered", "INTEGER NOT NULL DEFAULT 0 CHECK (delivered IN (0, 1))"},
-		} {
-			var count int
-			if err := tx.QueryRow("SELECT count(*) FROM pragma_table_info(?) WHERE name = ?", column.table, column.name).Scan(&count); err != nil {
-				return err
-			}
-			if count == 0 {
-				if _, err := tx.Exec("ALTER TABLE " + column.table + " ADD COLUMN " + column.name + " " + column.definition); err != nil {
-					return err
-				}
-			}
-		}
-		if _, err := tx.Exec("CREATE INDEX IF NOT EXISTS swipe_outbox ON swipes(sequence) WHERE delivered = 0"); err != nil {
-			return err
-		}
-		var data []byte
-		if err := tx.QueryRow("SELECT config FROM printer_config WHERE singleton = 1").Scan(&data); err != nil {
-			return err
-		}
-		var err error
-		e.config, err = parsePrinters(data)
-		if err != nil {
-			return err
-		}
-		err = tx.QueryRow("SELECT fobs FROM goal WHERE singleton = 1").Scan(&data)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		if err == nil {
-			canonical, err := normalizeGoal(data)
-			if err != nil {
-				return err
-			}
-			if !bytes.Equal(data, canonical) {
-				return fmt.Errorf("stored goal is not canonical JSON")
-			}
-		}
-		return pruneSwipes(tx)
-	})
 }
 
 func (e *edge) close() {
@@ -616,38 +305,177 @@ func (e *edge) close() {
 	_ = e.db.Close()
 }
 
-func (e *edge) transaction(ctx context.Context, fn func(*sql.Tx) error) error {
-	tx, err := e.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
+func readJSON(w http.ResponseWriter, r *http.Request, value any, limit int64) bool {
+	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
+	d.DisallowUnknownFields()
+	if err := d.Decode(value); err != nil || d.Decode(new(any)) != io.EOF {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return false
 	}
-	defer tx.Rollback()
-	if err := fn(tx); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return true
 }
 
-func (e *edge) storeGoal(ctx context.Context, version int64, body []byte, eventKey string) error {
-	result, err := e.db.ExecContext(ctx, `INSERT INTO goal(singleton, version, fobs, event_signing_key) VALUES (1, ?, ?, ?)
-ON CONFLICT(singleton) DO UPDATE SET version = excluded.version, fobs = excluded.fobs, event_signing_key = excluded.event_signing_key
-WHERE excluded.version > goal.version OR (excluded.version = goal.version AND excluded.fobs = goal.fobs AND excluded.event_signing_key = goal.event_signing_key)`, version, string(body), eventKey)
-	if err != nil {
-		return err
-	}
-	n, err := result.RowsAffected()
-	if err == nil && n == 0 {
-		return errGoalConflict
-	}
-	if err == nil {
-		e.wakeSwipes()
-	}
-	return err
+func storageError(w http.ResponseWriter, err error) {
+	log.Printf("storage: %v", err)
+	http.Error(w, "storage unavailable; retry later", http.StatusInternalServerError)
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Door controllers and the authorized fob list
+// ────────────────────────────────────────────────────────────────────────
 
 type controllerSwipe struct {
 	Fob     uint32 `json:"fob"`
-	Allowed bool   `json:"allowed"`
+	Allowed *bool  `json:"allowed"`
+}
+
+// controller stores a batch of swipes and returns the authorized fob list.
+// Success (including 304) is sent only after the batch commits.
+func (e *edge) controller(w http.ResponseWriter, r *http.Request) {
+	var raw []json.RawMessage
+	// A compact batch of 512 swipes with maximum uint32 IDs exceeds 16 KiB.
+	if !readJSON(w, r, &raw, 32<<10) {
+		return
+	}
+	if raw == nil || len(raw) > 512 {
+		http.Error(w, "expected an array of at most 512 swipes", http.StatusBadRequest)
+		return
+	}
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	// A controller cannot fix a swipe it already recorded, so rejecting the
+	// batch would only stall its fob list. Drop invalid swipes instead.
+	input := make([]controllerSwipe, 0, len(raw))
+	for _, message := range raw {
+		var event controllerSwipe
+		d := json.NewDecoder(bytes.NewReader(message))
+		d.DisallowUnknownFields()
+		if d.Decode(&event) == nil && event.Fob != 0 && event.Allowed != nil {
+			input = append(input, event)
+		}
+	}
+	tx, err := e.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		storageError(w, err)
+		return
+	}
+	defer tx.Rollback()
+	var fobs []byte
+	if err := tx.QueryRow("SELECT fobs FROM access").Scan(&fobs); errors.Is(err, sql.ErrNoRows) {
+		// The controller keeps its cached list and its unsent swipes.
+		http.Error(w, "waiting for the first fob list from the Worker", http.StatusServiceUnavailable)
+		return
+	} else if err != nil {
+		storageError(w, err)
+		return
+	}
+	now := time.Now().UnixNano()
+	for _, event := range input {
+		if _, err := tx.Exec("INSERT INTO swipes(id, time, controller, fob, allowed) VALUES (?, ?, ?, ?, ?)", rand.Text(), now, ip, event.Fob, *event.Allowed); err != nil {
+			storageError(w, err)
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		storageError(w, err)
+		return
+	}
+	if dropped := len(raw) - len(input); dropped > 0 {
+		log.Printf("controller %s: dropped %d invalid swipes", ip, dropped)
+	}
+	if len(input) > 0 {
+		e.wakeSender()
+	}
+	var ids []uint32
+	_ = json.Unmarshal(fobs, &ids)
+	// Firmware hashes decimal IDs followed by commas, not the JSON response.
+	hash := sha256.New()
+	for _, id := range ids {
+		fmt.Fprintf(hash, "%d,", id)
+	}
+	etag := fmt.Sprintf("%x", hash.Sum(nil))
+	w.Header().Set("Cache-Control", "no-store")
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("ETag", etag)
+	// Firmware does not decode chunked transfer encoding.
+	w.Header().Set("Content-Length", strconv.Itoa(len(fobs)))
+	_, _ = w.Write(fobs)
+}
+
+// putFobs accepts the Worker's authorized fob list. Revisions come from D1 and
+// only move forward, so concurrent or reordered pushes cannot regress the list.
+func (e *edge) putFobs(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Revision *int64   `json:"revision"`
+		Fobs     []uint32 `json:"fobs"`
+		Key      string   `json:"key"`
+	}
+	if !readJSON(w, r, &input, 16<<10) {
+		return
+	}
+	if input.Revision == nil || *input.Revision < 0 || input.Fobs == nil || len(input.Fobs) > 512 || slices.Contains(input.Fobs, 0) ||
+		len(input.Key) != 64 || strings.Trim(input.Key, "0123456789abcdef") != "" {
+		http.Error(w, "expected a nonnegative revision, at most 512 nonzero fobs, and a 64-character hex key", http.StatusBadRequest)
+		return
+	}
+	slices.Sort(input.Fobs)
+	fobs, _ := json.Marshal(slices.Compact(input.Fobs))
+	// SQLite evaluates every SET expression against the old row.
+	if _, err := e.db.ExecContext(r.Context(), `INSERT INTO access VALUES (1, ?1, ?2, ?3) ON CONFLICT(singleton) DO UPDATE SET
+		fobs = CASE WHEN excluded.revision >= revision THEN excluded.fobs ELSE fobs END,
+		revision = max(revision, excluded.revision), key = excluded.key`, *input.Revision, string(fobs), input.Key); err != nil {
+		storageError(w, err)
+		return
+	}
+	e.syncMu.Lock()
+	e.lastPush = time.Now()
+	e.syncMu.Unlock()
+	log.Printf("fob list received revision=%d fobs=%d", *input.Revision, len(input.Fobs))
+	e.wakeSender() // A new key may unblock pending swipes.
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Swipe upload and sync requests
+// ────────────────────────────────────────────────────────────────────────
+
+const (
+	swipeRetry = 30 * time.Second
+	syncCheck  = time.Minute
+	syncSpace  = 10 * time.Minute // Matches the Worker's global rate limit.
+	syncStale  = 3 * time.Hour    // Access changes are pushed; silence this long is suspicious.
+)
+
+func (e *edge) wakeSender() {
+	select {
+	case e.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (e *edge) run(ctx context.Context) {
+	retry := time.NewTimer(0)
+	check := time.NewTicker(syncCheck)
+	defer check.Stop()
+	e.requestSyncIfStale(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-check.C:
+			e.requestSyncIfStale(ctx)
+			continue
+		case <-e.wake:
+		case <-retry.C:
+		}
+		if err := e.uploadSwipes(ctx); err != nil && ctx.Err() == nil {
+			log.Printf("swipe upload failed; retrying in %s: %v", swipeRetry, err)
+			retry.Reset(swipeRetry)
+		}
+	}
 }
 
 type swipe struct {
@@ -658,619 +486,136 @@ type swipe struct {
 	Allowed    bool      `json:"allowed"`
 }
 
-func pruneSwipes(tx *sql.Tx) error {
-	_, err := tx.Exec("DELETE FROM swipes WHERE delivered = 1 AND time < ?", time.Now().Add(-swipeRetention).UnixNano())
-	return err
-}
-
-// The goal read and complete batch insertion share a transaction. HTTP success
-// (including 304) is sent only after the batch commits.
-func (e *edge) controllerPoll(ctx context.Context, ip string, events []controllerSwipe) ([]byte, error) {
-	var body []byte
-	err := e.transaction(ctx, func(tx *sql.Tx) error {
-		if err := tx.QueryRow("SELECT fobs FROM goal WHERE singleton = 1").Scan(&body); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return errNoGoal
-			}
-			return err
-		}
-		if len(events) == 0 {
-			return nil
-		}
-		stmt, err := tx.Prepare("INSERT INTO swipes(id, time, controller, fob, allowed) VALUES (?, ?, ?, ?, ?)")
-		if err != nil {
-			return err
-		}
-		defer stmt.Close()
-		now := time.Now().UTC().UnixNano()
-		for _, event := range events {
-			if _, err := stmt.Exec(rand.Text(), now, ip, event.Fob, event.Allowed); err != nil {
-				return err
-			}
-		}
-		return pruneSwipes(tx)
-	})
-	if err == nil && len(events) > 0 {
-		e.wakeSwipes()
-	}
-	return body, err
-}
-
-func (e *edge) retainedSwipes(ctx context.Context) ([]swipe, error) {
-	events := []swipe{}
-	err := e.transaction(ctx, func(tx *sql.Tx) error {
-		if err := pruneSwipes(tx); err != nil {
-			return err
-		}
-		rows, err := tx.Query("SELECT id, time, controller, fob, allowed FROM swipes ORDER BY sequence")
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var event swipe
-			var timestamp int64
-			if err := rows.Scan(&event.ID, &timestamp, &event.Controller, &event.Fob, &event.Allowed); err != nil {
-				return err
-			}
-			event.Time = time.Unix(0, timestamp).UTC()
-			events = append(events, event)
-		}
-		return rows.Err()
-	})
-	return events, err
-}
-
-func (e *edge) storePrinters(ctx context.Context, printers []printerConfig) error {
-	e.configMu.Lock()
-	defer e.configMu.Unlock()
-	data, _ := json.Marshal(printers)
-	if _, err := e.db.ExecContext(ctx, "UPDATE printer_config SET config = ? WHERE singleton = 1", string(data)); err != nil {
-		return err
-	}
-	e.config = printers
-	e.printers.replace(printers)
-	return nil
-}
-
-// ────────────────────────────────────────────────────────────────────────
-// Controller and goal-state APIs
-// ────────────────────────────────────────────────────────────────────────
-
-func decodeJSON(data []byte, value any) error {
-	d := json.NewDecoder(bytes.NewReader(data))
-	d.DisallowUnknownFields()
-	if err := d.Decode(value); err != nil {
-		return err
-	}
-	if d.Decode(new(any)) != io.EOF {
-		return fmt.Errorf("expected one JSON value")
-	}
-	return nil
-}
-
-func readJSON(w http.ResponseWriter, r *http.Request, value any, limit int64) bool {
-	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
-	if err != nil || decodeJSON(data, value) != nil {
-		http.Error(w, fmt.Sprintf("invalid JSON (limit %d KiB)", limit>>10), http.StatusBadRequest)
-		return false
-	}
-	return true
-}
-
-func storageError(w http.ResponseWriter, err error) {
-	switch {
-	case errors.Is(err, errGoalConflict):
-		http.Error(w, err.Error(), http.StatusConflict)
-	case errors.Is(err, errNoGoal):
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
-	default:
-		log.Printf("storage: %v", err)
-		http.Error(w, "storage unavailable; retry later", http.StatusInternalServerError)
-	}
-}
-
-func normalizeGoal(data []byte) ([]byte, error) {
-	var ids []uint32
-	if err := json.Unmarshal(data, &ids); err != nil || ids == nil || len(ids) > 512 || slices.Contains(ids, 0) {
-		return nil, fmt.Errorf("goal must be an array of at most 512 nonzero uint32 fob IDs")
-	}
-	slices.Sort(ids)
-	ids = slices.Compact(ids)
-	body, _ := json.Marshal(ids)
-	return append(body, '\n'), nil
-}
-
-func controllerETag(body []byte) (string, error) {
-	var ids []uint32
-	if err := json.Unmarshal(body, &ids); err != nil {
-		return "", err
-	}
-	// Firmware hashes decimal IDs followed by commas, not the JSON response.
-	hash := sha256.New()
-	for _, id := range ids {
-		fmt.Fprintf(hash, "%d,", id)
-	}
-	return fmt.Sprintf("%x", hash.Sum(nil)), nil
-}
-
-func (e *edge) goal(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		Version  *int64          `json:"version"`
-		Fobs     json.RawMessage `json:"fobs"`
-		EventKey string          `json:"event_signing_key"`
-	}
-	if !readJSON(w, r, &input, 16<<10) {
-		return
-	}
-	if input.Version == nil || *input.Version < 0 || *input.Version > 9007199254740991 {
-		http.Error(w, "version must be a nonnegative safe integer", http.StatusBadRequest)
-		return
-	}
-	key, err := hex.DecodeString(input.EventKey)
-	if err != nil || len(key) != 32 || hex.EncodeToString(key) != input.EventKey {
-		http.Error(w, "event_signing_key must be 32 bytes encoded as lowercase hex", http.StatusBadRequest)
-		return
-	}
-	body, err := normalizeGoal(input.Fobs)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	if err := e.storeGoal(r.Context(), *input.Version, body, input.EventKey); err != nil {
-		storageError(w, err)
-		return
-	}
-	log.Printf("goal stored version=%d bytes=%d", *input.Version, len(body))
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (e *edge) getGoal(w http.ResponseWriter, r *http.Request) {
-	var version int64
-	var fobs []byte
-	var eventKey string
-	err := e.db.QueryRowContext(r.Context(), "SELECT version, fobs, event_signing_key FROM goal WHERE singleton = 1").Scan(&version, &fobs, &eventKey)
-	if errors.Is(err, sql.ErrNoRows) {
-		err = errNoGoal
-	}
-	if err != nil {
-		storageError(w, err)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(struct {
-		Version  int64           `json:"version"`
-		Fobs     json.RawMessage `json:"fobs"`
-		EventKey string          `json:"event_signing_key,omitempty"`
-	}{version, fobs, eventKey})
-}
-
-func (e *edge) fobs(w http.ResponseWriter, r *http.Request) {
-	var input []struct {
-		Fob     uint32 `json:"fob"`
-		Allowed *bool  `json:"allowed"`
-	}
-	// A compact batch of 512 swipes with maximum uint32 IDs exceeds 16 KiB.
-	if !readJSON(w, r, &input, 32<<10) {
-		return
-	}
-	if input == nil || len(input) > 512 {
-		http.Error(w, "expected an array of at most 512 swipes", http.StatusBadRequest)
-		return
-	}
-	events := make([]controllerSwipe, 0, len(input))
-	for _, event := range input {
-		if event.Fob == 0 || event.Allowed == nil {
-			http.Error(w, "each swipe requires a nonzero fob ID and boolean allowed", http.StatusBadRequest)
-			return
-		}
-		events = append(events, controllerSwipe{Fob: event.Fob, Allowed: *event.Allowed})
-	}
-	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-	body, err := e.controllerPoll(r.Context(), ip, events)
-	if err != nil {
-		storageError(w, err)
-		return
-	}
-	if len(events) > 0 {
-		log.Printf("controller swipes stored controller=%q events=%d", ip, len(events))
-	}
-	etag, err := controllerETag(body)
-	if err != nil {
-		storageError(w, err)
-		return
-	}
-	w.Header().Set("Cache-Control", "no-store")
-	if r.Header.Get("If-None-Match") == etag {
-		w.WriteHeader(http.StatusNotModified)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("ETag", etag)
-	if e.signingKey != nil {
-		w.Header().Set("X-Fob-Signature", base64.StdEncoding.EncodeToString(ed25519.Sign(e.signingKey, body)))
-	}
-	// Firmware does not decode chunked transfer encoding.
-	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
-	_, _ = w.Write(body)
-}
-
-func loadSigningSeed(path string) (ed25519.PrivateKey, error) {
-	if path == "" {
-		return nil, nil
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("open signing seed: %w", err)
-	}
-	defer f.Close()
-	seed, err := io.ReadAll(io.LimitReader(f, ed25519.SeedSize+1))
-	if err != nil || len(seed) != ed25519.SeedSize {
-		return nil, fmt.Errorf("signing seed must be exactly 32 raw bytes")
-	}
-	return ed25519.NewKeyFromSeed(seed), nil
-}
-
-// ────────────────────────────────────────────────────────────────────────
-// Durable swipe delivery
-// ────────────────────────────────────────────────────────────────────────
-
-const swipePath = "/webhooks/edge/swipes"
-const swipeInterval = 30 * time.Second
-
-func (e *edge) wakeSwipes() {
-	select {
-	case e.swipeWake <- struct{}{}:
-	default:
-	}
-}
-
-func swipeSignature(key []byte, timestamp string, body []byte) string {
-	mac := hmac.New(sha256.New, key)
-	fmt.Fprintf(mac, "POST\n%s\n%s\n", swipePath, timestamp)
-	mac.Write(body)
-	return hex.EncodeToString(mac.Sum(nil))
-}
-
-func (e *edge) runSwipeSender(ctx context.Context) {
-	if e.workerAuth == nil {
-		return
-	}
-	client := &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	e.sendSwipes(ctx, e.workerAuth.issuer, client, swipeInterval)
-}
-
-// A leading flush followed by fixed windows. Notifications never reset the timer.
-// Restart checks the persistent outbox immediately; failed flushes retry next window.
-func (e *edge) sendSwipes(ctx context.Context, origin string, client *http.Client, interval time.Duration) {
-	timer := time.NewTimer(0)
-	defer timer.Stop()
-	active := false
+// uploadSwipes sends the outbox in batches, deleting each only after the
+// Worker commits it. Event IDs make a retried batch idempotent.
+func (e *edge) uploadSwipes(ctx context.Context) error {
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-e.swipeWake:
-			if !active {
-				timer.Reset(0)
-			}
-		case <-timer.C:
-			started := time.Now()
-			attempted, err := e.flushSwipes(ctx, origin, client)
-			if ctx.Err() != nil {
-				return
-			}
-			if err != nil {
-				log.Printf("swipe push failed: %v", err)
-			}
-			if attempted || err != nil {
-				active = true
-				delay := max(0, interval-time.Since(started))
-				if err != nil {
-					delay = interval
-				}
-				timer.Reset(delay)
-			} else {
-				active = false
-			}
+		var key string
+		var revision int64
+		err := e.db.QueryRowContext(ctx, "SELECT key, revision FROM access").Scan(&key, &revision)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil // Swipes wait for the first push, which wakes the sender.
+		} else if err != nil {
+			return err
 		}
-	}
-}
-
-// Snapshot the high-water mark so continuous arrivals cannot prolong a flush.
-func (e *edge) flushSwipes(ctx context.Context, origin string, client *http.Client) (bool, error) {
-	var high int64
-	if err := e.db.QueryRowContext(ctx, "SELECT coalesce(max(sequence), 0) FROM swipes WHERE delivered = 0").Scan(&high); err != nil {
-		return false, err
-	}
-	if high == 0 {
-		return false, e.transaction(ctx, pruneSwipes)
-	}
-	for {
-		var secret string
-		err := e.db.QueryRowContext(ctx, "SELECT event_signing_key FROM goal WHERE singleton = 1").Scan(&secret)
+		events, last, err := e.pendingSwipes(ctx)
+		if err != nil || len(events) == 0 {
+			return err
+		}
+		body, _ := json.Marshal(events)
+		req, err := http.NewRequestWithContext(ctx, "POST", e.auth.issuer+"/webhooks/edge/swipes", bytes.NewReader(body))
 		if err != nil {
-			return true, err
+			return err
 		}
-		key, err := hex.DecodeString(secret)
-		if err != nil || len(key) != 32 {
-			return true, fmt.Errorf("waiting for event signing key in goal")
-		}
-		rows, err := e.db.QueryContext(ctx, "SELECT sequence, id, time, controller, fob, allowed FROM swipes WHERE delivered = 0 AND sequence <= ? ORDER BY sequence LIMIT 512", high)
-		if err != nil {
-			return true, err
-		}
-		events := []swipe{}
-		var last int64
-		for rows.Next() {
-			var event swipe
-			var timestamp int64
-			if err = rows.Scan(&last, &event.ID, &timestamp, &event.Controller, &event.Fob, &event.Allowed); err != nil {
-				break
-			}
-			event.Time = time.Unix(0, timestamp).UTC()
-			events = append(events, event)
-		}
-		rowErr := rows.Err()
-		rows.Close()
-		if err != nil {
-			return true, err
-		}
-		if rowErr != nil {
-			return true, rowErr
-		}
-		if len(events) == 0 {
-			return true, nil
-		}
-		body, err := json.Marshal(events)
-		if err != nil {
-			return true, err
-		}
-		// Controller addresses and generated IDs are bounded; 512 events fit easily.
-		if len(body) > 256*1024 {
-			return true, fmt.Errorf("swipe batch exceeds 256 KiB")
-		}
-		timestamp := strconv.FormatInt(time.Now().Unix(), 10)
-		req, err := http.NewRequestWithContext(ctx, "POST", origin+swipePath, bytes.NewReader(body))
-		if err != nil {
-			return true, err
-		}
+		req.Header.Set("Authorization", "Bearer "+key)
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-Edge-Timestamp", timestamp)
-		req.Header.Set("X-Edge-Signature", swipeSignature(key, timestamp, body))
-		response, err := client.Do(req)
+		// The Worker pushes a fresh list if this revision is out of date.
+		req.Header.Set("X-Edge-Revision", strconv.FormatInt(revision, 10))
+		response, err := e.client.Do(req)
 		if err != nil {
-			return true, err
+			return err
 		}
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 		response.Body.Close()
+		if response.StatusCode == http.StatusUnauthorized {
+			e.markStale() // The key changed; a sync delivers the new one.
+		}
 		if response.StatusCode != http.StatusNoContent {
-			return true, fmt.Errorf("Worker swipe response: %d", response.StatusCode)
+			return fmt.Errorf("Worker returned %d", response.StatusCode)
 		}
-		if err := e.transaction(ctx, func(tx *sql.Tx) error {
-			if _, err := tx.Exec("UPDATE swipes SET delivered = 1 WHERE delivered = 0 AND sequence <= ?", last); err != nil {
-				return err
-			}
-			return pruneSwipes(tx)
-		}); err != nil {
-			return true, err
+		if _, err := e.db.ExecContext(ctx, "DELETE FROM swipes WHERE sequence <= ?", last); err != nil {
+			return err
 		}
-		log.Printf("swipe batch delivered events=%d", len(events))
-		if last == high {
-			return true, nil
-		}
+		log.Printf("uploaded swipes=%d", len(events))
 	}
+}
+
+func (e *edge) pendingSwipes(ctx context.Context) ([]swipe, int64, error) {
+	rows, err := e.db.QueryContext(ctx, "SELECT sequence, id, time, controller, fob, allowed FROM swipes ORDER BY sequence LIMIT 512")
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var events []swipe
+	var last, timestamp int64
+	for rows.Next() {
+		var event swipe
+		if err := rows.Scan(&last, &event.ID, &timestamp, &event.Controller, &event.Fob, &event.Allowed); err != nil {
+			return nil, 0, err
+		}
+		event.Time = time.Unix(0, timestamp).UTC()
+		events = append(events, event)
+	}
+	return events, last, rows.Err()
+}
+
+func (e *edge) markStale() {
+	e.syncMu.Lock()
+	e.lastPush = time.Time{}
+	e.syncMu.Unlock()
+}
+
+// requestSyncIfStale asks the Worker for a push when this edge may have
+// missed one. The request is unauthenticated and rate limited by the Worker.
+func (e *edge) requestSyncIfStale(ctx context.Context) {
+	e.syncMu.Lock()
+	due := time.Since(e.lastPush) > syncStale && time.Since(e.lastSyncRequest) >= syncSpace
+	if due {
+		e.lastSyncRequest = time.Now()
+	}
+	e.syncMu.Unlock()
+	if !due {
+		return
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", e.auth.issuer+"/webhooks/edge/sync", nil)
+	if err != nil {
+		return
+	}
+	response, err := e.client.Do(req)
+	if err != nil {
+		log.Printf("sync request failed: %v", err)
+		return
+	}
+	response.Body.Close()
+	log.Printf("sync requested status=%d", response.StatusCode)
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// LAN kiosk assets and enrollment
+// LAN kiosk proxy
 // ────────────────────────────────────────────────────────────────────────
 
-const kioskHTML = `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="robots" content="noindex">
-  <title>Link your key fob | TheLab</title>
-  <link rel="icon" href="/kiosk/favicon.svg">
-  <link rel="stylesheet" href="/kiosk/style.css">
-  <script src="/kiosk/app.js" defer></script>
-</head>
-<body class="kiosk-page">
-  <div class="kiosk-shell">
-    <header class="kiosk-header"><div class="kiosk-brand"><img src="/kiosk/favicon.svg" alt="" width="48" height="48">TheLab<span>Everyone’s makerspace</span></div><span class="kiosk-label">Key fob station</span></header>
-    <main id="kiosk" class="kiosk-main" data-state="ready">
-      <section id="standby" class="kiosk-standby" aria-label="Link your key fob">
-        <div class="kiosk-reader" aria-hidden="true"><svg viewBox="0 0 120 120" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"><rect x="24" y="39" width="56" height="40" rx="8" transform="rotate(-12 52 59)"/><circle cx="39" cy="60" r="5"/><path d="M86 43a25 25 0 0 1 0 34M96 33a39 39 0 0 1 0 54"/></svg></div>
-        <p class="kiosk-intro">Hold your key fob near the reader<br>to link it to your membership.</p>
-      </section>
-      <section id="claim" class="kiosk-claim" aria-labelledby="claim-title" hidden>
-        <div class="kiosk-claim-copy"><p class="kiosk-eyebrow">One more step</p><h1 id="claim-title">Finish on<br>your phone.</h1><p>Scan this QR code with your phone’s camera, sign in through Discord, then tap <strong>Link fob</strong>.</p><p id="expiry" class="kiosk-expiry"></p><button id="done" type="button" class="btn btn-outline">Cancel / start over</button></div>
-        <div class="kiosk-qr-card"><img id="qr" alt="Scan to link your key fob"><p>Your membership. Your key.</p></div>
-      </section>
-      <div class="kiosk-status"><span class="kiosk-status-dot" aria-hidden="true"></span><p id="status" role="status" aria-live="polite">Ready when you are. Just tap your fob.</p></div>
-      <noscript><p class="kiosk-noscript">Enable JavaScript to use the fob reader and display QR codes.</p></noscript>
-    </main>
-  </div>
-</body>
-</html>`
-
-//go:embed app.js
-var appJS string
-
-const kioskCSS = `:root {
-  --color-bg: #0d0d0d; --color-bg-alt: #141414; --color-border: #2a2a2a; --color-border-light: #333;
-  --color-accent: #00c853; --color-accent-dark: #009624; --color-accent-glow: rgba(0, 200, 83, .15); --color-accent-subtle: rgba(0, 200, 83, .08);
-  --color-heading: #fff; --color-text-muted: #999; --font-heading: system-ui, -apple-system, sans-serif; --font-body: monospace; --radius-lg: 12px;
-}
-*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
-.kiosk-page { font-family: var(--font-heading); line-height: 1.7; color: #e0e0e0; background: var(--color-bg); }
-.btn { padding: .875rem 2rem; font: 600 .95rem var(--font-heading); border: 2px solid var(--color-border-light); border-radius: 8px; cursor: pointer; color: #e0e0e0; background: transparent; }
-.btn:hover, .btn:focus-visible { border-color: var(--color-accent); color: var(--color-accent); }
-.kiosk-shell { min-height: 100vh; min-height: 100svh; max-width: 1600px; margin: auto; padding: clamp(1.5rem, 4vw, 4rem); display: flex; flex-direction: column; gap: 2rem; }
-.kiosk-header, .kiosk-brand, .kiosk-footer { display: flex; align-items: center; }
-.kiosk-header { justify-content: space-between; gap: 1rem; }
-.kiosk-brand { gap: .75rem; font-size: 1.8rem; font-weight: 700; color: var(--color-heading); }
-.kiosk-brand span { margin-left: 1rem; font-size: .9rem; font-weight: 400; color: var(--color-text-muted); }
-.kiosk-label, .kiosk-eyebrow { font-family: var(--font-body); font-size: .8rem; text-transform: uppercase; letter-spacing: .16em; }
-.kiosk-label { border: 1px solid var(--color-border-light); border-radius: 999px; padding: .6rem 1rem; color: var(--color-text-muted); }
-.kiosk-main { flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 2rem; padding: 1rem 0; }
-.kiosk-main [hidden] { display: none; }
-.kiosk-standby { text-align: center; }
-.kiosk-reader { display: grid; place-items: center; width: clamp(130px, 16vh, 190px); aspect-ratio: 1; margin: 0 auto 2rem; color: var(--color-accent); border: 1px solid var(--color-accent-dark); border-radius: 50%; background: var(--color-accent-subtle); box-shadow: 0 0 0 16px rgba(0, 200, 83, .03), 0 0 70px var(--color-accent-subtle); }
-.kiosk-reader svg { width: 65%; height: 65%; }
-.kiosk-eyebrow { color: var(--color-accent); margin-bottom: 1rem; }
-.kiosk-main h1 { font-size: clamp(3rem, 6vw, 6.5rem); line-height: 1.05; letter-spacing: -.045em; color: var(--color-heading); margin: 0 0 1.5rem; }
-.kiosk-main h1 span { color: var(--color-accent); }
-.kiosk-intro, .kiosk-claim-copy > p:not(.kiosk-eyebrow) { font-size: clamp(1.1rem, 1.6vw, 1.5rem); color: var(--color-text-muted); line-height: 1.6; }
-.kiosk-status { display: flex; justify-content: center; align-items: center; gap: .75rem; padding: .9rem 1.5rem; border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-bg-alt); text-align: center; max-width: 760px; }
-.kiosk-status-dot { flex: 0 0 8px; height: 8px; border-radius: 50%; background: var(--color-accent); box-shadow: 0 0 12px var(--color-accent-glow); }
-[data-state="reading"] .kiosk-status-dot { animation: kiosk-pulse 1s ease-in-out infinite; }
-[data-state="error"] .kiosk-status-dot { background: #ffb86b; }
-#status[role="alert"] { color: #ffb86b; }
-.kiosk-claim { display: grid; grid-template-columns: 1fr 1fr; align-items: center; gap: clamp(2rem, 5vw, 6rem); width: 100%; max-width: 1150px; }
-.kiosk-claim-copy strong { color: var(--color-heading); }
-.kiosk-claim-copy .kiosk-expiry { margin: 1.5rem 0; font-size: 1rem; }
-.kiosk-qr-card { background: #fff; color: #333; padding: clamp(1rem, 2vw, 2rem); border-radius: 24px; text-align: center; box-shadow: 0 20px 80px rgba(0, 0, 0, .25); }
-#qr { display: block; width: 100%; height: auto; aspect-ratio: 1; }
-.kiosk-qr-card p { margin-top: .75rem; font-size: 1rem; }
-.kiosk-footer { justify-content: space-between; flex-wrap: wrap; gap: 1.5rem; padding-top: 1.5rem; border-top: 1px solid var(--color-border); color: var(--color-text-muted); font-size: .9rem; }
-.kiosk-footer ol { display: flex; flex-wrap: wrap; gap: 1.5rem; list-style: none; }
-.kiosk-footer li span { color: var(--color-accent); font-family: var(--font-body); margin-right: .5rem; }
-.kiosk-noscript { color: #ffb86b; text-align: center; }
-@keyframes kiosk-pulse { 50% { opacity: .3; } }
-@media (prefers-reduced-motion: reduce) { [data-state="reading"] .kiosk-status-dot { animation: none; } }
-@media (max-width: 700px) {
-  .kiosk-brand span { display: none; }
-  .kiosk-label { font-size: .65rem; }
-  .kiosk-claim { grid-template-columns: 1fr; max-width: 460px; text-align: center; }
-  .kiosk-claim h1 br { display: none; }
-  .kiosk-footer, .kiosk-footer ol { justify-content: center; text-align: center; }
-}`
-
-const kioskIcon = `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 3121.6 3121.6" role="img" aria-label="TheLab">
-  <title>TheLab</title>
-  <rect width="3121.6" height="3121.6" rx="561.9" fill="#0D0D0D"/>
-  <g fill="#00C853">
-    <path d="M300 431.2 820 431.2 820 606.2 475 606.2 475 2515.4 820 2515.4 820 2690.4 300 2690.4Z"/>
-    <path d="M2821.6 431.2 2301.6 431.2 2301.6 606.2 2646.6 606.2 2646.6 2515.4 2301.6 2515.4 2301.6 2690.4 2821.6 2690.4Z"/>
-  </g>
-  <g fill="#FFFFFF">
-    <g transform="translate(-1486.2 -4991.3)"><polygon points="2566.2,7296.7 2566.2,5807.5 2847.1,5807.5 2847.1,7041.4 3527.8,7041.4 3527.8,7296.7 "/></g>
-  </g>
-</svg>`
-
-func kioskHeaders(w http.ResponseWriter) {
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Referrer-Policy", "no-referrer")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
-}
-
-func kioskAsset(w http.ResponseWriter, r *http.Request) {
-	kioskHeaders(w)
-	asset := map[string]struct{ contentType, body string }{
-		"/kiosk":             {"text/html; charset=utf-8", kioskHTML},
-		"/kiosk/app.js":      {"text/javascript; charset=utf-8", appJS},
-		"/kiosk/style.css":   {"text/css; charset=utf-8", kioskCSS},
-		"/kiosk/favicon.svg": {"image/svg+xml", kioskIcon},
-	}[r.URL.Path]
-	w.Header().Set("Content-Type", asset.contentType)
-	_, _ = io.WriteString(w, asset.body)
-}
-
-type kioskClaim struct {
-	ID      string `json:"id"`
-	Fob     uint32 `json:"fob_id"`
-	Created int64  `json:"created"`
-	Expires int64  `json:"expires"`
-}
-
-func kioskJSON(w http.ResponseWriter, status int, value any) {
-	kioskHeaders(w)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
-}
-
-func kioskError(w http.ResponseWriter, status int, message string) {
-	kioskJSON(w, status, map[string]string{"error": message})
-}
-
-func (e *edge) readKioskClaim(w http.ResponseWriter, r *http.Request) *kioskClaim {
-	values := r.URL.Query()["token"]
-	if len(values) != 1 || len(values[0]) != 64 || strings.Trim(values[0], "0123456789abcdef") != "" {
-		kioskError(w, http.StatusGone, "This code is invalid or expired. Scan your fob again.")
-		return nil
+// kiosk forwards a fixed kiosk path to the Worker with the edge credential. The
+// LAN is trusted to enroll fobs; members still confirm on their own phones.
+func (e *edge) kiosk(w http.ResponseWriter, r *http.Request) {
+	var key string
+	if err := e.db.QueryRowContext(r.Context(), "SELECT key FROM access").Scan(&key); err != nil {
+		http.Error(w, `{"error":"Fob enrollment is not available yet. Please try again shortly."}`, http.StatusServiceUnavailable)
+		return
 	}
-	var claim kioskClaim
-	err := e.db.QueryRowContext(r.Context(), "SELECT id, fob, created, expires FROM kiosk_claims WHERE id = ? AND expires > ?", values[0], time.Now().Unix()).Scan(&claim.ID, &claim.Fob, &claim.Created, &claim.Expires)
-	if errors.Is(err, sql.ErrNoRows) {
-		kioskError(w, http.StatusGone, "This code expired. Scan your fob again.")
-		return nil
+	path := strings.Fields(r.Pattern)[1]
+	var body io.Reader
+	if r.Method == http.MethodPost {
+		body = http.MaxBytesReader(w, r.Body, 1024)
 	}
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, e.auth.issuer+path, body)
 	if err != nil {
-		kioskError(w, http.StatusServiceUnavailable, "Fob enrollment is temporarily unavailable. Please scan again.")
-		return nil
-	}
-	return &claim
-}
-
-// Only the authenticated tunnel listener exposes the fob behind a token.
-func (e *edge) getKioskClaim(w http.ResponseWriter, r *http.Request) {
-	if claim := e.readKioskClaim(w, r); claim != nil {
-		kioskJSON(w, http.StatusOK, claim)
-	}
-}
-
-func (e *edge) issueKioskClaim(w http.ResponseWriter, r *http.Request) {
-	origin, err := url.Parse(r.Header.Get("Origin"))
-	if err != nil || origin.Host != r.Host || (origin.Scheme != "http" && origin.Scheme != "https") || origin.User != nil || origin.Path != "" || origin.RawQuery != "" || origin.Fragment != "" {
-		kioskError(w, http.StatusForbidden, "Reload the kiosk and try again.")
+		http.Error(w, "invalid request", http.StatusInternalServerError)
 		return
 	}
-	if strings.Split(r.Header.Get("Content-Type"), ";")[0] != "application/json" {
-		kioskError(w, http.StatusUnsupportedMediaType, "Fob not recognized. Scan again.")
-		return
+	req.Header.Set("Authorization", "Bearer "+key)
+	if contentType := r.Header.Get("Content-Type"); contentType != "" {
+		req.Header.Set("Content-Type", contentType)
 	}
-	var input struct {
-		Fob uint32 `json:"fob_id"`
-	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1024))
-	if err != nil || decodeJSON(body, &input) != nil || input.Fob == 0 {
-		kioskError(w, http.StatusBadRequest, "Fob not recognized. Scan again.")
-		return
-	}
-	if e.workerAuth == nil {
-		kioskError(w, http.StatusServiceUnavailable, "Fob enrollment is not configured. Please ask a member for help.")
-		return
-	}
-	var nonce [32]byte
-	_, _ = rand.Read(nonce[:])
-	created := time.Now().Unix()
-	claim := kioskClaim{hex.EncodeToString(nonce[:]), input.Fob, created, created + 300}
-	link := e.workerAuth.issuer + "/keyfob/bind?token=" + claim.ID
-	qr, err := qrcode.Encode(link, qrcode.Medium, 512)
-	if err == nil {
-		err = e.transaction(r.Context(), func(tx *sql.Tx) error {
-			if _, err := tx.Exec("DELETE FROM kiosk_claims WHERE expires <= ?", claim.Created); err != nil {
-				return err
-			}
-			return tx.QueryRow(`INSERT INTO kiosk_claims(id, fob, created, expires)
-				SELECT ?, ?, ?, ? WHERE (SELECT count(*) FROM kiosk_claims WHERE created > ?) < 30 RETURNING id`,
-				claim.ID, claim.Fob, claim.Created, claim.Expires, claim.Created-60).Scan(&claim.ID)
-		})
-	}
-	if errors.Is(err, sql.ErrNoRows) {
-		kioskError(w, http.StatusTooManyRequests, "Too many scans. Please wait a minute.")
-		return
-	}
+	response, err := e.client.Do(req)
 	if err != nil {
-		kioskError(w, http.StatusServiceUnavailable, "Fob enrollment is temporarily unavailable. Please scan again.")
+		http.Error(w, `{"error":"Fob enrollment is temporarily unavailable. Please scan again."}`, http.StatusBadGateway)
 		return
 	}
-	kioskJSON(w, http.StatusCreated, map[string]any{"token": claim.ID, "url": link, "expires": claim.Expires, "qr": "data:image/png;base64," + base64.StdEncoding.EncodeToString(qr)})
+	defer response.Body.Close()
+	for _, name := range []string{"Content-Type", "Cache-Control", "Content-Security-Policy", "Referrer-Policy", "X-Content-Type-Options", "X-Robots-Tag"} {
+		if value := response.Header.Get(name); value != "" {
+			w.Header().Set(name, value)
+		}
+	}
+	w.WriteHeader(response.StatusCode)
+	_, _ = io.Copy(w, io.LimitReader(response.Body, 1<<20))
 }

@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
-# Builds an OTA-flashable .bin. Network/Conway config is provisioned at
-# runtime via the onboarding captive portal; network.env (if present) only
-# sets optional compile-time defaults.
-#
-# Build a firmware image suitable for upload via POST /ota.
+# Build a firmware image suitable for upload via POST /ota. Network and
+# Conway settings are baked in at build time from network.env.
 #
 # Produces ./firmware.bin in the current directory. Upload with:
 #
@@ -29,7 +26,7 @@ espflash save-image \
     "${ELF}" \
     "${OUT}"
 
-SIZE=$(stat -c%s "${OUT}")
+SIZE=$(wc -c < "${OUT}" | tr -d " ")
 echo "==> ${OUT}: ${SIZE} bytes"
 echo
 echo "Upload with:"

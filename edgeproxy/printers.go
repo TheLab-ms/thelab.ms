@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/binary"
@@ -140,7 +141,6 @@ func (p *printer) report(payload []byte) {
 		p.data.Remaining = *report.Remaining
 	}
 	p.data.UpdatedAt, p.data.Error = time.Now(), ""
-	p.logf("MQTT status received state=%q remaining_minutes=%d bytes=%d", p.data.State, p.data.Remaining, len(payload))
 }
 
 func waitMQTT(ctx context.Context, token mqtt.Token) error {
@@ -214,13 +214,11 @@ func (p *printer) pollConnection() string {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
-		p.logf("MQTT publishing status request command=pushall")
 		if err := waitMQTT(ctx, client.Publish("device/"+p.config.SerialNumber+"/request", 0, false,
 			`{"pushing":{"command":"pushall","sequence_id":"0"}}`)); err != nil {
 			p.logf("MQTT status publish failed: %v", err)
 			return "MQTT status request failed"
 		}
-		p.logf("MQTT status request sent")
 		select {
 		case <-ctx.Done():
 			return "printer stopped"
@@ -329,7 +327,6 @@ func (p *printer) storeCameraFrame(frame []byte) {
 	// Frames are immutable so HTTP requests can write without holding the lock.
 	p.frame, p.frameAt = frame, time.Now()
 	p.mu.Unlock()
-	p.logf("camera frame received bytes=%d", len(frame))
 }
 
 func (p *printer) bambuCameraConnection() {
@@ -399,7 +396,6 @@ func (p *printer) readBambuCamera(conn net.Conn) error {
 }
 
 func (s *printerSet) snapshot(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Cache-Control", "no-store")
 	image := r.PathValue("image")
 	if !strings.HasSuffix(image, ".jpg") {
 		http.NotFound(w, r)
@@ -438,7 +434,9 @@ const maxPrinters = 32
 
 func parsePrinters(data []byte) ([]printerConfig, error) {
 	var printers []printerConfig
-	if err := decodeJSON(data, &printers); err != nil {
+	d := json.NewDecoder(bytes.NewReader(data))
+	d.DisallowUnknownFields()
+	if err := d.Decode(&printers); err != nil {
 		return nil, fmt.Errorf("invalid printer JSON: %w", err)
 	}
 	if printers == nil {
@@ -574,7 +572,20 @@ func printersFromForm(form url.Values) ([]printerConfig, error) {
 	return printers, nil
 }
 
+func (e *edge) storePrinters(ctx context.Context, printers []printerConfig) error {
+	e.configMu.Lock()
+	defer e.configMu.Unlock()
+	data, _ := json.Marshal(printers)
+	if _, err := e.db.ExecContext(ctx, "UPDATE printer_config SET config = ? WHERE singleton = 1", string(data)); err != nil {
+		return err
+	}
+	e.config = printers
+	e.printers.replace(printers)
+	return nil
+}
+
 func (e *edge) configure(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
 	switch r.Method {
@@ -701,7 +712,6 @@ func (s *printerSet) cards() []printerCard {
 }
 
 func (s *printerSet) status(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(s.cards())
 }

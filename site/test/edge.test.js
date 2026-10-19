@@ -1,1184 +1,319 @@
 import { env } from 'cloudflare:workers';
-import { applyD1Migrations, reset, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { EdgeSync, cleanupFobClaims, coordinated, edgeCall, fobClaim } from '../src/membership.js';
-import worker from '../src/index.js';
-import { edgeJWKS, edgeToken, hash, issueToken, loginDestination, memberToken, now, randomToken, verifyOAuthState, verifyToken } from '../src/services.js';
-import wranglerConfig from '../wrangler.jsonc?raw';
+import { edgeEventKey, edgeJWKS, edgeToken, pushFobs } from '../src/edge.js';
+import { now, randomToken } from '../src/lib.js';
+import { addWaiver, call, edgeEnv, insertMember, post, quiet, readMember, resetDB, session } from './helpers.js';
 
-// RFC 8032 test seed in PKCS#8; public test material, never a deployment key.
-const testEdgePrivateKey = 'MC4CAQAwBQYDK2VwBCIEIJ1hsZ3v/VpguoRK9JLsLMREScVpezJpGXA7rAMcrn9g';
+const decode = value => Uint8Array.from(atob(value.replaceAll('-', '+').replaceAll('_', '/')), c => c.charCodeAt(0));
+const parse = value => JSON.parse(new TextDecoder().decode(decode(value)));
+const revision = async () => (await env.DB.prepare('SELECT revision FROM edge_changes').first()).revision;
+const swipeCount = async () => (await env.DB.prepare("SELECT COUNT(*) AS n FROM member_events WHERE event_type = 'FobSwipe'").first()).n;
 
-describe('Edge synchronization', () => {
-	const configured = { ...env, EDGE_URL: 'https://edge.example', EDGE_JWT_PRIVATE_KEY: testEdgePrivateKey };
-	const stub = () => env.EDGE_SYNC.get(env.EDGE_SYNC.idFromName('edge'));
-	let goal, swipes, writes, fetchSpy;
-	beforeEach(async () => {
-		await reset();
-		await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
-		await runInDurableObject(stub(), instance => {
-			instance.env = { ...instance.env, ...configured };
-		});
-		goal = null; swipes = []; writes = [];
-		fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init = {}) => {
-			if (String(url).startsWith('https://discord.com/')) return Response.json({ roles: [env.DISCORD_ADMIN_ROLE_ID] });
-			expect(init.redirect).toBe('manual');
-			expect(init.headers.Authorization).toMatch(/^Bearer ey/);
-			expect(init.headers['CF-Access-Client-Secret']).toBeUndefined();
-			expect(String(url)).toBe('https://edge.example/api/goal');
-			if (init.method === 'GET') return goal ? Response.json(goal) : new Response(null, { status: 503 });
-			const body = JSON.parse(init.body); writes.push({ method: init.method, ...body });
-			expect(init.method).toBe('PUT');
-			expect(Object.keys(body).sort()).toEqual(['event_signing_key', 'fobs', 'version']);
-			if (goal && (body.version < goal.version || (body.version === goal.version && JSON.stringify(body) !== JSON.stringify(goal)))) {
-				return new Response(null, { status: 409 });
-			}
-			goal = body;
-			return new Response(null, { status: 204 });
-		});
-	});
-	afterEach(() => vi.restoreAllMocks());
+// A fake edge that, like edgeproxy, keeps only the highest pushed revision.
+let edge, pushes, fetchSpy;
+function fakeEdge() {
+  edge = null;
+  pushes = [];
+  fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init = {}) => {
+    expect(String(url)).toBe('https://edge.example/api/fobs');
+    expect(init).toMatchObject({ method: 'PUT', redirect: 'manual' });
+    expect(parse(init.headers.Authorization.slice(7).split('.')[1]).scope).toBe('edge:api');
+    const body = JSON.parse(init.body);
+    expect(Object.keys(body).sort()).toEqual(['fobs', 'key', 'revision']);
+    pushes.push(body);
+    if (!edge || body.revision >= edge.revision) edge = body;
+    return new Response(null, { status: 204 });
+  });
+}
 
-	async function signedRequest(text = JSON.stringify(swipes), options = {}) {
-		if (!goal) await edgeCall(configured, 'changes');
-		const timestamp = String(options.timestamp ?? Math.floor(Date.now() / 1000));
-		const secret = options.key || goal.event_signing_key;
-		const key = await crypto.subtle.importKey('raw', Uint8Array.from(secret.match(/../g), byte => parseInt(byte, 16)), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-		const signature = Array.from(new Uint8Array(await crypto.subtle.sign('HMAC', key,
-			new TextEncoder().encode(`POST\n/webhooks/edge/swipes\n${timestamp}\n${text}`))), n => n.toString(16).padStart(2, '0')).join('');
-		return new Request(`${env.SITE_URL}/webhooks/edge/swipes`, {
-			method: 'POST', body: text,
-			headers: { 'X-Edge-Timestamp': timestamp, 'X-Edge-Signature': signature, 'Content-Type': 'application/json' }
-		});
-	}
+async function member(fob = 7, status = 'active', waiver = true) {
+  const row = await insertMember({ fob_id: fob, stripe_subscription_state: status });
+  if (waiver) await addWaiver(row.member_id);
+  return row;
+}
 
-	async function pushSwipes() {
-		const response = await worker.fetch(await signedRequest(), configured);
-		if (response.status !== 204) throw Object.assign(new Error('Swipe push failed'), { status: response.status });
-	}
+beforeEach(async () => {
+  await resetDB();
+  fakeEdge();
+});
+afterEach(() => vi.restoreAllMocks());
 
-	async function member(fob = 7, status = 'active', waiver = true) {
-		const row = await env.DB.prepare('INSERT INTO members(fob_id, stripe_subscription_state) VALUES (?, ?) RETURNING *').bind(fob, status).first();
-		if (waiver) await env.DB.prepare(`INSERT INTO waivers(member_id, version, content, name, email, agreements) VALUES (?, 1, 'Terms', 'Maker', 'maker@example.com', '[]')`).bind(row.member_id).run();
-		return row;
-	}
+describe('Edge fob list', () => {
+  it('pushes the current revision, eligible fobs, and the derived edge key', async () => {
+    await member();
+    await pushFobs(edgeEnv);
+    expect(pushes).toEqual([{ revision: await revision(), fobs: [7], key: await edgeEventKey(edgeEnv) }]);
+    expect(pushes[0].key).toMatch(/^[a-f0-9]{64}$/);
+    fetchSpy.mockClear();
+    await pushFobs({ ...edgeEnv, EDGE_URL: '' });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
 
-	it('goes idle after immediate and unchanged syncs, and wakes for the next change', async () => {
-		const m = await member();
-		await edgeCall(configured, 'changes');
-		expect(goal.fobs).toEqual([7]);
-		expect(await runDurableObjectAlarm(stub())).toBe(false);
-		fetchSpy.mockClear();
-		await edgeCall(configured, 'changes');
-		expect(fetchSpy).not.toHaveBeenCalled();
-		expect(await runDurableObjectAlarm(stub())).toBe(false);
-		await env.DB.prepare('UPDATE members SET fob_id = 8 WHERE member_id = ?').bind(m.member_id).run();
-		await edgeCall(configured, 'changes');
-		expect(goal.fobs).toEqual([8]);
-		expect(await runDurableObjectAlarm(stub())).toBe(false);
-	});
+  it('includes exactly the members eligible for door access', async () => {
+    const expected = [];
+    let fob = 100;
+    for (const status of [null, 'active', 'trialing', 'past_due', 'canceled']) {
+      for (const signed of [false, true, 'legacy']) {
+        for (const [nonBillable, legacyBilling] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
+          const m = await member(fob++, status, signed === true);
+          await env.DB.prepare('UPDATE members SET non_billable = ?, legacy_billing = ?, legacy_waiver_signed = ? WHERE member_id = ?')
+            .bind(nonBillable, legacyBilling, Number(signed === 'legacy'), m.member_id).run();
+          if (nonBillable || (signed && (legacyBilling || status === 'active' || status === 'trialing'))) expected.push(m.fob_id);
+        }
+      }
+    }
+    await insertMember({ non_billable: 1 });
+    await pushFobs(edgeEnv);
+    expect(edge.fobs).toEqual(expected);
+  });
 
-	it('keeps retrying an offline edge, then cancels the alarm on recovery', async () => {
-		await member();
-		const normal = fetchSpy.getMockImplementation();
-		fetchSpy.mockRejectedValue(new Error('Edge offline'));
-		await expect(edgeCall(configured, 'changes')).rejects.toThrow();
-		for (let retry = 0; retry < 2; retry++) {
-			expect(await runDurableObjectAlarm(stub())).toBe(true);
-			await runInDurableObject(stub(), async (_instance, ctx) => {
-				const delay = await ctx.storage.getAlarm() - Date.now();
-				expect(delay).toBeGreaterThan(50000);
-				expect(delay).toBeLessThanOrEqual(60000);
-			});
-		}
-		fetchSpy.mockImplementation(normal);
-		expect(await runDurableObjectAlarm(stub())).toBe(true);
-		expect(goal.fobs).toEqual([7]);
-		expect(await runDurableObjectAlarm(stub())).toBe(false);
-	});
+  it.each([
+    ['offline', () => Promise.reject(new Error('Edge offline'))],
+    ['rejected', () => new Response(null, { status: 401 })],
+    ['redirected', () => new Response(null, { status: 302, headers: { Location: 'https://other.example' } })],
+  ])('logs a %s push without throwing', async (_name, failure) => {
+    await member();
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    fetchSpy.mockImplementation(failure);
+    await pushFobs(edgeEnv);
+    expect(JSON.parse(log.mock.calls[0][0])).toMatchObject({ event: 'edge.push_failed' });
+  });
 
-	it.each(['changes', 'full'])('arms %s recovery before a failed D1 revision read', async operation => {
-		await member();
-		await env.DB.exec('ALTER TABLE edge_changes RENAME TO unavailable_edge_changes');
-		await expect(edgeCall(configured, operation)).rejects.toThrow();
-		await runInDurableObject(stub(), async (_instance, ctx) => {
-			expect(await ctx.storage.get('fullPending')).toBe(operation === 'full' ? true : undefined);
-			expect(await ctx.storage.getAlarm()).not.toBeNull();
-		});
-		await env.DB.exec('ALTER TABLE unavailable_edge_changes RENAME TO edge_changes');
-		expect(await runDurableObjectAlarm(stub())).toBe(true);
-		expect(goal.fobs).toEqual([7]);
-		expect(await runDurableObjectAlarm(stub())).toBe(false);
-	});
+  it('delivers all 512 authorized fobs and refuses to truncate an overflowing list', async () => {
+    await env.DB.prepare(`INSERT INTO members(fob_id, non_billable)
+      WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<512) SELECT n, 1 FROM seq`).run();
+    await pushFobs(edgeEnv);
+    expect(edge.fobs).toEqual(Array.from({ length: 512 }, (_, i) => i + 1));
+    await env.DB.prepare('INSERT INTO members(fob_id, non_billable) VALUES (513, 1)').run();
+    quiet();
+    await pushFobs(edgeEnv);
+    expect(pushes).toHaveLength(1);
+  });
+});
 
-	it('reconciles once for a legacy alarm and stops polling', async () => {
-		const m = await member();
-		await edgeCall(configured, 'changes');
-		await env.DB.prepare('UPDATE members SET fob_id = 8 WHERE member_id = ?').bind(m.member_id).run();
-		await runInDurableObject(stub(), async (_instance, ctx) => ctx.storage.setAlarm(Date.now() + 60000));
-		expect(await runDurableObjectAlarm(stub())).toBe(true);
-		expect(goal.fobs).toEqual([8]);
-		expect(await runDurableObjectAlarm(stub())).toBe(false);
-	});
+describe('Edge sync requests', () => {
+  const request = (init = {}) => call('/webhooks/edge/sync', { method: 'POST', ...init }, edgeEnv);
+  beforeEach(() => member());
 
-	it.each(['changes', 'full'])('retains a newer revision committed during successful %s delivery until it is synced', async operation => {
-		const m = await member();
-		const normal = fetchSpy.getMockImplementation();
-		fetchSpy.mockImplementation(async (url, init) => {
-			const response = await normal(url, init);
-			if (init.method === 'PUT') await env.DB.prepare('UPDATE members SET fob_id = 8 WHERE member_id = ?').bind(m.member_id).run();
-			return response;
-		});
-		await edgeCall(configured, operation);
-		expect(goal.fobs).toEqual([7]);
-		fetchSpy.mockImplementation(normal);
-		expect(await runDurableObjectAlarm(stub())).toBe(true);
-		expect(goal.fobs).toEqual([8]);
-		expect(await runDurableObjectAlarm(stub())).toBe(false);
-	});
+  it('accepts one unauthenticated request per ten minutes and pushes current state', async () => {
+    expect((await request()).status).toBe(202);
+    expect(pushes).toHaveLength(1);
+    const limited = await request();
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get('Retry-After')).toBe('600');
+    const { sync_requested } = await env.DB.prepare('SELECT sync_requested FROM edge_changes').first();
+    vi.spyOn(Date, 'now').mockReturnValue((sync_requested + 600) * 1000);
+    expect((await request()).status).toBe(202);
+    expect(pushes).toHaveLength(2);
+  });
 
-	it('serializes a change notification arriving during delivery and finishes idle', async () => {
-		const m = await member();
-		const normal = fetchSpy.getMockImplementation();
-		// Keep the deliberately blocked promises in the same DO I/O context.
-		await runInDurableObject(stub(), async instance => {
-			let release, started;
-			const blocked = new Promise(resolve => { release = resolve; });
-			const delivering = new Promise(resolve => { started = resolve; });
-			fetchSpy.mockImplementation(async (url, init) => {
-				const response = await normal(url, init);
-				if (init.method === 'PUT') { started(); await blocked; }
-				return response;
-			});
-			const first = instance.execute('changes');
-			await delivering;
-			await instance.env.DB.prepare('UPDATE members SET fob_id = 8 WHERE member_id = ?').bind(m.member_id).run();
-			const second = instance.execute('changes');
-			release();
-			expect(await Promise.all([first, second])).toEqual([{ ok: true }, { ok: true }]);
-		});
-		expect(goal.fobs).toEqual([8]);
-		expect(writes.map(write => ({ method: write.method, version: write.version, fobs: write.fobs })))
-			.toEqual([{ method: 'PUT', version: 1, fobs: [7] }, { method: 'PUT', version: 2, fobs: [8] }]);
-		expect(await runDurableObjectAlarm(stub())).toBe(false);
-	});
+  it('admits exactly one of many concurrent requests', async () => {
+    const statuses = await Promise.all(Array.from({ length: 8 }, () => request({ headers: { Origin: 'https://evil.example' } })));
+    expect(statuses.map(response => response.status).sort()).toEqual([202, 429, 429, 429, 429, 429, 429, 429]);
+  });
+});
 
-	it('honors pending forced work when an unchanged notification arrives', async () => {
-		await member();
-		await edgeCall(configured, 'changes');
-		const normal = fetchSpy.getMockImplementation();
-		fetchSpy.mockRejectedValue(new Error('Edge offline'));
-		await expect(edgeCall(configured, 'full')).rejects.toThrow();
-		await expect(edgeCall(configured, 'changes')).rejects.toThrow();
-		await runInDurableObject(stub(), async (_instance, ctx) => {
-			expect(await ctx.storage.get('fullPending')).toBe(true);
-		});
-		fetchSpy.mockImplementation(normal);
-		await edgeCall(configured, 'changes');
-		expect(writes).toHaveLength(2);
-		expect(writes.at(-1)).toMatchObject({ method: 'PUT', fobs: [7] });
-		await runInDurableObject(stub(), async (_instance, ctx) => {
-			expect(await ctx.storage.get('fullPending')).toBeUndefined();
-		});
-		expect(await runDurableObjectAlarm(stub())).toBe(false);
-	});
+describe('Swipe ingestion', () => {
+  let key;
+  const swipe = (id, extra = {}) => ({ id, time: new Date().toISOString(), controller: '192.168.1.2', fob: 7, allowed: true, ...extra });
+  async function upload(events, { authorization = `Bearer ${key}`, edgeRevision } = {}) {
+    edgeRevision ??= await revision();
+    return call('/webhooks/edge/swipes', {
+      method: 'POST', body: JSON.stringify(events),
+      headers: { Authorization: authorization, 'Content-Type': 'application/json', 'X-Edge-Revision': String(edgeRevision) },
+    }, edgeEnv);
+  }
+  beforeEach(async () => { key = await edgeEventKey(edgeEnv); });
 
-	it.each(['changes', 'full'])('serializes %s behind an ambiguous forced delivery without losing pending work', async operation => {
-		await member();
-		await edgeCall(configured, 'changes');
-		const normal = fetchSpy.getMockImplementation();
-		const log = vi.spyOn(console, 'log').mockImplementation(() => {});
-		await runInDurableObject(stub(), async (instance, ctx) => {
-			let release, started, fail = true;
-			const blocked = new Promise(resolve => { release = resolve; });
-			const delivering = new Promise(resolve => { started = resolve; });
-			fetchSpy.mockImplementation(async (url, init) => {
-				const response = await normal(url, init);
-				if (init.method === 'PUT' && fail) {
-					fail = false;
-					started();
-					await blocked;
-					throw new Error('Connection lost after commit');
-				}
-				return response;
-			});
-			const first = instance.execute('full');
-			await delivering;
-			expect(await ctx.storage.get('fullPending')).toBe(true);
-			expect(await ctx.storage.getAlarm()).not.toBeNull();
-			expect(log).not.toHaveBeenCalled();
-			const second = instance.execute(operation);
-			release();
-			expect(await first).toMatchObject({ ok: false });
-			expect(await second).toEqual({ ok: true });
-			expect(await ctx.storage.get('fullPending')).toBeUndefined();
-		});
-		expect(writes.map(write => write.version)).toEqual([1, 2, 3]);
-		expect(log).toHaveBeenCalledExactlyOnceWith(JSON.stringify({ event: 'edge.full.completed' }));
-		expect(await runDurableObjectAlarm(stub())).toBe(false);
-	});
+  it('authenticates the edge key before importing anything', async () => {
+    quiet();
+    for (const authorization of ['', `Bearer ${'0'.repeat(64)}`, key, `Bearer ${key}x`, `bearer ${key}`]) {
+      const response = await upload([swipe('forged')], { authorization });
+      expect(response.status).toBe(401);
+      expect(await response.json()).toEqual({ error: 'Edge authentication failed.' });
+    }
+    expect(await swipeCount()).toBe(0);
+    expect((await upload([swipe('valid')])).status).toBe(204);
+    expect(await swipeCount()).toBe(1);
+  });
 
-	it.each([{ date: null }, { date: '2026-09-13' }, true])('recovers durable forced work %j after reconstruction and removes obsolete keys', async pending => {
-		await member();
-		await edgeCall(configured, 'changes');
-		await runInDurableObject(stub(), async (_instance, ctx) => {
-			await ctx.storage.put({ fullPending: pending, nightlyDone: '2026-09-13' });
-			await ctx.storage.setAlarm(Date.now() + 60000);
-		});
-		const normal = fetchSpy.getMockImplementation();
-		fetchSpy.mockRejectedValue(new Error('Edge offline'));
-		await runInDurableObject(stub(), async (instance, ctx) => {
-			await new EdgeSync(ctx, instance.env).alarm();
-			expect(await ctx.storage.get('fullPending')).toBe(true);
-			expect(await ctx.storage.get('nightlyDone')).toBe('2026-09-13');
-			expect(await ctx.storage.getAlarm()).not.toBeNull();
-		});
-		fetchSpy.mockImplementation(normal);
-		await runInDurableObject(stub(), async (instance, ctx) => {
-			await new EdgeSync(ctx, instance.env).alarm();
-			expect(await ctx.storage.get('fullPending')).toBeUndefined();
-			expect(await ctx.storage.get('nightlyDone')).toBeUndefined();
-		});
-		expect(writes.map(write => write.version)).toEqual([1, 2]);
-		expect(await runDurableObjectAlarm(stub())).toBe(false);
-	});
+  it('deduplicates swipes and uses ownership at swipe time after reassignment', async () => {
+    const first = await member();
+    await env.DB.prepare('UPDATE fob_assignments SET started = 1000 WHERE member_id = ?').bind(first.member_id).run();
+    await env.DB.prepare('UPDATE members SET fob_id = NULL WHERE member_id = ?').bind(first.member_id).run();
+    await env.DB.prepare('UPDATE fob_assignments SET ended = 2000 WHERE member_id = ?').bind(first.member_id).run();
+    const second = await member();
+    await env.DB.prepare('UPDATE fob_assignments SET started = 2000 WHERE member_id = ?').bind(second.member_id).run();
+    const swipes = [1999.999, 2000].map((time, i) => swipe(`swipe-${i}`, { time: new Date(time * 1000).toISOString() }));
+    swipes.push({ ...swipes[0], id: 'unknown', fob: 99, allowed: false });
+    expect((await upload(swipes)).status).toBe(204);
+    const select = "SELECT * FROM member_events WHERE event_type = 'FobSwipe' ORDER BY source_event_id";
+    const original = (await env.DB.prepare(select).all()).results;
+    expect(original.map(e => [e.source_event_id, e.member_id])).toEqual([['swipe-0', first.member_id], ['swipe-1', second.member_id], ['unknown', null]]);
+    for (const [i, event] of original.entries()) {
+      expect(event.created).toBe(Math.floor(Date.parse(swipes[i].time) / 1000));
+      expect(JSON.parse(event.details)).toEqual({ ...swipes[i], allowed: swipes[i].allowed ? 1 : 0 });
+    }
+    // Retries keep the original evidence.
+    expect((await upload(swipes.map(event => ({ ...event, allowed: !event.allowed })))).status).toBe(204);
+    expect((await env.DB.prepare(select).all()).results).toEqual(original);
+  });
 
-	it('retires a legacy nightly completion key without forcing idle change notifications', async () => {
-		await member();
-		await edgeCall(configured, 'changes');
-		await runInDurableObject(stub(), async (_instance, ctx) => ctx.storage.put('nightlyDone', '2026-09-13'));
-		fetchSpy.mockClear();
-		await edgeCall(configured, 'changes');
-		expect(fetchSpy).not.toHaveBeenCalled();
-		await runInDurableObject(stub(), async (_instance, ctx) => {
-			expect(await ctx.storage.get('nightlyDone')).toBeUndefined();
-		});
-		expect(await runDurableObjectAlarm(stub())).toBe(false);
-	});
+  it('pushes the current fob list when the edge reports a different revision', async () => {
+    await member();
+    expect((await upload([])).status).toBe(204);
+    expect(pushes).toHaveLength(0);
+    for (const stale of [(await revision()) - 1, '', 'x']) expect((await upload([], { edgeRevision: stale })).status).toBe(204);
+    expect(pushes).toHaveLength(3);
+    expect(edge).toMatchObject({ revision: await revision(), fobs: [7] });
+  });
 
-	it.each(['active', 'trialing'])('allows %s with a signed waiver; pushes snapshots for changes and empty revocation', async status => {
-		const subscribed = await member(7, status);
-		await member(8, 'past_due');
-		const unsigned = await member(9, status, false);
-		await edgeCall(configured, 'changes');
-		expect(goal.fobs).toEqual([7]);
-		await edgeCall(configured, 'changes');
-		expect(writes).toHaveLength(1);
-		await env.DB.prepare(`UPDATE members SET stripe_subscription_state = 'past_due' WHERE member_id = ?`).bind(subscribed.member_id).run();
-		await edgeCall(configured, 'changes');
-		expect(writes[1]).toMatchObject({ method: 'PUT', fobs: [] });
-		expect(goal.fobs).toEqual([]);
-		await env.DB.prepare(`INSERT INTO waivers(member_id, version, content, name, email, agreements) VALUES (?, 1, 'Terms', 'Maker', 'maker@example.com', '[]')`).bind(unsigned.member_id).run();
-		await edgeCall(configured, 'changes');
-		expect(goal.fobs).toEqual([9]);
-		await expect(env.DB.prepare('UPDATE members SET fob_id = 9 WHERE member_id = ?').bind(subscribed.member_id).run()).rejects.toThrow();
-	});
-
-	it('shows the same admin fob status as edge eligibility across Stripe states, waivers, and overrides', async () => {
-		const expected = [], members = [];
-		let fob = 100;
-		for (const status of [null, 'active', 'trialing', 'past_due', 'canceled']) {
-			for (const signed of [false, true, 'legacy']) {
-				for (const [nonBillable, legacyBilling] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
-					const m = await member(fob++, status, signed === true);
-					members.push(m);
-					await env.DB.prepare('UPDATE members SET non_billable = ?, legacy_billing = ?, legacy_waiver_signed = ? WHERE member_id = ?')
-						.bind(nonBillable, legacyBilling, Number(signed === 'legacy'), m.member_id).run();
-					if (nonBillable || (signed && (legacyBilling || status === 'active' || status === 'trialing'))) expected.push(m.fob_id);
-				}
-			}
-		}
-		const unassigned = await member(null, null, false);
-		members.push(unassigned);
-		await env.DB.prepare('UPDATE members SET non_billable = 1, legacy_billing = 1 WHERE member_id = ?').bind(unassigned.member_id).run();
-		await edgeCall(configured, 'full');
-		expect(goal.fobs).toEqual(expected);
-		const token = await issueToken(env, '333333333333333333', 'admin');
-		for (const m of members) {
-			const response = await worker.fetch(new Request(`${env.SITE_URL}/admin/members/${m.member_id}`, {
-				headers: { Cookie: `thelab_admin=${token}` },
-			}), configured);
-			expect(response.status).toBe(200);
-			const html = await response.text();
-			const enabled = goal.fobs.includes(m.fob_id);
-			expect(html).toContain(`admin-status--${enabled ? 'active' : 'inactive'}">Fob ${enabled ? 'enabled' : 'disabled'}</span>`);
-		}
-	});
-
-	it('synchronizes imported waiver eligibility changes without creating signature records', async () => {
-		const m = await member(7, 'active', false);
-		await edgeCall(configured, 'full');
-		expect(goal.fobs).toEqual([]);
-		await env.DB.prepare('UPDATE members SET legacy_waiver_signed = 1 WHERE member_id = ?').bind(m.member_id).run();
-		await edgeCall(configured, 'changes');
-		expect(goal.fobs).toEqual([7]);
-		expect(await env.DB.prepare('SELECT count(*) AS count FROM waivers').first()).toEqual({ count: 0 });
-		const token = await issueToken(env, '333333333333333333', 'admin');
-		const response = await worker.fetch(new Request(`${env.SITE_URL}/admin/members/${m.member_id}`, {
-			headers: { Cookie: `thelab_admin=${token}` },
-		}), configured);
-		expect(await response.text()).toContain('Conway recorded a signed waiver.');
-		await env.DB.prepare('UPDATE members SET legacy_waiver_signed = 0 WHERE member_id = ?').bind(m.member_id).run();
-		await edgeCall(configured, 'changes');
-		expect(goal.fobs).toEqual([]);
-	});
-
-	it('saves access checkboxes, records history, and immediately adds or removes fobs', async () => {
-		const m = await member(7, null, false);
-		const read = () => env.DB.prepare('SELECT * FROM members WHERE member_id = ?').bind(m.member_id).first();
-		await runInDurableObject(env.MEMBERS.get(env.MEMBERS.idFromName(m.member_id)), instance => {
-			instance.env = { ...instance.env, ...configured };
-		});
-		const token = await issueToken(env, '333333333333333333', 'admin');
-		const cookie = `thelab_admin=${token}`;
-		const path = `${env.SITE_URL}/admin/members/${m.member_id}`;
-		const get = async (url = path) => (await worker.fetch(new Request(url, { headers: { Cookie: cookie } }), configured)).text();
-		const save = async (extra = {}) => worker.fetch(new Request(path, {
-			method: 'POST', headers: { Cookie: cookie, Origin: env.SITE_URL, 'Content-Type': 'application/x-www-form-urlencoded' },
-			body: new URLSearchParams({
-				csrf: await hash(`admin-csrf:${token}`), metadata_version: String((await read()).metadata_version),
-				discord_user_id: '', stripe_customer_id: '', stripe_subscription_id: '', name_override: '', notes: '',
-				billing: 'monthly', discount_type: '', fob_id: '7', ...extra
-			}),
-		}), configured);
-		const checked = name => new RegExp(`name="${name}" type="checkbox" checked`);
-		expect(await read()).toMatchObject({ non_billable: 0, legacy_billing: 0 });
-		expect(await get()).not.toMatch(checked('non_billable'));
-		await edgeCall(configured, 'changes');
-		expect(goal.fobs).toEqual([]);
-
-		expect((await save({ non_billable: 'on', legacy_billing: 'on' })).status).toBe(303);
-		expect(goal.fobs).toEqual([7]);
-		expect(writes.at(-1)).toMatchObject({ method: 'PUT', fobs: [7] });
-		expect(await read()).toMatchObject({ non_billable: 1, legacy_billing: 1 });
-		const html = await get();
-		expect(html).toContain('>Fob enabled</span>');
-		expect(html).toMatch(checked('non_billable'));
-		expect(html).toMatch(checked('legacy_billing'));
-		expect(html).toContain('Disabled → Enabled');
-		const list = await get(`${env.SITE_URL}/admin?waiver=all&discord=all`);
-		expect(list).toContain('<small>Non-billable</small>');
-		expect(list).toContain('<small>Legacy billing</small>');
-
-		const stale = await save({ metadata_version: '0', legacy_billing: 'on' });
-		expect(stale.status).toBe(409);
-		const staleHTML = await stale.text();
-		expect(staleHTML).toContain('>Fob enabled</span>');
-		expect(staleHTML).not.toMatch(checked('non_billable'));
-		expect(staleHTML).toMatch(checked('legacy_billing'));
-		expect(goal.fobs).toEqual([7]);
-		for (const key of ['non_billable', 'legacy_billing']) {
-			expect((await save({ [key]: 'false' })).status).toBe(400);
-		}
-		expect(await read()).toMatchObject({ non_billable: 1, legacy_billing: 1 });
-
-		expect((await save({ legacy_billing: 'on' })).status).toBe(303);
-		expect(await get()).toContain('>Fob disabled</span>');
-		expect(writes.at(-1)).toMatchObject({ method: 'PUT', fobs: [] });
-		expect(goal.fobs).toEqual([]);
-		await env.DB.prepare(`INSERT INTO waivers(member_id, version, content, name, email, agreements)
-      VALUES (?, 1, 'Terms', 'Maker', 'maker@example.com', '[]')`).bind(m.member_id).run();
-		await edgeCall(configured, 'changes');
-		expect(goal.fobs).toEqual([7]);
-		expect(await get()).toContain('>Fob enabled</span>');
-		expect((await save()).status).toBe(303);
-		expect(goal.fobs).toEqual([]);
-		expect(await read()).toMatchObject({ non_billable: 0, legacy_billing: 0 });
-		const revision = await env.DB.prepare('SELECT revision FROM edge_changes').first();
-		expect((await save()).status).toBe(303);
-		expect(await env.DB.prepare('SELECT revision FROM edge_changes').first()).toEqual(revision);
-		const { results } = await env.DB.prepare(`SELECT event_type, details FROM member_events
-      WHERE event_type IN ('NonBillableChanged', 'LegacyBillingChanged') ORDER BY id`).all();
-		expect(results).toEqual([
-			{ event_type: 'NonBillableChanged', details: '{"from":0,"to":1}' },
-			{ event_type: 'LegacyBillingChanged', details: '{"from":0,"to":1}' },
-			{ event_type: 'NonBillableChanged', details: '{"from":1,"to":0}' },
-			{ event_type: 'LegacyBillingChanged', details: '{"from":1,"to":0}' },
-		]);
-	});
-
-	it('recovers ambiguous delivery from edge state and keeps later revisions pending', async () => {
-		const m = await member();
-		await edgeCall(configured, 'changes');
-		await env.DB.prepare('UPDATE members SET fob_id = 10 WHERE member_id = ?').bind(m.member_id).run();
-		const normal = fetchSpy.getMockImplementation();
-		fetchSpy.mockImplementation(async (url, init) => {
-			const response = await normal(url, init);
-			if (init.method === 'PUT') {
-				await env.DB.prepare('UPDATE members SET fob_id = 11 WHERE member_id = ?').bind(m.member_id).run();
-				throw new Error('Connection lost after commit');
-			}
-			return response;
-		});
-		await expect(edgeCall(configured, 'changes')).rejects.toThrow();
-		expect(goal.fobs).toEqual([10]);
-		fetchSpy.mockImplementation(normal);
-		await runDurableObjectAlarm(stub());
-		expect(goal.fobs).toEqual([11]);
-		expect(goal.version).toBeGreaterThan(writes[1].version);
-		expect(await runDurableObjectAlarm(stub())).toBe(false);
-	});
-
-	it.each([false, true])('recovers after DO reconstruction when a failed PUT committed remotely: %s', async committed => {
-		await member();
-		const normal = fetchSpy.getMockImplementation();
-		fetchSpy.mockImplementation(async (url, init) => {
-			if (init.method !== 'PUT') return normal(url, init);
-			if (committed) await normal(url, init);
-			throw new Error('Connection lost');
-		});
-		await expect(edgeCall(configured, 'changes')).rejects.toThrow();
-		let attempted, secret;
-		await runInDurableObject(stub(), async (_instance, ctx) => {
-			attempted = await ctx.storage.get('version');
-			secret = await ctx.storage.get('eventSigningKey');
-			expect(attempted).toBe(1);
-			expect(await ctx.storage.get('syncedRevision')).toBeUndefined();
-			expect(await ctx.storage.get('eventKeyDelivered')).toBeUndefined();
-			expect(await ctx.storage.getAlarm()).not.toBeNull();
-		});
-		expect(goal?.version ?? 0).toBe(committed ? 1 : 0);
-		fetchSpy.mockImplementation(normal).mockClear();
-		await runInDurableObject(stub(), async (instance, ctx) => {
-			// Discard all in-memory coordination, retaining only durable state.
-			await new EdgeSync(ctx, instance.env).alarm();
-		});
-		expect(fetchSpy.mock.calls.map(([, init]) => init.method)).toEqual(['GET', 'PUT']);
-		expect(goal).toEqual({ version: attempted + 1, fobs: [7], event_signing_key: secret });
-		expect(await runDurableObjectAlarm(stub())).toBe(false);
-	});
-
-	it('sends a complete snapshot for a new revision even when eligibility is unchanged', async () => {
-		const m = await member();
-		await edgeCall(configured, 'changes');
-		await env.DB.prepare("UPDATE members SET stripe_subscription_state = 'trialing' WHERE member_id = ?").bind(m.member_id).run();
-		await edgeCall(configured, 'changes');
-		expect(writes).toHaveLength(2);
-		expect(writes[1]).toEqual({ ...writes[0], version: writes[0].version + 1 });
-		expect(await runDurableObjectAlarm(stub())).toBe(false);
-	});
-
-	it.each([
-		'not-json', 'null', '{}',
-		JSON.stringify({ version: -1, fobs: [] }),
-		JSON.stringify({ version: 1.5, fobs: [] }),
-		JSON.stringify({ version: 1, fobs: [7, 7] }),
-		JSON.stringify({ version: 1, fobs: [0] }),
-		JSON.stringify({ version: 1, fobs: [4294967296] }),
-		JSON.stringify({ version: 1, fobs: ['7'] }),
-		JSON.stringify({ version: 1, fobs: [], event_signing_key: 'invalid' }),
-	])('keeps full work pending when the remote goal is invalid: %s', async text => {
-		await member();
-		const normal = fetchSpy.getMockImplementation();
-		fetchSpy.mockResolvedValue(new Response(text));
-		await expect(edgeCall(configured, 'full')).rejects.toMatchObject({ status: 503 });
-		expect(writes).toEqual([]);
-		await runInDurableObject(stub(), async (_instance, ctx) => {
-			expect(await ctx.storage.get('syncedRevision')).toBeUndefined();
-			expect(await ctx.storage.get('fullPending')).toBe(true);
-			expect(await ctx.storage.getAlarm()).not.toBeNull();
-		});
-		fetchSpy.mockImplementation(normal);
-		expect(await runDurableObjectAlarm(stub())).toBe(true);
-		expect(goal.fobs).toEqual([7]);
-		await runInDurableObject(stub(), async (_instance, ctx) => {
-			expect(await ctx.storage.get('fullPending')).toBeUndefined();
-		});
-		expect(await runDurableObjectAlarm(stub())).toBe(false);
-	});
-
-	it('rejects exhausted remote versions without acknowledging the local revision', async () => {
-		await member();
-		goal = { version: Number.MAX_SAFE_INTEGER, fobs: [] };
-		await expect(edgeCall(configured, 'changes')).rejects.toMatchObject({ status: 503 });
-		expect(writes).toEqual([]);
-		await runInDurableObject(stub(), async (_instance, ctx) => {
-			expect(await ctx.storage.get('syncedRevision')).toBeUndefined();
-			expect(await ctx.storage.get('version')).toBeUndefined();
-			expect(await ctx.storage.getAlarm()).not.toBeNull();
-		});
-		goal = { version: 10, fobs: [] };
-		expect(await runDurableObjectAlarm(stub())).toBe(true);
-		expect(goal).toMatchObject({ version: 11, fobs: [7] });
-		expect(await runDurableObjectAlarm(stub())).toBe(false);
-	});
-
-	it('rereads remote state after a PUT conflict and retries with a higher-version snapshot', async () => {
-		const m = await member();
-		await edgeCall(configured, 'changes');
-		await env.DB.prepare('UPDATE members SET fob_id = 8 WHERE member_id = ?').bind(m.member_id).run();
-		const normal = fetchSpy.getMockImplementation(), previous = goal.version;
-		fetchSpy.mockImplementation(async (url, init) => {
-			if (init.method !== 'PUT') return normal(url, init);
-			expect(JSON.parse(init.body).version).toBe(previous + 1);
-			goal = { ...goal, version: previous + 10, fobs: [7, 9] };
-			return new Response(null, { status: 409 });
-		});
-		await expect(edgeCall(configured, 'changes')).rejects.toMatchObject({ status: 503 });
-		expect(writes).toHaveLength(1);
-		fetchSpy.mockImplementation(normal);
-		expect(await runDurableObjectAlarm(stub())).toBe(true);
-		expect(writes.at(-1)).toMatchObject({ method: 'PUT', version: previous + 11, fobs: [8] });
-		expect(goal.fobs).toEqual([8]);
-		expect(await runDurableObjectAlarm(stub())).toBe(false);
-	});
-
-	it('deduplicates pushed swipes and uses ownership at swipe time after reassignment', async () => {
-		const first = await member();
-		await env.DB.prepare('UPDATE fob_assignments SET started = 1000 WHERE member_id = ?').bind(first.member_id).run();
-		await env.DB.prepare('UPDATE members SET fob_id = NULL WHERE member_id = ?').bind(first.member_id).run();
-		await env.DB.prepare('UPDATE fob_assignments SET ended = 2000 WHERE member_id = ?').bind(first.member_id).run();
-		const second = await member();
-		await env.DB.prepare('UPDATE fob_assignments SET started = 2000 WHERE member_id = ?').bind(second.member_id).run();
-		swipes = [1999.999, 2000].map((time, i) => ({ id: `swipe-${i}`, time: new Date(time * 1000).toISOString(), fob: 7, allowed: true, controller: '192.168.1.2' }));
-		swipes.push({ ...swipes[0], id: 'unknown', fob: 99, allowed: false });
-		await pushSwipes();
-		await pushSwipes();
-		const { results } = await env.DB.prepare("SELECT source_event_id AS id, member_id FROM member_events WHERE event_type = 'FobSwipe' ORDER BY source_event_id").all();
-		expect(results).toEqual([{ id: 'swipe-0', member_id: first.member_id }, { id: 'swipe-1', member_id: second.member_id }, { id: 'unknown', member_id: null }]);
-		expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM member_events WHERE event_type = 'FobSwipe'").first()).n).toBe(3);
-		const original = (await env.DB.prepare("SELECT * FROM member_events WHERE event_type = 'FobSwipe' ORDER BY source_event_id").all()).results;
-		for (const [i, event] of original.entries()) {
-			expect(event.created).toBe(Math.floor(Date.parse(swipes[i].time) / 1000));
-			expect(JSON.parse(event.details)).toEqual({ ...swipes[i], allowed: swipes[i].allowed ? 1 : 0 });
-		}
-		// Retry after ownership and payload changes must retain the original evidence.
-		await env.DB.prepare('UPDATE fob_assignments SET member_id = NULL').run();
-		swipes = swipes.map(event => ({ ...event, allowed: !event.allowed, controller: 'changed' }));
-		await pushSwipes();
-		expect((await env.DB.prepare("SELECT * FROM member_events WHERE event_type = 'FobSwipe' ORDER BY source_event_id").all()).results).toEqual(original);
-	});
-
-	it('renders cached swipes across admin pages without contacting edgeproxy', async () => {
-		const m = await member();
-		await env.DB.prepare('UPDATE fob_assignments SET started = 1000 WHERE member_id = ?').bind(m.member_id).run();
-		swipes = [{ id: 'cached', fob: 7, allowed: true, controller: '192.168.1.2', time: new Date().toISOString() }];
-		await pushSwipes();
-		const token = await issueToken(env, '333333333333333333', 'admin');
-		const execute = vi.fn(async () => ({ ok: false, error: 'Edgeproxy is unavailable.' }));
-		const uiEnv = { ...configured, EDGE_SYNC: { idFromName: () => 'edge', get: () => ({ execute }) } };
-		for (const path of ['/admin', '/admin/events', '/admin/events?event_type=FobSwipe',
-			`/admin/members/${m.member_id}`, `/admin/members/${m.member_id}/events`, `/admin/members/${m.member_id}/events?event_type=FobSwipe`]) {
-			const response = await worker.fetch(new Request(`${env.SITE_URL}${path}`, { headers: { Cookie: `thelab_admin=${token}` } }), uiEnv);
-			expect(response.status).toBe(200);
-			const html = await response.text();
-			if (path !== '/admin') expect(html).toContain('Fob 7');
-			expect(html).toMatch(/<header\b[^>]*>.*>Log Out<\/button>.*<\/header>/s);
-			expect(html).not.toContain('Sync Cache');
-			expect(html).not.toContain('/admin/edge/resync');
-		}
-		expect(execute).not.toHaveBeenCalled();
-	});
-
-	async function operatorSync({ token, csrf, origin = env.SITE_URL, method = 'POST' } = {}) {
-		token ??= await issueToken(env, '333333333333333333', 'admin');
-		csrf ??= await hash(`admin-csrf:${token}`);
-		return worker.fetch(new Request(`${env.SITE_URL}/admin/edge/resync`, { method,
-			headers: { Cookie: `thelab_admin=${token}`, Origin: origin, 'Content-Type': 'application/x-www-form-urlencoded' },
-			...(method === 'POST' ? { body: new URLSearchParams({ csrf }) } : {}),
-		}), configured);
-	}
-
-	it('accepts authenticated CSRF-protected operator full syncs and safely handles redelivery', async () => {
-		await member();
-		const log = vi.spyOn(console, 'log').mockImplementation(() => { });
-		for (let delivery = 0; delivery < 2; delivery++) {
-			expect((await operatorSync()).status).toBe(303);
-			expect(writes[delivery]).toMatchObject({ method: 'PUT', fobs: [7] });
-			expect(await runDurableObjectAlarm(stub())).toBe(false);
-		}
-		expect(writes[1].version).toBeGreaterThan(writes[0].version);
-		expect(writes[1].event_signing_key).toBe(writes[0].event_signing_key);
-		expect(log).toHaveBeenCalledWith(JSON.stringify({ event: 'edge.full.completed' }));
-	});
-
-	it('retains failed operator full sync for alarm retry after the HTTP response', async () => {
-		await member();
-		const normal = fetchSpy.getMockImplementation();
-		fetchSpy.mockRejectedValue(new Error('Edge offline'));
-		expect((await operatorSync()).status).toBe(503);
-		fetchSpy.mockImplementation(normal);
-		expect(await runDurableObjectAlarm(stub())).toBe(true);
-		expect(goal.fobs).toEqual([7]);
-		expect(await runDurableObjectAlarm(stub())).toBe(false);
-	});
-
-	it.each([
-		[{ token: '' }, 303], [{ csrf: 'wrong' }, 403], [{ origin: 'https://other.example' }, 403], [{ method: 'GET' }, 405],
-	])('rejects unauthorized or invalid operator requests: %j', async (options, status) => {
-		expect((await operatorSync(options)).status).toBe(status);
-		expect(fetchSpy).not.toHaveBeenCalled();
-	});
-
-	it.each([
-		[null, 'missing'],
-		['null', 'null (opaque origin; check the page Referrer-Policy)'],
-		['https://elsewhere.example', 'https://elsewhere.example'],
-		['https://private-user:private-password@elsewhere.example/private-path?code=private-code', 'https://elsewhere.example'],
-		['malformed-private-header', 'invalid'],
-	])('explains rejected admin form origins in traces without exposing request secrets: %s', async (origin, received) => {
-		const token = await issueToken(env, '333333333333333333', 'admin');
-		const csrf = await hash(`admin-csrf:${token}`);
-		const log = vi.spyOn(console, 'warn').mockImplementation(() => { });
-		const headers = new Headers({ Cookie: `thelab_admin=${token}`, 'Content-Type': 'application/x-www-form-urlencoded' });
-		if (origin !== null) headers.set('Origin', origin);
-		const response = await worker.fetch(new Request(`${env.SITE_URL}/admin/logout?code=private-query`, {
-			method: 'POST', headers, body: new URLSearchParams({ csrf, notes: 'private-body' }),
-		}), configured);
-		expect(response.status).toBe(403);
-		expect(response.headers.get('Referrer-Policy')).toBe('same-origin');
-		expect(await response.text()).toContain('The form’s origin could not be verified');
-		expect(fetchSpy).not.toHaveBeenCalled();
-		expect(writes).toHaveLength(0);
-		expect(log).toHaveBeenCalledTimes(1);
-		const entry = JSON.parse(log.mock.calls[0][0]);
-		expect(entry).toMatchObject({
-			event: 'admin.failed', path: '/admin/logout', method: 'POST', status: 403,
-			error: { cause: { message: `Admin form Origin check failed: expected ${env.SITE_URL}; received ${received}. Request rejected before performing the admin action.` } }
-		});
-		const trace = JSON.stringify(entry);
-		for (const secret of [token, csrf, 'private-user', 'private-password', 'private-path', 'private-code', 'private-query', 'private-body', 'malformed-private-header']) {
-			expect(trace).not.toContain(secret);
-		}
-	});
-
-	it('preserves rejected admin edits without refreshing swipes', async () => {
-		const m = await member();
-		const token = await issueToken(env, '333333333333333333', 'admin');
-		const normal = fetchSpy.getMockImplementation();
-		fetchSpy.mockImplementation((url, init) => String(url).endsWith('/api/swipes')
-			? new Response(null, { status: 502 }) : normal(url, init));
-		const response = await worker.fetch(new Request(`${env.SITE_URL}/admin/members/${m.member_id}`, {
-			method: 'POST', headers: { Cookie: `thelab_admin=${token}`, Origin: env.SITE_URL, 'Content-Type': 'application/x-www-form-urlencoded' },
-			body: new URLSearchParams({
-				csrf: await hash(`admin-csrf:${token}`), metadata_version: '0',
-				discord_user_id: '', stripe_customer_id: '', stripe_subscription_id: '', name_override: 'Unsaved maker',
-				notes: 'Keep my draft <please>', billing: 'monthly', discount_type: '', fob_id: '7'
-			}),
-		}), configured);
-		expect(response.status).toBe(409);
-		const html = await response.text();
-		expect(html).toContain('value="Unsaved maker"');
-		expect(html).toContain('Keep my draft &lt;please&gt;');
-		expect(html).not.toContain('Could not refresh swipes');
-		expect(fetchSpy.mock.calls.filter(([url]) => String(url).endsWith('/api/swipes'))).toHaveLength(0);
-		expect((await env.DB.prepare('SELECT notes FROM members WHERE member_id = ?').bind(m.member_id).first()).notes).toBe('');
-	});
-
-	it.each(['2026-01-15', '2026-07-15', '2026-03-08', '2026-11-01'])('forces the nightly snapshot at 07:00 UTC on %s, including redelivery', async date => {
-		expect(JSON.parse(wranglerConfig).triggers.crons).toEqual(['0 7 * * *']);
-		await member();
-		await edgeCall(configured, 'changes');
-		const event = { scheduledTime: Date.parse(`${date}T07:00:00Z`), cron: '0 7 * * *' };
-		await worker.scheduled(event, configured);
-		await worker.scheduled(event, configured);
-		expect(writes.map(write => write.version)).toEqual([1, 2, 3]);
-		expect(goal.fobs).toEqual([7]);
-		expect(fetchSpy.mock.calls.filter(([url]) => String(url).endsWith('/api/swipes'))).toHaveLength(0);
-		expect(await runDurableObjectAlarm(stub())).toBe(false);
-	});
-
-	it.each(['enabled', 'disabled', 'offline'])('cleans expired fob claims on the daily schedule with edge %s', async state => {
-		for (const [id, expires] of [['expired', now() - 1], ['live', now() + 300]]) {
-			await env.DB.prepare('INSERT INTO fob_claims(id, fob_id, created, expires) VALUES (?, 7, ?, ?)')
-				.bind(id, now() - 100, expires).run();
-		}
-		if (state === 'offline') fetchSpy.mockRejectedValue(new Error('Edge offline'));
-		const work = worker.scheduled({ scheduledTime: Date.parse('2026-07-15T07:00:00Z') },
-			state === 'disabled' ? { ...configured, EDGE_URL: '' } : configured);
-		if (state === 'offline') await expect(work).rejects.toThrow();
-		else await work;
-		expect((await env.DB.prepare('SELECT id FROM fob_claims').all()).results).toEqual([{ id: 'live' }]);
-		if (state === 'disabled') expect(fetchSpy).not.toHaveBeenCalled();
-	});
-
-	it('retries partially imported batches without duplicating swipe history', async () => {
-		swipes = Array.from({ length: 125 }, (_, i) => ({ id: `batch-${i}`, time: new Date().toISOString(), controller: '192.168.1.2', fob: 7, allowed: true }));
-		await env.DB.exec(`CREATE TRIGGER fail_swipe BEFORE INSERT ON member_events WHEN NEW.source_event_id = 'batch-110' BEGIN SELECT RAISE(ABORT, 'injected failure'); END`);
-		await expect(pushSwipes()).rejects.toMatchObject({ status: 500 });
-		const original = (await env.DB.prepare("SELECT * FROM member_events WHERE event_type = 'FobSwipe' ORDER BY id").all()).results;
-		expect(original).toHaveLength(100);
-		await env.DB.exec('DROP TRIGGER fail_swipe');
-		await pushSwipes();
-		expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM member_events WHERE event_type = 'FobSwipe'").first()).n).toBe(125);
-		expect((await env.DB.prepare("SELECT * FROM member_events WHERE event_type = 'FobSwipe' ORDER BY id LIMIT 100").all()).results).toEqual(original);
-	});
-
-	it('keeps nightly goal work pending after failure and retries', async () => {
-		await member();
-		await edgeCall(configured, 'changes');
-		const normal = fetchSpy.getMockImplementation();
-		fetchSpy.mockImplementation(() => new Response(null, { status: 502 }));
-		await expect(worker.scheduled({ scheduledTime: Date.parse('2026-07-15T07:00:00Z') }, configured)).rejects.toThrow();
-		expect(writes).toHaveLength(1);
-		expect(await runDurableObjectAlarm(stub())).toBe(true);
-		await runInDurableObject(stub(), async (_instance, ctx) => {
-			expect(await ctx.storage.get('fullPending')).toBe(true);
-			expect(await ctx.storage.getAlarm()).not.toBeNull();
-		});
-		fetchSpy.mockImplementation(normal);
-		await runDurableObjectAlarm(stub());
-		expect(writes).toHaveLength(2);
-		await runInDurableObject(stub(), async (_instance, ctx) => {
-			expect(await ctx.storage.get('fullPending')).toBeUndefined();
-		});
-		expect(await runDurableObjectAlarm(stub())).toBe(false);
-	});
-
-	it('rejects malformed swipe payloads before importing any rows', async () => {
-		swipes = [{ id: 'valid', time: new Date().toISOString(), controller: '192.168.1.2', fob: 7, allowed: true },
-		{ id: 'invalid', time: 'yesterday', controller: '192.168.1.2', fob: 0, allowed: 'yes' }];
-		await expect(pushSwipes()).rejects.toMatchObject({ status: 400 });
-		expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM member_events WHERE event_type = 'FobSwipe'").first()).n).toBe(0);
-	});
-
-	it('delivers all 512 authorized fobs and rejects overflow without truncating the goal', async () => {
-		await env.DB.prepare(`INSERT INTO members(fob_id, non_billable)
-      WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<512)
-      SELECT n, 1 FROM seq`).run();
-		await edgeCall(configured, 'changes');
-		expect(goal.fobs).toEqual(Array.from({ length: 512 }, (_, i) => i + 1));
-		await env.DB.prepare('INSERT INTO members(fob_id, non_billable) VALUES (513, 1)').run();
-		await expect(edgeCall(configured, 'changes')).rejects.toMatchObject({ status: 503 });
-		expect(writes).toHaveLength(1);
-		expect(goal.fobs).toHaveLength(512);
-		await env.DB.prepare('UPDATE members SET non_billable = 0 WHERE fob_id = 1').run();
-		await runDurableObjectAlarm(stub());
-		expect(goal.fobs).toEqual(Array.from({ length: 512 }, (_, i) => i + 2));
-	});
-
-	it('rejects oversized requests and batches before importing and recovers on retry', async () => {
-		const request = await signedRequest();
-		request.headers.set('Content-Length', String(256 * 1024 + 1));
-		expect((await worker.fetch(request, configured)).status).toBe(413);
-		swipes = Array.from({ length: 513 }, (_, i) => ({ id: `large-${i}`, time: new Date().toISOString(), controller: 'door', fob: 7, allowed: true }));
-		await expect(pushSwipes()).rejects.toMatchObject({ status: 400 });
-		expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM member_events WHERE event_type = 'FobSwipe'").first()).n).toBe(0);
-		swipes = [];
-		await pushSwipes();
-	});
-
-	it('rejects oversized streamed swipe requests without trusting a Content-Length header', async () => {
-		const signed = await signedRequest();
-		const body = new ReadableStream({
-			start(controller) {
-				controller.enqueue(new Uint8Array(256 * 1024));
-				controller.enqueue(new Uint8Array(1));
-				controller.close();
-			}
-		});
-		const request = new Request(signed, { body });
-		expect(request.headers.has('Content-Length')).toBe(false);
-		expect((await worker.fetch(request, configured)).status).toBe(413);
-		expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM member_events WHERE event_type = 'FobSwipe'").first()).n).toBe(0);
-		await pushSwipes();
-	});
-
-	it('provisions a key on upgrade with no membership changes and includes it in every snapshot', async () => {
-		const m = await member();
-		const revision = (await env.DB.prepare('SELECT revision FROM edge_changes').first()).revision;
-		goal = { version: 10, fobs: [7] };
-		await runInDurableObject(stub(), async (_instance, ctx) => ctx.storage.put('syncedRevision', revision));
-		await edgeCall(configured, 'changes');
-		const secret = goal.event_signing_key;
-		expect(secret).toMatch(/^[a-f0-9]{64}$/);
-		expect(writes[0]).toMatchObject({ method: 'PUT', version: 11, fobs: [7] });
-		await env.DB.prepare('UPDATE members SET fob_id = 8 WHERE member_id = ?').bind(m.member_id).run();
-		await edgeCall(configured, 'changes');
-		expect(writes[1]).toMatchObject({ method: 'PUT', fobs: [8], event_signing_key: secret });
-		expect(goal.event_signing_key).toBe(secret);
-		await edgeCall(configured, 'full');
-		expect(goal.event_signing_key).toBe(secret);
-	});
-
-	it('authenticates exact bodies and rejects missing, wrong, stale, and future signatures', async () => {
-		swipes = [{ id: 'authenticated', time: new Date().toISOString(), controller: 'door', fob: 7, allowed: true }];
-		expect((await worker.fetch(new Request(`${env.SITE_URL}/webhooks/edge/swipes`, { method: 'POST', body: '[]' }), configured)).status).toBe(401);
-		for (const options of [{ key: 'ff'.repeat(32) }, { timestamp: Math.floor(Date.now() / 1000) - 301 }, { timestamp: Math.floor(Date.now() / 1000) + 301 }]) {
-			expect((await worker.fetch(await signedRequest(undefined, options), configured)).status).toBe(401);
-		}
-		const signed = await signedRequest();
-		expect((await worker.fetch(new Request(signed, { body: '[]' }), configured)).status).toBe(401);
-		const withBOM = await signedRequest();
-		expect((await worker.fetch(new Request(withBOM, { body: '\uFEFF' + JSON.stringify(swipes) }), configured)).status).toBe(401);
-		expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM member_events WHERE event_type = 'FobSwipe'").first()).n).toBe(0);
-		await pushSwipes();
-		expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM member_events WHERE event_type = 'FobSwipe'").first()).n).toBe(1);
-	});
-
-	it('accepts the shared Go HMAC test vector and ingests while goal delivery is pending', async () => {
-		await edgeCall(configured, 'changes');
-		await runInDurableObject(stub(), async (instance, ctx) => {
-			await ctx.storage.put('eventSigningKey', '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f');
-			let release;
-			instance.tail = new Promise(resolve => { release = resolve; });
-			vi.spyOn(Date, 'now').mockReturnValue(1800000000000);
-			try {
-				const response = await instance.fetch(new Request(`${env.SITE_URL}/webhooks/edge/swipes`, {
-					method: 'POST', body: '[]', headers: {
-						'X-Edge-Timestamp': '1800000000', 'X-Edge-Signature': 'a0f5b2711c0fa2ef9d3b0f61e05be1205bba0eaf03e10e7d98cdbc0840355842',
-					}
-				}));
-				expect(response.status).toBe(204);
-			} finally { release(); vi.restoreAllMocks(); }
-		});
-	});
+  it.each([
+    ['malformed events', [swipe('valid'), swipe('invalid', { time: 'yesterday' })]],
+    ['an oversized batch', Array.from({ length: 513 }, (_, i) => swipe(`large-${i}`))],
+    ['a non-array', { id: 'object' }],
+  ])('rejects %s before importing any rows', async (_name, events) => {
+    quiet();
+    expect((await upload(events)).status).toBe(400);
+    expect(await swipeCount()).toBe(0);
+  });
 });
 
 describe('Edge authentication', () => {
-	const config = { ...env, EDGE_URL: 'https://edge.example', EDGE_JWT_PRIVATE_KEY: testEdgePrivateKey };
-	const decode = value => Uint8Array.from(atob(value.replaceAll('-', '+').replaceAll('_', '/')), c => c.charCodeAt(0));
-	const parse = value => JSON.parse(new TextDecoder().decode(decode(value)));
-	afterEach(() => vi.restoreAllMocks());
+  it('matches the Go verifier interoperability fixture', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1800000000000);
+    expect(await edgeToken(edgeEnv)).toBe('eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6ImtQcktfcW14VldhWVZBOXd3QkY2SXVvM3ZWeno3VHhIQ1R3WEJ5Z3JTNGsifQ.eyJpc3MiOiJodHRwczovL3RoZWxhYi5leGFtcGxlIiwiYXVkIjoiaHR0cHM6Ly9lZGdlLmV4YW1wbGUiLCJzdWIiOiJlZGdlLXN5bmMiLCJzY29wZSI6ImVkZ2U6YXBpIiwiaWF0IjoxODAwMDAwMDAwLCJleHAiOjE4MDAwMDAwNjB9.c9kUt-WlqySz-RDa62Q4wgwoV9a0XMGole4SYlWp1xJEKBhSKTsERxcoIUMih0TiU2Wa1UodgU7AM8qfz5zjAw');
+  });
 
-	it('matches the Go verifier interoperability fixture', async () => {
-		vi.spyOn(Date, 'now').mockReturnValue(1800000000000);
-		expect(await edgeToken(config)).toBe('eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6ImtQcktfcW14VldhWVZBOXd3QkY2SXVvM3ZWeno3VHhIQ1R3WEJ5Z3JTNGsifQ.eyJpc3MiOiJodHRwczovL3RoZWxhYi5leGFtcGxlIiwiYXVkIjoiaHR0cHM6Ly9lZGdlLmV4YW1wbGUiLCJzdWIiOiJlZGdlLXN5bmMiLCJzY29wZSI6ImVkZ2U6YXBpIiwiaWF0IjoxODAwMDAwMDAwLCJleHAiOjE4MDAwMDAwNjB9.c9kUt-WlqySz-RDa62Q4wgwoV9a0XMGole4SYlWp1xJEKBhSKTsERxcoIUMih0TiU2Wa1UodgU7AM8qfz5zjAw');
-	});
+  it('publishes only the public signing key', async () => {
+    const response = await call('/.well-known/edge-jwks.json', {}, edgeEnv);
+    expect(response.headers.get('Cache-Control')).toBe('public, max-age=60');
+    const { keys } = await response.json();
+    expect(keys).toEqual([{ alg: 'EdDSA', kty: 'OKP', crv: 'Ed25519', use: 'sig', x: '11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo', kid: expect.any(String) }]);
+    const [header, payload, signature] = (await edgeToken(edgeEnv)).split('.');
+    expect(parse(header)).toEqual({ alg: 'EdDSA', typ: 'JWT', kid: keys[0].kid });
+    const verifier = await crypto.subtle.importKey('jwk', keys[0], 'Ed25519', false, ['verify']);
+    expect(await crypto.subtle.verify('Ed25519', verifier, decode(signature), new TextEncoder().encode(`${header}.${payload}`))).toBe(true);
+  });
 
-	it('publishes only public JWKS fields and signs matching short-lived API tokens', async () => {
-		const response = await worker.fetch(new Request(`${env.SITE_URL}/.well-known/edge-jwks.json`), config);
-		expect(response.status).toBe(200);
-		expect(response.headers.get('Cache-Control')).toBe('public, max-age=60');
-		const { keys } = await response.json();
-		expect(keys).toHaveLength(1);
-		expect(Object.keys(keys[0]).sort()).toEqual(['alg', 'crv', 'kid', 'kty', 'use', 'x']);
-		expect(keys[0]).toMatchObject({ alg: 'EdDSA', kty: 'OKP', crv: 'Ed25519', use: 'sig', x: '11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo' });
-		const [header, payload, signature] = (await edgeToken(config)).split('.');
-		expect(parse(header)).toEqual({ alg: 'EdDSA', typ: 'JWT', kid: keys[0].kid });
-		const claims = parse(payload);
-		expect(claims).toEqual({ iss: env.SITE_URL, aud: config.EDGE_URL, sub: 'edge-sync', scope: 'edge:api', iat: expect.any(Number), exp: expect.any(Number) });
-		expect(claims.exp - claims.iat).toBe(60);
-		const key = await crypto.subtle.importKey('jwk', keys[0], 'Ed25519', false, ['verify']);
-		expect(await crypto.subtle.verify('Ed25519', key, decode(signature), new TextEncoder().encode(`${header}.${payload}`))).toBe(true);
-		expect((await worker.fetch(new Request(`${env.SITE_URL}/.well-known/edge-jwks.json`, { method: 'POST' }), config)).status).toBe(405);
-	});
-
-	it('supports overlapping rotation keys with stable thumbprints and strips private fields', async () => {
-		const pair = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
-		const jwk = await crypto.subtle.exportKey('jwk', pair.privateKey);
-		const nextSecret = btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.exportKey('pkcs8', pair.privateKey))));
-		const before = await (await edgeJWKS(null, config)).json();
-		const staged = await (await edgeJWKS(null, { ...config, EDGE_JWT_PUBLIC_KEYS: JSON.stringify([jwk, jwk]) })).json();
-		expect(staged.keys).toHaveLength(2);
-		expect(staged.keys.some(k => 'd' in k)).toBe(false);
-		const rotated = { ...config, EDGE_JWT_PRIVATE_KEY: nextSecret, EDGE_JWT_PUBLIC_KEYS: JSON.stringify(before.keys) };
-		const after = await (await edgeJWKS(null, rotated)).json();
-		expect(after.keys.map(k => k.kid).sort()).toEqual(staged.keys.map(k => k.kid).sort());
-		expect(parse((await edgeToken(rotated)).split('.')[0]).kid).toBe(staged.keys[1].kid);
-	});
-
-	it('fails closed on missing/invalid signing keys and malformed extra keys', async () => {
-		for (const secret of ['', 'invalid']) {
-			await expect(edgeToken({ ...config, EDGE_JWT_PRIVATE_KEY: secret })).rejects.toThrow('signing key');
-			expect((await worker.fetch(new Request(`${env.SITE_URL}/.well-known/edge-jwks.json`), { ...config, EDGE_JWT_PRIVATE_KEY: secret })).status).toBe(503);
-		}
-		for (const keys of ['null', '{}', '[{"kty":"RSA"}]']) {
-			await expect(edgeJWKS(null, { ...config, EDGE_JWT_PUBLIC_KEYS: keys })).rejects.toThrow('public keys');
-		}
-	});
-
-	it('sends signed bearer tokens without Access credentials and does not follow redirects', async () => {
-		const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 302, headers: { Location: 'https://other.example' } }));
-		const response = await EdgeSync.prototype.request.call({ env: config }, '/api/swipes');
-		expect(response.status).toBe(302);
-		expect(fetch).toHaveBeenCalledTimes(1);
-		const [url, init] = fetch.mock.calls[0];
-		expect(url).toBe('https://edge.example/api/swipes');
-		expect(init.redirect).toBe('manual');
-		expect(Object.keys(init.headers).sort()).toEqual(['Authorization', 'Content-Type']);
-		expect(parse(init.headers.Authorization.slice(7).split('.')[1]).scope).toBe('edge:api');
-		await expect(EdgeSync.prototype.request.call({ env: { ...config, EDGE_URL: 'http://edge.example' } }, '/api/swipes')).rejects.toThrow('configuration');
-	});
+  it('fails closed on missing or invalid signing keys', async () => {
+    quiet();
+    for (const secret of ['', 'invalid']) {
+      const bindings = { ...edgeEnv, EDGE_JWT_PRIVATE_KEY: secret };
+      await expect(edgeEventKey(bindings)).rejects.toThrow('signing key');
+      expect((await call('/.well-known/edge-jwks.json', {}, bindings)).status).toBe(503);
+    }
+  });
 });
 
-describe('Fob enrollment', () => {
-	let config, fetchSpy, edgeClaims;
-	const api = (path, options = {}, bindings = config) => worker.fetch(new Request(`${bindings.SITE_URL}${path}`, options), bindings);
-	async function claim(fob = 123) {
-		const token = randomToken(), expires = now() + 300;
-		edgeClaims.set(token, { id: token, fob_id: fob, created: now(), expires });
-		return { token, expires, url: `${config.SITE_URL}/keyfob/bind?token=${token}` };
-	}
-	async function member(id = '333333333333333333', fob = null) {
-		const m = await env.DB.prepare('INSERT INTO members(discord_user_id, discord_username, fob_id) VALUES (?, ?, ?) RETURNING *').bind(id, 'Maker', fob).first();
-		const token = await memberToken(config, m);
-		return { ...m, token, cookie: `thelab_member=${token}` };
-	}
-	const readMember = m => env.DB.prepare('SELECT * FROM members WHERE member_id = ?').bind(m.member_id).first();
-	async function bind(c, m, headers = {}, csrf) {
-		return api(`/keyfob/bind?token=${c.token}`, {
-			method: 'POST', headers: { Cookie: m.cookie, Origin: config.SITE_URL, 'Content-Type': 'application/x-www-form-urlencoded', ...headers },
-			body: new URLSearchParams({ csrf: csrf ?? await hash(`fob-csrf:${m.token}:${c.token}`) })
-		});
-	}
+describe('Kiosk and fob enrollment', () => {
+  const discordID = '333333333333333333';
+  let key;
+  const scan = (body, authorization = `Bearer ${key}`) => call('/kiosk/claims', {
+    method: 'POST', body: typeof body === 'string' ? body : JSON.stringify(body),
+    headers: { 'Content-Type': 'application/json', ...(authorization ? { Authorization: authorization } : {}) },
+  }, edgeEnv);
+  async function claim(fob = 123) {
+    const token = randomToken();
+    await env.DB.prepare('INSERT INTO fob_claims(id, fob_id, created, expires) VALUES (?, ?, ?, ?)').bind(token, fob, now(), now() + 300).run();
+    return token;
+  }
+  const bind = async (token, cookie) => call(`/keyfob/bind?token=${token}`, post({}, { Cookie: cookie }), edgeEnv);
+  beforeEach(async () => { key = await edgeEventKey(edgeEnv); });
 
-	beforeEach(async () => {
-		await reset();
-		await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
-		config = { ...env, EDGE_URL: 'https://edge.example', EDGE_JWT_PRIVATE_KEY: testEdgePrivateKey };
-		edgeClaims = new Map();
-		fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
-			expect(new URL(url).origin).toBe(config.EDGE_URL);
-			expect(new URL(url).pathname).toBe('/api/kiosk/claim');
-			expect(init.redirect).toBe('manual');
-			expect(init.headers.Authorization).toMatch(/^Bearer /);
-			new Request(url, init);
-			const claim = edgeClaims.get(new URL(url).searchParams.get('token'));
-			return claim ? Response.json(claim) : new Response(null, { status: 410 });
-		});
-	});
-	afterEach(() => { vi.restoreAllMocks(); });
+  it('creates five-minute claims with a QR link to the binding page', async () => {
+    const response = await scan({ fob_id: 4294967295 });
+    expect(response.status).toBe(201);
+    const result = await response.json();
+    expect(result.url).toBe(`${env.SITE_URL}/keyfob/bind?token=${result.token}`);
+    expect(atob(result.qr.replace(/^data:image\/svg\+xml;base64,/, ''))).toMatch(/^<svg /);
+    expect(await env.DB.prepare('SELECT fob_id, expires - created AS lifetime FROM fob_claims').first()).toEqual({ fob_id: 4294967295, lifetime: 300 });
+  });
 
-	it('redirects the kiosk to the LAN hostname without network authentication', async () => {
-		const response = await api('/kiosk', {}, { ...config, EDGE_URL: '' });
-		expect(response.status).toBe(303);
-		expect(response.headers.get('Location')).toBe('http://edge.thelab.ms/kiosk');
-		expect(fetchSpy).not.toHaveBeenCalled();
-	});
+  it('rejects unauthenticated, malformed, and excessive scans with kiosk-readable errors', async () => {
+    quiet();
+    for (const authorization of [null, 'Bearer wrong']) expect((await scan({ fob_id: 7 }, authorization)).status).toBe(401);
+    for (const body of ['not json', 'null', { fob_id: 0 }, { fob_id: '7' }, { fob_id: 4294967296 }, { fob: 7 }]) {
+      const response = await scan(body);
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: 'Fob not recognized. Scan again.' });
+    }
+    for (let i = 0; i < 30; i++) expect((await scan({ fob_id: 7 })).status).toBe(201);
+    expect(await (await scan({ fob_id: 7 })).json()).toEqual({ error: 'Too many scans. Please wait a minute.' });
+  });
 
-	it('validates an opaque edge claim once and preserves it through Discord login', async () => {
-		const c = await claim(4294967295);
-		expect(await fobClaim(config, c.token)).toMatchObject({ id: c.token, fob_id: 4294967295, expires: c.expires, claimed_by: null });
-		await fobClaim(config, c.token);
-		expect(fetchSpy).toHaveBeenCalledTimes(1);
-		for (const audience of ['member', 'oauth', 'admin']) expect(await verifyToken(config, c.token, audience)).toBeNull();
-		expect(loginDestination(`/keyfob/bind?token=${c.token}`, 'member')).toBe(`/keyfob/bind?token=${c.token}`);
-		expect(loginDestination(`/keyfob/bind?token=${c.token}&next=https://evil.example`, 'member')).toBe('/payment/resume');
-	});
+  it('signs visitors in, confirms on GET, and links on POST', async () => {
+    const token = await claim();
+    const m = await insertMember({ discord_user_id: discordID, discord_username: 'Maker', fob_id: 99, non_billable: 1 });
+    const cookie = await session(discordID);
+    expect((await call(`/keyfob/bind?token=${token}`)).headers.get('Location')).toBe(`/login?next=${encodeURIComponent(`/keyfob/bind?token=${token}`)}`);
+    const confirm = await call(`/keyfob/bind?token=${token}`, { headers: { Cookie: cookie } });
+    expect(await confirm.text()).toContain('replaces fob <strong>99');
+    expect((await readMember(m.member_id)).fob_id).toBe(99);
+    const response = await bind(token, cookie);
+    expect(await response.text()).toContain('Fob 123 is now linked');
+    expect((await readMember(m.member_id)).fob_id).toBe(123);
+    expect(edge.fobs).toEqual([123]);
+    quiet();
+    expect((await bind(token, cookie)).status).toBe(409);
+  });
 
-	it.each([301, 302, 303, 307, 308, 401, 500])('rejects unsuccessful edge lookups (%s) without following redirects', async status => {
-		const c = await claim();
-		fetchSpy.mockImplementation(async (_url, init) => {
-			expect(init.redirect).toBe('manual');
-			return new Response(null, { status, headers: { Location: 'https://unexpected.example/claim' } });
-		});
-		expect((await api(`/keyfob/bind?token=${c.token}`)).status).toBe(503);
-		expect(await env.DB.prepare('SELECT count(*) n FROM fob_claims').first()).toEqual({ n: 0 });
-	});
-
-	it('rejects unavailable or malformed edge claims', async () => {
-		const c = await claim();
-		for (const invalid of [{ id: randomToken() }, { fob_id: 0 }, { fob_id: '123' }, { expires: c.expires + 1 }, { created: now() + 10 }]) {
-			fetchSpy.mockResolvedValueOnce(Response.json({ ...edgeClaims.get(c.token), ...invalid }));
-			expect((await api(`/keyfob/bind?token=${c.token}`)).status).toBe(503);
-		}
-		fetchSpy.mockResolvedValueOnce(Response.json({ ...edgeClaims.get(c.token), created: now() - 301, expires: now() - 1 }));
-		expect((await api(`/keyfob/bind?token=${c.token}`)).status).toBe(410);
-		fetchSpy.mockRejectedValue(new Error('Edge unavailable'));
-		expect((await api(`/keyfob/bind?token=${c.token}`)).status).toBe(503);
-		expect(await env.DB.prepare('SELECT count(*) n FROM fob_claims').first()).toEqual({ n: 0 });
-	});
-
-	it('preserves the claim through browser-bound Discord OAuth and never links on GET', async () => {
-		const c = await claim(), m = await member(), path = `/keyfob/bind?token=${c.token}`;
-		const start = await api(path);
-		expect(start.status).toBe(303);
-		const target = new URL(start.headers.get('Location')), state = target.searchParams.get('state');
-		const browserCookie = start.headers.get('Set-Cookie').split(';')[0];
-		expect(await verifyOAuthState(config, state, browserCookie.split('=')[1])).toMatchObject({ purpose: 'member', return_to: path });
-		fetchSpy.mockImplementation(async url => {
-			if (String(url).endsWith('/oauth2/token')) return Response.json({ access_token: 'opaque', token_type: 'Bearer' });
-			if (String(url).endsWith('/users/@me')) return Response.json({ id: m.discord_user_id, username: 'Maker', email: 'maker@example.com', verified: true });
-			if (String(url).includes('/members/')) return Response.json({ roles: [] });
-			throw new Error('Unexpected fetch');
-		});
-		const callback = await api(`/login/discord/callback?code=test&state=${state}`, { headers: { Cookie: browserCookie } });
-		expect(callback.status).toBe(303);
-		expect(callback.headers.get('Location')).toBe(c.url);
-		const response = await api(path, { headers: { Cookie: m.cookie } });
-		expect(response.status).toBe(200);
-		expect(response.headers.get('Referrer-Policy')).toBe('same-origin');
-		expect(response.headers.get('Cache-Control')).toBe('no-store');
-		expect(await response.text()).toContain('Link fob');
-		expect((await readMember(m)).fob_id).toBeNull();
-	});
-
-	it('rejects missing auth, cross-origin and wrong-CSRF posts, tampering and wrong audiences', async () => {
-		const c = await claim(), m = await member();
-		expect((await bind(c, m, { Cookie: '' })).status).toBe(401);
-		expect((await bind(c, m, { Origin: 'https://evil.example' })).status).toBe(403);
-		expect((await bind(c, m, {}, 'wrong')).status).toBe(403);
-		for (const token of [`${c.token}x`, m.token, await issueToken(config, randomToken(), 'oauth'), randomToken()]) {
-			expect((await bind({ token }, m)).status).toBe(410);
-		}
-		expect((await readMember(m)).fob_id).toBeNull();
-	});
-
-	it('replaces an existing fob from cellular, records history and blocks replay', async () => {
-		const c = await claim(), m = await member(undefined, 99);
-		expect(await (await api(`/keyfob/bind?token=${c.token}`, { headers: { Cookie: m.cookie } })).text()).toContain('replaces fob <strong>99');
-		const response = await bind(c, m);
-		expect(response.status).toBe(200);
-		expect(await response.text()).toContain('Fob linked');
-		expect(await readMember(m)).toMatchObject({ fob_id: 123, metadata_version: m.metadata_version + 1 });
-		const event = await env.DB.prepare("SELECT details FROM member_events WHERE member_id = ? AND event_type = 'FobChanged'").bind(m.member_id).first();
-		expect(JSON.parse(event.details)).toEqual({ from: 99, to: 123 });
-		expect(await env.DB.prepare('SELECT ended FROM fob_assignments WHERE fob = 99').first()).toMatchObject({ ended: expect.any(Number) });
-		expect((await bind(c, m)).status).toBe(409);
-	});
-
-	it('rejects ownership conflicts without consuming the claim', async () => {
-		const c = await claim(), owner = await member(undefined, 123), other = await member('555555555555555555', 456);
-		expect((await bind(c, other)).status).toBe(409);
-		expect((await readMember(other)).fob_id).toBe(456);
-		expect((await env.DB.prepare('SELECT claimed_by FROM fob_claims').first()).claimed_by).toBeNull();
-		expect((await bind(c, owner)).status).toBe(200);
-	});
-
-	it('allows exactly one winner for concurrent redemption and concurrent same-fob claims', async () => {
-		const a = await member(), b = await member('555555555555555555'), c = await claim();
-		expect((await Promise.all([bind(c, a), bind(c, b)])).map(r => r.status).sort()).toEqual([200, 409]);
-		const c1 = await claim(789), c2 = await claim(789);
-		expect((await Promise.all([bind(c1, a), bind(c2, b)])).map(r => r.status).sort()).toEqual([200, 409]);
-		const rows = await env.DB.prepare('SELECT claimed_by FROM fob_claims WHERE fob_id = 789').all();
-		expect(rows.results.filter(r => r.claimed_by !== null)).toHaveLength(1);
-	});
-
-	it('rechecks identity in the lock and rejects expired claims', async () => {
-		const c = await claim(), m = await member();
-		await fobClaim(config, c.token);
-		await env.DB.prepare('UPDATE members SET auth_version = auth_version + 1 WHERE member_id = ?').bind(m.member_id).run();
-		await expect(coordinated(config, m.member_id, 'linkFob', { token: c.token, discord_user_id: m.discord_user_id, auth_version: m.auth_version })).rejects.toMatchObject({ status: 401 });
-		vi.spyOn(Date, 'now').mockReturnValue((c.expires + 1) * 1000);
-		expect((await api(`/keyfob/bind?token=${c.token}`, { headers: { Cookie: m.cookie } })).status).toBe(410);
-		await cleanupFobClaims(config);
-		expect(await env.DB.prepare('SELECT count(*) n FROM fob_claims').first()).toEqual({ n: 0 });
-	});
-
-	it('synchronizes replacement immediately and retains the commit when edge delivery fails', async () => {
-		const m = await member(undefined, 99);
-		await env.DB.prepare('UPDATE members SET non_billable = 1 WHERE member_id = ?').bind(m.member_id).run();
-		const edgeConfig = { ...config, EDGE_URL: 'https://edge.example', EDGE_JWT_PRIVATE_KEY: testEdgePrivateKey };
-		await runInDurableObject(env.MEMBERS.get(env.MEMBERS.idFromName(m.member_id)), instance => { instance.env = { ...instance.env, ...edgeConfig }; });
-		await runInDurableObject(env.EDGE_SYNC.get(env.EDGE_SYNC.idFromName('edge')), instance => { instance.env = { ...instance.env, ...edgeConfig }; });
-		const c = await claim(), next = await claim(456), writes = [];
-		await fobClaim(config, c.token);
-		await fobClaim(config, next.token);
-		fetchSpy.mockImplementation(async (url, init) => {
-			expect(String(url)).toBe('https://edge.example/api/goal');
-			if (init.method === 'GET') return new Response(null, { status: 503 });
-			writes.push(JSON.parse(init.body));
-			return new Response(null, { status: 204 });
-		});
-		expect((await bind(c, m)).status).toBe(200);
-		expect(writes).toEqual([{ version: expect.any(Number), fobs: [123], event_signing_key: expect.stringMatching(/^[a-f0-9]{64}$/) }]);
-		await runInDurableObject(env.EDGE_SYNC.get(env.EDGE_SYNC.idFromName('edge')), async (_instance, ctx) => { expect(await ctx.storage.getAlarm()).toBeNull(); });
-		fetchSpy.mockRejectedValue(new Error('Edge offline'));
-		expect((await bind(next, m)).status).toBe(200);
-		expect((await readMember(m)).fob_id).toBe(456);
-		await runInDurableObject(env.EDGE_SYNC.get(env.EDGE_SYNC.idFromName('edge')), async (_instance, ctx) => { expect(await ctx.storage.getAlarm()).not.toBeNull(); });
-	});
+  it('rejects invalid, expired, conflicting, and cross-origin redemptions', async () => {
+    quiet();
+    await insertMember({ discord_user_id: discordID, fob_id: 456 });
+    await insertMember({ fob_id: 123 });
+    const cookie = await session(discordID);
+    for (const token of ['bogus', randomToken()]) expect((await bind(token, cookie)).status).toBe(410);
+    const token = await claim();
+    expect((await call(`/keyfob/bind?token=${token}`, post({}, { Cookie: cookie, Origin: 'https://evil.example' }), edgeEnv)).status).toBe(403);
+    expect((await bind(token, '')).status).toBe(401);
+    expect((await bind(token, cookie)).status).toBe(409);
+    expect((await env.DB.prepare('SELECT claimed_by FROM fob_claims').first()).claimed_by).toBeNull();
+    vi.spyOn(Date, 'now').mockReturnValue((now() + 301) * 1000);
+    expect((await bind(token, cookie)).status).toBe(410);
+  });
 });
 
 describe('Printer access', () => {
-	const config = { ...env, EDGE_URL: 'https://edge.example', EDGE_JWT_PRIVATE_KEY: testEdgePrivateKey };
-	let member, cookie, fetchSpy;
-	const api = (path = '/machines', session = cookie, bindings = config) => worker.fetch(new Request(`${config.SITE_URL}${path}`, {
-		headers: session ? { Cookie: session } : {},
-	}), bindings);
-	beforeEach(async () => {
-		await reset();
-		await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
-		member = await env.DB.prepare(`INSERT INTO members (discord_user_id, stripe_subscription_state, legacy_waiver_signed)
-          VALUES ('333333333333333333', 'active', 1) RETURNING *`).first();
-		cookie = `thelab_member=${await memberToken(config, member)}`;
-		fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Edge offline'));
-	});
-	afterEach(() => vi.restoreAllMocks());
+  const discordID = '333333333333333333';
+  let row, cookie;
+  const data = (session = cookie, bindings = edgeEnv) => call('/machines/data', { headers: session ? { Cookie: session } : {} }, bindings);
+  beforeEach(async () => {
+    row = await insertMember({ discord_user_id: discordID, stripe_subscription_state: 'active', legacy_waiver_signed: 1 });
+    cookie = await session(discordID);
+    quiet();
+  });
 
-	it('signs anonymous visitors in through Discord and preserves the page destination', async () => {
-		for (const suffix of ['', '?state=obsolete&return_to=https://evil.example']) {
-			const response = await api(`/machines${suffix}`, null);
-			expect(response.status).toBe(303);
-			const location = new URL(response.headers.get('Location'));
-			expect(location.origin).toBe('https://discord.com');
-			expect((await verifyToken(config, location.searchParams.get('state'), 'oauth')).return_to).toBe('/machines');
-			expect(response.headers.get('Set-Cookie')).toContain('thelab_oauth=');
-			expect(response.headers.get('Cache-Control')).toBe('no-store');
-		}
-		const data = await api('/machines/data', null);
-		expect(data.status).toBe(401);
-		expect(data.headers.get('Location')).toBeNull();
-		expect(fetchSpy).not.toHaveBeenCalled();
-	});
+  it('issues read-only, verifiable 60-second credentials', async () => {
+    const response = await data();
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+    const result = await response.json();
+    expect(result.edge).toBe(edgeEnv.EDGE_URL);
+    const [header, payload, signature] = result.token.split('.');
+    const claims = parse(payload);
+    expect(claims).toMatchObject({ sub: row.member_id, scope: 'printers:read', iss: env.SITE_URL, aud: edgeEnv.EDGE_URL });
+    expect(claims.exp - claims.iat).toBe(60);
+    const jwks = await (await edgeJWKS(null, edgeEnv)).json();
+    const verifier = await crypto.subtle.importKey('jwk', jwks.keys[0], 'Ed25519', false, ['verify']);
+    expect(await crypto.subtle.verify('Ed25519', verifier, decode(signature), new TextEncoder().encode(`${header}.${payload}`))).toBe(true);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
 
-	it('serves the page locally and issues only read-only, verifiable 60-second status/image credentials', async () => {
-		const page = await api();
-		expect(page.status).toBe(200);
-		expect(page.headers.get('Location')).toBeNull();
-		expect(page.headers.get('Cache-Control')).toBe('no-store');
-		expect(page.headers.get('Content-Security-Policy')).toContain("connect-src 'self' https://edge.example");
-		expect(await page.text()).toContain('src="/machines.js"');
-		expect(fetchSpy).not.toHaveBeenCalled();
-		const response = await api('/machines/data');
-		expect(response.headers.get('Cache-Control')).toBe('no-store');
-		const result = await response.json();
-		expect(result).not.toHaveProperty('cards');
-		expect(result.edge).toBe(config.EDGE_URL);
-		const decode = value => Uint8Array.from(atob(value.replaceAll('-', '+').replaceAll('_', '/')), c => c.charCodeAt(0));
-		const [header, payload, signature] = result.token.split('.');
-		const claims = JSON.parse(new TextDecoder().decode(decode(payload)));
-		expect(claims).toMatchObject({ sub: member.member_id, scope: 'printers:read', iss: config.SITE_URL, aud: config.EDGE_URL });
-		expect(claims.exp - claims.iat).toBe(60);
-		const jwks = await (await edgeJWKS(null, config)).json();
-		const key = await crypto.subtle.importKey('jwk', jwks.keys[0], 'Ed25519', false, ['verify']);
-		expect(await crypto.subtle.verify('Ed25519', key, decode(signature), new TextEncoder().encode(`${header}.${payload}`))).toBe(true);
-		expect(fetchSpy).not.toHaveBeenCalled();
-	});
+  it.each([
+    ['active', 1, 0, 0, 200], ['trialing', 1, 0, 0, 200], ['active', 0, 0, 0, 403],
+    ['past_due', 1, 0, 0, 403], ['', 1, 1, 0, 200], ['', 0, 1, 0, 403], ['', 0, 0, 1, 200],
+  ])('applies access eligibility: %s/%s/%s/%s', async (state, waiver, legacy, nonBillable, expected) => {
+    await env.DB.prepare('UPDATE members SET stripe_subscription_state = ?, legacy_waiver_signed = ?, legacy_billing = ?, non_billable = ?')
+      .bind(state, waiver, legacy, nonBillable).run();
+    expect((await data()).status).toBe(expected);
+  });
 
-	it.each([
-		['active', 1, 0, 0, 200], ['trialing', 1, 0, 0, 200], ['active', 0, 0, 0, 403],
-		['past_due', 1, 0, 0, 403], ['canceled', 1, 0, 0, 403], ['', 1, 1, 0, 200],
-		['', 0, 1, 0, 403], ['', 0, 0, 1, 200],
-	])('applies access eligibility without requiring a fob: %s/%s/%s/%s', async (state, waiver, legacy, nonBillable, expected) => {
-		await env.DB.prepare('UPDATE members SET stripe_subscription_state = ?, legacy_waiver_signed = ?, legacy_billing = ?, non_billable = ? WHERE member_id = ?')
-			.bind(state, waiver, legacy, nonBillable, member.member_id).run();
-		expect((await api()).status).toBe(expected);
-		expect((await api('/machines/data')).status).toBe(expected);
-		if (expected === 403) expect(fetchSpy).not.toHaveBeenCalled();
-	});
-
-	it('recognizes linked waivers and rechecks eligibility and session revocation on refresh', async () => {
-		await env.DB.prepare('UPDATE members SET legacy_waiver_signed = 0').run();
-		await env.DB.prepare(`INSERT INTO waivers(member_id, version, content, name, email, agreements) VALUES (?, 1, 'Terms', 'Maker', 'maker@example.com', '[]')`).bind(member.member_id).run();
-		expect((await api('/machines/data')).status).toBe(200);
-		await env.DB.prepare("UPDATE members SET stripe_subscription_state = 'canceled'").run();
-		expect((await api('/machines/data')).status).toBe(403);
-		await env.DB.prepare('UPDATE members SET auth_version = auth_version + 1').run();
-		expect((await api('/machines/data')).status).toBe(401);
-		expect(fetchSpy).not.toHaveBeenCalled();
-	});
-
-	it('rejects admin sessions, expired sessions, and deleted member sessions', async () => {
-		const admin = `thelab_admin=${await issueToken(config, member.discord_user_id, 'admin')}`;
-		expect((await api('/machines/data', admin)).status).toBe(401);
-		vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 86401000);
-		expect((await api('/machines/data')).status).toBe(401);
-		vi.mocked(Date.now).mockRestore();
-		await env.DB.prepare('DELETE FROM members').run();
-		expect((await api('/machines/data')).status).toBe(401);
-		expect(fetchSpy).not.toHaveBeenCalled();
-	});
-
-	it('checks session identity and eligibility with one D1 query per page or token request', async () => {
-		const prepare = vi.fn(sql => env.DB.prepare(sql));
-		const bindings = { ...config, DB: { prepare } };
-		for (const path of ['/machines', '/machines/data']) {
-			prepare.mockClear();
-			expect((await api(path, cookie, bindings)).status).toBe(200);
-			expect(prepare).toHaveBeenCalledTimes(1);
-			expect(prepare.mock.calls[0][0]).toContain('AS printer_access');
-		}
-		prepare.mockClear();
-		expect((await api('/machines/data', null, bindings)).status).toBe(401);
-		expect(prepare).not.toHaveBeenCalled();
-		expect(fetchSpy).not.toHaveBeenCalled();
-	});
-
-	it('rejects unsafe or incomplete dashboard configuration', async () => {
-		for (const origin of ['', 'http://edge.example', 'https://edge.example/path', 'https://user:password@edge.example']) {
-			expect((await api('/machines', cookie, { ...config, EDGE_URL: origin })).status).toBe(503);
-		}
-	});
+  it('rejects missing sessions, deleted members, and unsafe edge configuration', async () => {
+    expect((await data(null)).status).toBe(401);
+    for (const origin of ['', 'http://edge.example', 'https://edge.example/path']) {
+      expect((await data(cookie, { ...edgeEnv, EDGE_URL: origin })).status).toBe(503);
+    }
+    await env.DB.prepare('DELETE FROM members').run();
+    expect((await data()).status).toBe(401);
+  });
 });

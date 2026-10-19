@@ -6,21 +6,21 @@
     "node": ">=22.12.0"
   },
   "scripts": {
-    "bootstrap": "bash scripts/bootstrap-worker.sh",
-    "images:hero": "node scripts/generate-hero-images.js",
     "dev": "wrangler dev",
     "predeploy": "npm run db:remote",
     "deploy": "wrangler deploy",
     "test": "vitest run",
-    "test:browser": "node --test test/machines.browser.mjs",
+    "test:browser": "node --test test/*.browser.mjs",
     "db:local": "wrangler d1 migrations apply DB --local",
     "db:remote": "wrangler d1 migrations apply DB --remote"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.22.0",
-    "sharp": "^0.35.4",
     "vitest": "~4.1.0",
     "wrangler": "^4.130.0"
+  },
+  "dependencies": {
+    "uqr": "^0.1.3"
   },
   "overrides": {
     "sharp": "^0.35.4"

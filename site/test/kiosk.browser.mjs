@@ -3,7 +3,7 @@ import vm from 'node:vm';
 import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 
-const script = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
+const script = readFileSync(new URL('../static/kiosk/app.js', import.meta.url), 'utf8');
 
 describe('LAN kiosk browser behavior', () => {
   let document, window, nodes, fetch, timers;

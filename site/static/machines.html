@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow, noarchive">
+  <title>Machines | TheLab</title>
+  <link rel="icon" href="/assets/favicon.svg">
+  <link rel="stylesheet" href="/machines.css">
+  <script src="/machines.js" defer></script>
+</head>
+<body>
+  <main id="dashboard">
+    <header>
+      <a class="brand" href="/">THELAB</a>
+      <h1>Machines</h1>
+      <p>Check machine status and follow your 3D prints from wherever you are.</p>
+      <p id="refresh-status" role="status">Loading printers…</p>
+      <p id="access-help" hidden><a href="/login?next=/machines">Sign in or check access again</a></p>
+    </header>
+    <noscript>Enable JavaScript to view printer status and camera images.</noscript>
+    <section id="printers" class="grid" aria-label="Printers"></section>
+    <footer class="muted">Remaining times are printer estimates. Status and still images refresh every 5 seconds while this page is visible. Revoking membership access ends status and image access within 60 seconds.</footer>
+  </main>
+</body>
+</html>
