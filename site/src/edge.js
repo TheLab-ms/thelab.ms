@@ -2,7 +2,7 @@
 import { renderSVG } from 'uqr';
 import {
   HttpError, base64url, currentMember, encodeJSON, escapeHTML as e, hex, json, logError, loginRedirect,
-  memberAccessSQL, fobEnabledSQL, now, origin, page, randomToken,
+  memberAccessSQL, fobEnabledSQL, now, origin, page, randomToken, redirect,
 } from './lib.js';
 
 const encoder = new TextEncoder();
@@ -141,6 +141,21 @@ export async function swipeWebhook(request, env, ctx) {
 // ────────────────────────────────────────────────────────────────────────
 
 // Kiosk scans arrive through the LAN edge proxy, which adds its credential.
+// The page itself is only served through the edge; direct visits are sent
+// there. A wrong credential fails rather than redirecting the edge to itself.
+export async function kioskPage(request, env) {
+  if (request.headers.has('Authorization')) {
+    await verifyEdgeKey(request, env);
+    return env.ASSETS.fetch(new URL('/kiosk', request.url));
+  }
+  let target;
+  try { target = new URL('/kiosk', env.EDGE_LAN_URL); } catch { /* Reported below. */ }
+  if (!['http:', 'https:'].includes(target?.protocol) || target.origin !== env.EDGE_LAN_URL) {
+    throw new HttpError(404, 'The fob kiosk is only available on TheLab’s network.');
+  }
+  return redirect(target.href);
+}
+
 export async function kioskClaim(request, env) {
   await verifyEdgeKey(request, env);
   const unrecognized = new HttpError(400, 'Fob not recognized. Scan again.');

@@ -1,10 +1,10 @@
-// Worker entrypoint. Static assets are served directly; requests that match no
-// asset reach these routes.
+// Worker entrypoint. Static assets are served directly, except the gated kiosk
+// page; requests that match no asset reach these routes.
 import { HttpError, escapeHTML as e, json, logError, origin, page } from './lib.js';
 import { adminRequest } from './admin.js';
 import { callback, login, logout } from './auth.js';
 import { checkout, stripeWebhook } from './billing.js';
-import { bindFob, edgeJWKS, edgeSyncRequest, kioskClaim, machinesData, swipeWebhook } from './edge.js';
+import { bindFob, edgeJWKS, edgeSyncRequest, kioskClaim, kioskPage, machinesData, swipeWebhook } from './edge.js';
 import { signWaiver } from './waiver.js';
 
 const routes = {
@@ -17,6 +17,7 @@ const routes = {
   'GET /machines/data': machinesData,
   'GET /keyfob/bind': bindFob,
   'POST /keyfob/bind': bindFob,
+  'GET /kiosk': kioskPage,
   'POST /kiosk/claims': kioskClaim,
   'POST /webhooks/stripe': stripeWebhook,
   'POST /webhooks/edge/swipes': swipeWebhook,

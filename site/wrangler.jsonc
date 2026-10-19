@@ -10,8 +10,11 @@
 		}
 	},
 	// Matching assets are served first; everything else reaches the Worker.
+	// The kiosk page is gated so it only loads through the LAN edge proxy.
 	"assets": {
-		"directory": "static"
+		"directory": "static",
+		"binding": "ASSETS",
+		"run_worker_first": ["/kiosk", "/kiosk.html"]
 	},
 	"d1_databases": [
 		{
@@ -69,6 +72,7 @@
 	"vars": {
 		"SITE_URL": "https://thelab.ms",
 		"EDGE_URL": "https://edgeproxy.thelab.ms",
+		"EDGE_LAN_URL": "http://edge.thelab.ms",
 		"DISCORD_GUILD_ID": "690314626289631294",
 		"DISCORD_ROLE_ID": "1252789548073619458",
 		"DISCORD_ADMIN_ROLE_ID": "814154862777335876",

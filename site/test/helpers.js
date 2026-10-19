@@ -7,7 +7,7 @@ import { hex, sessionCookie } from '../src/lib.js';
 const encoder = new TextEncoder();
 
 // RFC 8032 test seed in PKCS#8; public test material, never a deployment key.
-export const edgeEnv = { ...env, EDGE_URL: 'https://edge.example', EDGE_JWT_PRIVATE_KEY: 'MC4CAQAwBQYDK2VwBCIEIJ1hsZ3v/VpguoRK9JLsLMREScVpezJpGXA7rAMcrn9g' };
+export const edgeEnv = { ...env, EDGE_URL: 'https://edge.example', EDGE_LAN_URL: 'http://edge.lan.example', EDGE_JWT_PRIVATE_KEY: 'MC4CAQAwBQYDK2VwBCIEIJ1hsZ3v/VpguoRK9JLsLMREScVpezJpGXA7rAMcrn9g' };
 
 export async function resetDB() {
   await reset();

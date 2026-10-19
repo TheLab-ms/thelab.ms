@@ -221,6 +221,30 @@ describe('Kiosk and fob enrollment', () => {
   const bind = async (token, cookie) => call(`/keyfob/bind?token=${token}`, post({}, { Cookie: cookie }), edgeEnv);
   beforeEach(async () => { key = await edgeEventKey(edgeEnv); });
 
+  it('serves the kiosk page only through the edge and sends direct visitors there', async () => {
+    quiet();
+    const page = (headers = {}, bindings = edgeEnv) => call('/kiosk', { headers }, bindings);
+    const served = await page({ Authorization: `Bearer ${key}` });
+    expect(served.status).toBe(200);
+    expect(await served.text()).toContain('id="kiosk"');
+    for (const headers of [{}, { Cookie: 'c=d' }]) {
+      const direct = await page(headers);
+      expect(direct.status).toBe(303);
+      expect(direct.headers.get('Location')).toBe('http://edge.lan.example/kiosk');
+      expect(direct.headers.get('Cache-Control')).toBe('no-store');
+    }
+    for (const authorization of ['Bearer wrong', key]) {
+      const rejected = await page({ Authorization: authorization });
+      expect(rejected.status).toBe(401);
+      expect(rejected.headers.get('Location')).toBeNull();
+    }
+    for (const lan of ['', 'edge.lan.example', 'ftp://edge.lan.example', 'http://edge.lan.example/kiosk']) {
+      const unavailable = await page({}, { ...edgeEnv, EDGE_LAN_URL: lan });
+      expect(unavailable.status).toBe(404);
+      expect(await unavailable.text()).not.toContain('id="kiosk"');
+    }
+  });
+
   it('creates five-minute claims with a QR link to the binding page', async () => {
     const response = await scan({ fob_id: 4294967295 });
     expect(response.status).toBe(201);
