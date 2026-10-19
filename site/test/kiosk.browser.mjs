@@ -11,7 +11,7 @@ describe('LAN kiosk browser behavior', () => {
   beforeEach(t => {
     timers = t.mock.timers;
     timers.enable({ apis: ['Date', 'setTimeout'], now: 1800000000000 });
-    nodes = Object.fromEntries(['kiosk', 'standby', 'status', 'claim', 'qr', 'expiry', 'done'].map(id => [id,
+    nodes = Object.fromEntries(['kiosk', 'status', 'claim', 'qr', 'close'].map(id => [id,
       Object.assign(new EventTarget(), { dataset: {}, hidden: id === 'claim', textContent: '',
         setAttribute(name, value) { this[name] = value; }, removeAttribute(name) { delete this[name]; } })]));
     document = Object.assign(new EventTarget(), { getElementById: id => nodes[id] });
@@ -49,20 +49,35 @@ describe('LAN kiosk browser behavior', () => {
     assert.equal(fetch.mock.callCount(), 1);
     assert.deepEqual(JSON.parse(fetch.mock.calls[0].arguments[1].body), { fob_id: 123 });
     assert.equal(nodes.claim.hidden, false);
-    assert.equal(nodes.standby.hidden, true);
   });
 
-  test('continues capturing after reset and keeps the code displayed without polling', async () => {
+  test('closes the QR code with the close button or Escape', async () => {
     scan('123');
     await advance(300);
-    nodes.done.dispatchEvent(new Event('click'));
+    nodes.close.dispatchEvent(new Event('click'));
+    assert.equal(nodes.claim.hidden, true);
+    assert.equal(nodes.qr.src, undefined);
+    assert.equal(nodes.status.textContent, 'Tap your fob');
+    scan('456');
+    await advance(300);
+    assert.equal(nodes.claim.hidden, false);
+    key('Escape');
+    assert.equal(nodes.claim.hidden, true);
+    await advance(300000);
+    assert.equal(nodes.status.textContent, 'Tap your fob');
+  });
+
+  test('continues capturing while a code is displayed without polling', async () => {
+    scan('123');
+    await advance(300);
     scan('456');
     await advance(300);
     assert.deepEqual(JSON.parse(fetch.mock.calls[1].arguments[1].body), { fob_id: 456 });
     await advance(299000);
     assert.equal(fetch.mock.callCount(), 2);
     assert.equal(nodes.claim.hidden, false);
-    nodes.done.dispatchEvent(new Event('click'));
+    assert.equal(nodes.qr.src, 'data:image/svg+xml;base64,qr');
+    window.dispatchEvent(new Event('pagehide'));
     assert.equal(nodes.claim.hidden, true);
     assert.equal(nodes.qr.src, undefined);
   });
@@ -110,7 +125,7 @@ describe('LAN kiosk browser behavior', () => {
     fetch.mock.mockImplementationOnce(async () => { throw new TypeError('Internal network detail'); });
     scan('123');
     await advance(300);
-    assert.equal(nodes.status.textContent, 'Fob enrollment is temporarily unavailable. Please scan again.');
+    assert.equal(nodes.status.textContent, 'Unavailable. Scan again.');
     fetch.mock.mockImplementationOnce(async () => Response.json({ token: 'short', qr: 'qr', expires: Date.now() / 1000 + 1 }));
     scan('456');
     await advance(300);

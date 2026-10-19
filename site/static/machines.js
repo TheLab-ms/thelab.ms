@@ -131,7 +131,7 @@ async function refresh() {
       const details = element('div', undefined, 'details');
       const times = element('dl');
       times.append(element('dt', 'Remaining print time'), element('dd', card.Remaining));
-      details.append(element('h2', card.Name), element('p', card.Status, `status${card.Unavailable ? ' unavailable' : ''}`), times, element('small', card.Updated));
+      details.append(element('h2', card.Name), element('p', card.Status, `status${card.Unavailable ? ' unavailable' : ''}`), times);
       const camera = element('div', undefined, 'camera');
       const image = element('img');
       image.alt = `Current camera image of ${card.Name}`;
@@ -147,7 +147,7 @@ async function refresh() {
       images.push({ image, path: card.Image });
     }
     if (!cards.length) printers.append(element('p', 'No printers are configured yet.'));
-    status.textContent = 'Updated ' + new Date().toLocaleTimeString() + ' · Refreshing every 5 seconds.';
+    status.textContent = '';
     await Promise.all(images.map(async ({ image, path }) => {
       try {
         const response = await fetch(new URL(path, edge), options);

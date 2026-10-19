@@ -6,3 +6,14 @@ if (deleteForm) {
   });
   document.querySelector('button[form="delete-member"]').disabled = false;
 }
+
+// List filters apply as soon as they change. Searches cover all members, so filters are disabled while typing one.
+for (const select of document.querySelectorAll('select[data-autosubmit]')) {
+  select.addEventListener('change', () => select.form.requestSubmit());
+}
+const search = document.querySelector('input[data-search]');
+if (search) {
+  search.addEventListener('input', () => {
+    for (const select of search.form.querySelectorAll('select[data-autosubmit]')) select.disabled = search.value.trim() !== '';
+  });
+}

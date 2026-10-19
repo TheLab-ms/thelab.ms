@@ -153,7 +153,7 @@ test('hides stale content during outages and recovers on the next refresh', asyn
   assert.match(b.nodes['refresh-status'].textContent, /status unavailable/);
   b.respond(async url => String(url).endsWith('.jpg') ? new Response(null, { status: 502 }) : b.normal(url));
   await b.refresh();
-  assert.match(b.nodes['refresh-status'].textContent, /Updated/);
+  assert.equal(b.nodes['refresh-status'].textContent, '');
   assert.equal(b.nodes.printers.querySelectorAll('img')[0].src, undefined);
   b.respond(b.normal);
   await b.refresh();
@@ -218,7 +218,7 @@ for (const source of ['worker', 'status', 'image']) {
     await pending;
     assert.equal(b.created.length, created);
     assert.equal(b.requests.length, requests);
-    assert.match(b.nodes['refresh-status'].textContent, /Updated/);
+    assert.equal(b.nodes['refresh-status'].textContent, '');
     await b.advance(5000);
     assert.equal(b.requests.length, requests + 2);
   });

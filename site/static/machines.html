@@ -4,23 +4,23 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow, noarchive">
+  <meta name="theme-color" content="#00C853">
   <title>Machines | TheLab</title>
-  <link rel="icon" href="/assets/favicon.svg">
-  <link rel="stylesheet" href="/machines.css">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
   <script src="/machines.js" defer></script>
 </head>
-<body>
-  <main id="dashboard">
-    <header>
-      <a class="brand" href="/">THELAB</a>
+<body class="membership-page machines-page">
+  <main class="container membership-main machines-main" id="dashboard">
+    <header class="links-header">
+      <a class="membership-brand" href="/" aria-label="TheLab — home"><img src="/assets/favicon.svg" alt="" width="48" height="48">TheLab</a>
       <h1>Machines</h1>
-      <p>Check machine status and follow your 3D prints from wherever you are.</p>
-      <p id="refresh-status" role="status">Loading printers…</p>
-      <p id="access-help" hidden><a href="/login?next=/machines">Sign in or check access again</a></p>
+      <p id="refresh-status" role="status"></p>
+      <p id="access-help" hidden><a class="btn btn-primary" href="/login?next=/machines">Sign in or check access again</a></p>
     </header>
-    <noscript>Enable JavaScript to view printer status and camera images.</noscript>
-    <section id="printers" class="grid" aria-label="Printers"></section>
-    <footer class="muted">Remaining times are printer estimates. Status and still images refresh every 5 seconds while this page is visible. Revoking membership access ends status and image access within 60 seconds.</footer>
+    <noscript><p class="machines-empty">Enable JavaScript to view printer status and camera images.</p></noscript>
+    <section id="printers" class="machines-grid" aria-label="Printers"></section>
   </main>
+  <footer class="footer"><a href="/">thelab.ms</a><p class="footer-tagline">Everyone's Makerspace</p></footer>
 </body>
 </html>

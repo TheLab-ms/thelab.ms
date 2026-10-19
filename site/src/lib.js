@@ -44,7 +44,7 @@ const htmlHeaders = {
 
 export function page(title, body, { status = 200, admin = false } = {}) {
   const content = admin
-    ? `<header class="admin-header"><a class="membership-brand" href="/">TheLab</a><nav aria-label="Admin navigation"><a href="/admin">Members</a><a href="/admin/events">Member history</a></nav><div class="admin-toolbar-actions"><form method="post" action="/logout"><button class="btn btn-outline" type="submit">Log Out</button></form></div></header><h1>${e(title)}</h1>${body}`
+    ? `<header class="admin-header"><a class="membership-brand" href="/">TheLab</a><nav aria-label="Admin navigation"><a href="/admin">Members</a><a href="/admin/events">Events</a></nav><div class="admin-toolbar-actions"><form method="post" action="/logout"><button class="btn btn-outline" type="submit">Log Out</button></form></div></header><h1>${e(title)}</h1>${body}`
     : `<a class="membership-brand" href="/"><img src="/assets/favicon.svg" alt="" width="48" height="48">TheLab</a><section class="card membership-message"><h1>${e(title)}</h1>${body}</section>`;
   return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>${e(title)} | TheLab</title><link rel="icon" href="/assets/favicon.svg"><link rel="stylesheet" href="/style.css">${admin ? '<script src="/admin.js" defer></script>' : ''}</head><body class="membership-page${admin ? ' admin-page' : ''}"><main class="container membership-main${admin ? ' admin-main' : ''}">${content}</main></body></html>`, { status, headers: htmlHeaders });
 }

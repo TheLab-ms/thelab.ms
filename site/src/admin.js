@@ -56,10 +56,14 @@ function pagination(label, current, pages, url) {
 // ────────────────────────────────────────────────────────────────────────
 
 const filters = [
-  { name: 'waiver', label: 'Waiver status', defaultValue: 'signed', choices: [['all', 'Any waiver status'], ['signed', 'Waiver signed'], ['unsigned', 'Waiver not signed']] },
-  { name: 'discord', label: 'Discord status', defaultValue: 'linked', choices: [['all', 'Any Discord status'], ['linked', 'Discord linked'], ['unlinked', 'Discord not linked']] },
-  { name: 'payment', label: 'Payment status', defaultValue: 'all', choices: [['all', 'Any payment status'], ['inactive', 'Inactive'], ['non_billable', 'Non-billable'], ['legacy_billing', 'Legacy billing'], ['stripe_active', 'Stripe active']] },
+  { name: 'waiver', label: 'Waiver status', defaultValue: 'signed', choices: [['all', 'Any waiver'], ['signed', 'Waiver signed'], ['unsigned', 'No waiver']] },
+  { name: 'discord', label: 'Discord status', defaultValue: 'linked', choices: [['all', 'Any Discord'], ['linked', 'Discord linked'], ['unlinked', 'No Discord']] },
+  { name: 'payment', label: 'Payment status', defaultValue: 'all', choices: [['all', 'Any payment'], ['stripe_active', 'Stripe active'], ['legacy_billing', 'Legacy billing'], ['non_billable', 'Non-billable'], ['inactive', 'Inactive']] },
 ];
+
+// Filter selects have visually hidden labels and apply on change (see static/admin.js).
+const filterSelect = ({ name, label, choices }, value, disabled = false) =>
+  `<label class="sr-only" for="${name}">${e(label)}</label><select id="${name}" name="${name}"${disabled ? ' disabled' : ''} data-autosubmit>${options(choices, value)}</select>`;
 
 function listURL(current, query, values) {
   const params = new URLSearchParams({ page: String(current) });
@@ -91,21 +95,19 @@ async function memberList(url, env) {
   const current = pageNumber(params);
   const [count, rows] = await env.DB.batch([
     env.DB.prepare(`SELECT COUNT(*) AS total FROM members${where}`).bind(...bindings),
-    env.DB.prepare(`SELECT *, ${waiverSignedSQL} AS waiver_signed FROM members${where}
+    env.DB.prepare(`SELECT * FROM members${where}
       ORDER BY created DESC, discord_user_id DESC, member_id DESC LIMIT ? OFFSET ?`).bind(...bindings, PAGE_SIZE, (current - 1) * PAGE_SIZE),
   ]);
   const total = count.results[0].total, pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   if (current > pages) return redirect(listURL(pages, query, values));
   const filtered = query || filters.some(({ name }) => values[name] !== 'all');
-  const tableRows = rows.results.map(m => `<tr><th scope="row"><a class="admin-member-name" href="${e(memberPath(m))}">${e(memberName(m))}</a><small>${e(m.discord_email || m.email || 'No email')}</small><small class="admin-id">Discord ID: ${e(m.discord_user_id || 'Not linked')}</small><small>${m.waiver_signed ? 'Waiver signed' : 'No linked waiver'}</small>${m.non_billable ? '<small>Non-billable</small>' : ''}${m.legacy_billing ? '<small>Legacy billing</small>' : ''}</th><td>${statusBadge(m)}<small>${subscriptionLink(m, env)}</small></td></tr>`).join('');
-  return page('Registered members', `<div class="admin-actions"><a class="btn btn-primary" href="/admin/members/new">New member</a></div>
-    <form method="get" action="/admin" role="search" class="admin-form admin-search">
-    <label for="member-search">Search members</label>
-    <div class="admin-search-controls"><input id="member-search" type="search" name="q" value="${e(query)}" maxlength="254" placeholder="Name, email, Discord handle or ID, fob ID">${query ? `<a class="btn btn-outline" href="${e(listURL(1, '', values))}">Clear search</a>` : ''}</div>
-    <fieldset class="admin-list-filters" aria-label="Member filters">${filters.map(({ name, label, choices }) => select(name, label, values[name], choices)).join('')}</fieldset>
-    <p class="admin-help">Searches include all members, ignoring filters.</p>
-    <div class="admin-actions"><button class="btn btn-primary" type="submit">Search or filter</button><a href="/admin">Reset</a></div></form>
-    <div class="admin-list-summary"><p><strong>${total} ${filtered ? 'matching' : 'registered'} member${total === 1 ? '' : 's'}</strong>${query ? ` for “${e(query)}”` : ''}</p><p class="admin-help">Newest first</p></div>
+  const changed = query || filters.some(({ name, defaultValue }) => values[name] !== defaultValue);
+  const tableRows = rows.results.map(m => `<tr><th scope="row"><a class="admin-member-name" href="${e(memberPath(m))}">${e(memberName(m))}</a><small>${e(m.discord_email || m.email || 'No email')}</small>${m.non_billable ? '<small>Non-billable</small>' : ''}${m.legacy_billing ? '<small>Legacy billing</small>' : ''}</th><td>${statusBadge(m)}<small>${subscriptionLink(m, env)}</small></td></tr>`).join('');
+  return page('Registered members', `<form method="get" action="/admin" role="search" class="admin-form admin-search-panel">
+    <div class="admin-search-row"><label class="sr-only" for="member-search">Search members</label><input id="member-search" type="search" name="q" value="${e(query)}" maxlength="254" placeholder="Search name, email, Discord, or fob ID" data-search>
+    <button class="btn btn-primary" type="submit">Search</button><a class="btn btn-accent-outline" href="/admin/members/new">New member</a></div>
+    <div class="admin-filter-row"><span class="admin-filter-label" aria-hidden="true">Filter</span>${filters.map(filter => filterSelect(filter, values[filter.name], !!query)).join('')}${changed ? '<a href="/admin">Clear</a>' : ''}</div></form>
+    <div class="admin-list-summary"><p><strong>${total} ${filtered ? 'matching' : 'registered'} member${total === 1 ? '' : 's'}</strong>${query ? ` for “${e(query)}”` : ''}</p><p class="admin-help">${query ? 'Searching all members; filters are ignored' : 'Newest first'}</p></div>
     <div class="admin-table" role="region" aria-label="Registered members" tabindex="0"><table class="admin-member-table"><thead><tr><th scope="col">Member</th><th scope="col">Subscription</th></tr></thead><tbody>${tableRows || `<tr><td colspan="2" class="admin-empty">${filtered ? 'No members match your search and filters.' : 'No members have registered yet.'}</td></tr>`}</tbody></table></div>
     ${pagination('Member pages', current, pages, n => listURL(n, query, values))}`, { admin: true });
 }
@@ -177,10 +179,10 @@ async function history(url, env, member) {
   const total = count.results[0].total, pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const pageURL = n => `${url.pathname}?${new URLSearchParams({ page: n, ...(type ? { event_type: type } : {}) })}`;
   if (current > pages) return redirect(pageURL(pages));
-  return page(member ? `History for ${memberName(member)}` : 'Member history', `${member ? `<p><a href="${e(memberPath(member))}">← Back to member</a></p>` : ''}
+  return page(member ? `History for ${memberName(member)}` : 'Events', `${member ? `<p><a href="${e(memberPath(member))}">← Back to member</a></p>` : ''}
     <p>Member changes are retained indefinitely. Timestamps are UTC.</p>
-    <form method="get" action="${e(url.pathname)}" class="admin-form admin-search"><label for="event-type">Event type</label>
-    <div class="admin-search-controls"><select id="event-type" name="event_type">${options([['', 'All event types'], ...Object.entries(eventTypes)], type)}</select><button class="btn btn-primary" type="submit">Filter</button></div></form>
+    <form method="get" action="${e(url.pathname)}" class="admin-form admin-toolbar"><label class="sr-only" for="event-type">Event type</label>
+    <select id="event-type" name="event_type" data-autosubmit>${options([['', 'All event types'], ...Object.entries(eventTypes)], type)}</select><button class="btn btn-primary" type="submit">Filter</button>${type ? `<a href="${e(url.pathname)}">Clear</a>` : ''}</form>
     <p>${total} event${total === 1 ? '' : 's'}.</p>${eventTable(rows.results, !member)}
     ${pagination('History pages', current, pages, pageURL)}`, { admin: true });
 }

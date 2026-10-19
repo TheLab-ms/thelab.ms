@@ -49,6 +49,9 @@ describe('Admin', () => {
     html = await (await get('/admin?q=pending')).text();
     expect(html).toContain('1 matching member</strong>');
     expect(html).toContain('Pending &lt;Maker&gt;');
+    expect(html).toMatch(/<select id="waiver" name="waiver" disabled/);
+    expect(html).toContain('<a href="/admin">Clear</a>');
+    expect(await (await get('/admin')).text()).not.toContain('>Clear</a>');
     expect((await get('/admin?page=9')).headers.get('Location')).toBe('/admin?page=1');
     expect((await get('/admin?page=bogus&waiver=bogus')).status).toBe(200);
   });
