@@ -1,7 +1,7 @@
 import { env } from 'cloudflare:workers';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { edgeEventKey, edgeJWKS, edgeToken, pushFobs } from '../src/edge.js';
-import { now, randomToken } from '../src/lib.js';
+import { encodeJSON, now, randomToken, signToken } from '../src/lib.js';
 import { addWaiver, call, edgeEnv, insertMember, post, quiet, readMember, resetDB, session } from './helpers.js';
 
 const decode = value => Uint8Array.from(atob(value.replaceAll('-', '+').replaceAll('_', '/')), c => c.charCodeAt(0));
@@ -213,12 +213,9 @@ describe('Kiosk and fob enrollment', () => {
     method: 'POST', body: typeof body === 'string' ? body : JSON.stringify(body),
     headers: { 'Content-Type': 'application/json', ...(authorization ? { Authorization: authorization } : {}) },
   }, edgeEnv);
-  async function claim(fob = 123) {
-    const token = randomToken();
-    await env.DB.prepare('INSERT INTO fob_claims(id, fob_id, created, expires) VALUES (?, ?, ?, ?)').bind(token, fob, now(), now() + 300).run();
-    return token;
-  }
+  const claim = (fob = 123) => signToken(env, { fob, exp: now() + 300 });
   const bind = async (token, cookie) => call(`/keyfob/bind?token=${token}`, post({}, { Cookie: cookie }), edgeEnv);
+  const fobEvents = async () => (await env.DB.prepare("SELECT COUNT(*) AS n FROM member_events WHERE event_type = 'FobChanged'").first()).n;
   beforeEach(async () => { key = await edgeEventKey(edgeEnv); });
 
   it('serves the kiosk page only through the edge and sends direct visitors there', async () => {
@@ -245,16 +242,18 @@ describe('Kiosk and fob enrollment', () => {
     }
   });
 
-  it('creates five-minute claims with a QR link to the binding page', async () => {
+  it('creates five-minute signed claims with a QR link to the binding page', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1800000000000);
     const response = await scan({ fob_id: 4294967295 });
     expect(response.status).toBe(201);
     const result = await response.json();
     expect(result.url).toBe(`${env.SITE_URL}/keyfob/bind?token=${result.token}`);
+    expect(result.expires).toBe(1800000300);
+    expect(parse(result.token.split('.')[0])).toEqual({ fob: 4294967295, exp: 1800000300 });
     expect(atob(result.qr.replace(/^data:image\/svg\+xml;base64,/, ''))).toMatch(/^<svg /);
-    expect(await env.DB.prepare('SELECT fob_id, expires - created AS lifetime FROM fob_claims').first()).toEqual({ fob_id: 4294967295, lifetime: 300 });
   });
 
-  it('rejects unauthenticated, malformed, and excessive scans with kiosk-readable errors', async () => {
+  it('rejects unauthenticated and malformed scans with kiosk-readable errors', async () => {
     quiet();
     for (const authorization of [null, 'Bearer wrong']) expect((await scan({ fob_id: 7 }, authorization)).status).toBe(401);
     for (const body of ['not json', 'null', { fob_id: 0 }, { fob_id: '7' }, { fob_id: 4294967296 }, { fob: 7 }]) {
@@ -262,8 +261,6 @@ describe('Kiosk and fob enrollment', () => {
       expect(response.status).toBe(400);
       expect(await response.json()).toEqual({ error: 'Fob not recognized. Scan again.' });
     }
-    for (let i = 0; i < 30; i++) expect((await scan({ fob_id: 7 })).status).toBe(201);
-    expect(await (await scan({ fob_id: 7 })).json()).toEqual({ error: 'Too many scans. Please wait a minute.' });
   });
 
   it('signs visitors in, confirms on GET, and links on POST', async () => {
@@ -278,22 +275,31 @@ describe('Kiosk and fob enrollment', () => {
     expect(await response.text()).toContain('Fob 123 is now linked');
     expect((await readMember(m.member_id)).fob_id).toBe(123);
     expect(edge.fobs).toEqual([123]);
-    quiet();
-    expect((await bind(token, cookie)).status).toBe(409);
+    // Redeeming again is an idempotent no-op.
+    const events = await fobEvents();
+    expect(await (await call(`/keyfob/bind?token=${token}`, { headers: { Cookie: cookie } })).text()).toContain('Fob 123 is now linked');
+    expect(await (await bind(token, cookie)).text()).toContain('Fob 123 is now linked');
+    expect(await fobEvents()).toBe(events);
+    expect(pushes).toHaveLength(1);
   });
 
-  it('rejects invalid, expired, conflicting, and cross-origin redemptions', async () => {
+  it('rejects invalid, forged, expired, conflicting, and cross-origin redemptions', async () => {
     quiet();
-    await insertMember({ discord_user_id: discordID, fob_id: 456 });
+    const m = await insertMember({ discord_user_id: discordID, fob_id: 456 });
     await insertMember({ fob_id: 123 });
     const cookie = await session(discordID);
-    for (const token of ['bogus', randomToken()]) expect((await bind(token, cookie)).status).toBe(410);
+    const [payload, signature] = (await claim(456)).split('.');
+    const forged = `${encodeJSON({ fob: 123, exp: now() + 300 })}.${signature}`;
+    const sessionToken = cookie.split('=')[1];
+    for (const token of ['bogus', randomToken(), forged, `${payload}.`, sessionToken]) expect((await bind(token, cookie)).status).toBe(410);
+    // Claims are not sessions either.
+    expect((await call(`/keyfob/bind?token=${await claim(789)}`, { headers: { Cookie: `thelab_session=${await claim()}` } })).headers.get('Location')).toMatch(/^\/login/);
     const token = await claim();
     expect((await call(`/keyfob/bind?token=${token}`, post({}, { Cookie: cookie, Origin: 'https://evil.example' }), edgeEnv)).status).toBe(403);
     expect((await bind(token, '')).status).toBe(401);
     expect((await bind(token, cookie)).status).toBe(409);
-    expect((await env.DB.prepare('SELECT claimed_by FROM fob_claims').first()).claimed_by).toBeNull();
-    vi.spyOn(Date, 'now').mockReturnValue((now() + 301) * 1000);
+    expect((await readMember(m.member_id)).fob_id).toBe(456);
+    vi.spyOn(Date, 'now').mockReturnValue((now() + 300) * 1000);
     expect((await bind(token, cookie)).status).toBe(410);
   });
 });

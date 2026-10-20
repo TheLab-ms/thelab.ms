@@ -79,21 +79,31 @@ function authKey(env) {
   return crypto.subtle.importKey('raw', encoder.encode(env.AUTH_SECRET), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify']);
 }
 
-export async function sessionCookie(env, discordUserID, admin) {
-  const payload = encodeJSON({ sub: discordUserID, admin, exp: now() + SESSION_AGE });
-  const signature = base64url(await crypto.subtle.sign('HMAC', await authKey(env), encoder.encode(payload)));
-  return setCookie(env, 'thelab_session', `${payload}.${signature}`, SESSION_AGE);
+// Signed, expiring JSON values. Readers validate the fields they require, and
+// each kind of token has disjoint required fields, so one is never accepted as another.
+export async function signToken(env, value) {
+  const payload = encodeJSON(value);
+  return `${payload}.${base64url(await crypto.subtle.sign('HMAC', await authKey(env), encoder.encode(payload)))}`;
 }
 
-export async function readSession(request, env) {
-  const parts = (getCookie(request, 'thelab_session') || '').split('.');
+export async function readToken(env, token) {
+  const parts = (token || '').split('.');
   if (parts.length !== 2) return null;
   const key = await authKey(env);
   try {
     if (!await crypto.subtle.verify('HMAC', key, fromBase64url(parts[1]), encoder.encode(parts[0]))) return null;
-    const session = JSON.parse(new TextDecoder().decode(fromBase64url(parts[0])));
-    return session.exp > now() && discordID.test(session.sub) ? session : null;
+    const value = JSON.parse(new TextDecoder().decode(fromBase64url(parts[0])));
+    return value?.exp > now() ? value : null;
   } catch { return null; }
+}
+
+export async function sessionCookie(env, discordUserID, admin) {
+  return setCookie(env, 'thelab_session', await signToken(env, { sub: discordUserID, admin, exp: now() + SESSION_AGE }), SESSION_AGE);
+}
+
+export async function readSession(request, env) {
+  const session = await readToken(env, getCookie(request, 'thelab_session'));
+  return discordID.test(session?.sub) ? session : null;
 }
 
 // Matches no member without a session, so callers can batch it with other reads.

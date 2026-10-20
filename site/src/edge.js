@@ -2,7 +2,7 @@
 import { renderSVG } from 'uqr';
 import {
   HttpError, base64url, currentMember, encodeJSON, escapeHTML as e, hex, json, logError, loginRedirect,
-  memberAccessSQL, memberQuery, fobEnabledSQL, now, origin, page, randomToken, readSession, redirect,
+  memberAccessSQL, memberQuery, fobEnabledSQL, now, origin, page, readSession, readToken, redirect, signToken,
 } from './lib.js';
 
 const encoder = new TextEncoder();
@@ -160,57 +160,50 @@ export async function kioskPage(request, env) {
   return redirect(target.href);
 }
 
+// A claim is a signed, five-minute token naming the scanned fob; there is no
+// server-side state. Redeeming it again is harmless: the fob is already linked
+// to the redeeming member, and the unique fob_id rejects anyone else.
 export async function kioskClaim(request, env) {
   await verifyEdgeKey(request, env);
   const unrecognized = new HttpError(400, 'Fob not recognized. Scan again.');
   let input;
   try { input = await request.json(); } catch { throw unrecognized; }
   if (!validFob(input?.fob_id)) throw unrecognized;
-  const created = now();
-  const [, inserted] = await env.DB.batch([
-    env.DB.prepare('DELETE FROM fob_claims WHERE expires <= ?').bind(created),
-    env.DB.prepare(`INSERT INTO fob_claims(id, fob_id, created, expires)
-      SELECT ?1, ?2, ?3, ?3 + 300 WHERE (SELECT COUNT(*) FROM fob_claims WHERE created > ?3 - 60) < 30
-      RETURNING id, expires`).bind(randomToken(), input.fob_id, created),
-  ]);
-  const claim = inserted.results[0];
-  if (!claim) throw new HttpError(429, 'Too many scans. Please wait a minute.');
-  const url = `${origin(env)}/keyfob/bind?token=${claim.id}`;
-  return json({ token: claim.id, url, expires: claim.expires, qr: `data:image/svg+xml;base64,${btoa(renderSVG(url))}` }, 201);
+  const expires = now() + 300;
+  const token = await signToken(env, { fob: input.fob_id, exp: expires });
+  const url = `${origin(env)}/keyfob/bind?token=${token}`;
+  return json({ token, url, expires, qr: `data:image/svg+xml;base64,${btoa(renderSVG(url))}` }, 201);
 }
 
 export async function bindFob(request, env) {
   const url = new URL(request.url);
   const token = url.searchParams.get('token') || '';
-  const session = await readSession(request, env);
-  const [claim, member] = /^[a-f0-9]{64}$/.test(token) ? (await env.DB.batch([
-    env.DB.prepare('SELECT * FROM fob_claims WHERE id = ?').bind(token),
-    memberQuery(env, session),
-  ])).map(result => result.results[0] ?? null) : [null, null];
-  if (!claim || claim.expires <= now()) throw new HttpError(410, 'This QR code is invalid or expired. Scan your fob at the kiosk again.');
-  if (claim.claimed_by !== null) throw new HttpError(409, 'This QR code has already been used. Scan your fob again.');
+  const [claim, session] = await Promise.all([readToken(env, token), readSession(request, env)]);
+  if (!validFob(claim?.fob)) throw new HttpError(410, 'This QR code is invalid or expired. Scan your fob at the kiosk again.');
+  const { fob } = claim;
+  const member = await memberQuery(env, session).first();
   if (!member) {
     if (request.method === 'GET') return loginRedirect(url.pathname + url.search);
     throw new HttpError(401, 'Your sign-in expired. Reload this enrollment link to sign in again.');
   }
+  const linkedPage = () => page('Fob linked', `<p role="status">Fob ${fob} is now linked to your membership.</p><p>You can close this page.</p>`);
   if (request.method === 'GET') {
-    return page('Link your fob', `<p>Signed in as <strong>${e(member.discord_username)}</strong>.</p><p>Link fob <strong>${claim.fob_id}</strong> to your membership.</p>
-      ${member.fob_id && member.fob_id !== claim.fob_id ? `<p>This replaces fob <strong>${member.fob_id}</strong>, which will lose door access.</p>` : ''}
+    if (member.fob_id === fob) return linkedPage();
+    return page('Link your fob', `<p>Signed in as <strong>${e(member.discord_username)}</strong>.</p><p>Link fob <strong>${fob}</strong> to your membership.</p>
+      ${member.fob_id ? `<p>This replaces fob <strong>${member.fob_id}</strong>, which will lose door access.</p>` : ''}
       <p>Door access follows your membership and waiver status.</p>
       <form method="post" action="/keyfob/bind?token=${e(token)}"><button class="btn btn-primary" type="submit">Link fob</button></form>`);
   }
-  let linked;
+  let changed;
   try {
-    // The fob_claim_redeemed trigger assigns the fob in the same statement.
-    linked = await env.DB.prepare(`UPDATE fob_claims SET claimed_by = ?
-      WHERE id = ? AND claimed_by IS NULL AND expires > ? RETURNING id`).bind(member.member_id, token, now()).first();
+    changed = await env.DB.prepare(`UPDATE members SET fob_id = ?1, metadata_version = metadata_version + 1
+      WHERE member_id = ?2 AND fob_id IS NOT ?1 RETURNING member_id`).bind(fob, member.member_id).first();
   } catch (error) {
     if (String(error).includes('members.fob_id')) throw new HttpError(409, 'That fob belongs to another member. Please ask leadership to reassign it.');
     throw error;
   }
-  if (!linked) throw new HttpError(409, 'This QR code expired or has already been used. Scan your fob again.');
-  await pushFobs(env);
-  return page('Fob linked', `<p role="status">Fob ${claim.fob_id} is now linked to your membership.</p><p>You can close this page.</p>`);
+  if (changed) await pushFobs(env);
+  return linkedPage();
 }
 
 // ────────────────────────────────────────────────────────────────────────
