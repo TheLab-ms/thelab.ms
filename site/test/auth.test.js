@@ -45,6 +45,19 @@ describe('Sign-in', () => {
     expect(calls).toHaveLength(0);
   });
 
+  it('rate limits callbacks per client IP before contacting Discord', async () => {
+    quiet();
+    const calls = mockFetch();
+    const statuses = [];
+    for (let i = 0; i < 11; i++) {
+      statuses.push((await call('/login/callback?state=state-1&code=c', { headers: { 'CF-Connecting-IP': '203.0.113.7' } })).status);
+    }
+    expect(statuses.slice(0, 10)).toEqual(Array(10).fill(400));
+    expect(statuses[10]).toBe(429);
+    expect((await call('/login/callback?state=state-1&code=c', { headers: { 'CF-Connecting-IP': '203.0.113.8' } })).status).toBe(400);
+    expect(calls).toHaveLength(0);
+  });
+
   it('registers the member, refreshes the identity, and sets one session cookie', async () => {
     const calls = discordMocks();
     const response = await call('/login/callback?state=state-1&code=c', { headers: { Cookie: oauthCookie() } });

@@ -84,6 +84,19 @@ describe('Checkout', () => {
     expect(await response.text()).toContain('Membership checkout is temporarily unavailable');
   });
 
+  it('reuses the membership price for later checkouts', async () => {
+    await env.DB.prepare("UPDATE members SET stripe_customer_id = 'cus_1', legacy_waiver_signed = 1 WHERE member_id = ?").bind(member.member_id).run();
+    const calls = mockFetch([
+      ['GET', /\/v1\/checkout\/sessions\?/, list([])],
+      ['GET', /\/v1\/subscriptions\?/, list([])],
+      ['GET', /\/v1\/prices\?/, list([monthly])],
+      ['POST', `${stripeAPI}/checkout/sessions`, { url: 'https://checkout.stripe.com/c/pay/cs_1' }],
+    ]);
+    await call('/checkout', { headers: { Cookie: cookie } });
+    await call('/checkout', { headers: { Cookie: cookie } });
+    expect(calls.filter(c => c.url.includes('/prices?'))).toHaveLength(1);
+  });
+
   it('reuses an unfinished checkout so returning members cannot start a second payment', async () => {
     await addWaiver(member.member_id);
     const sessions = [];

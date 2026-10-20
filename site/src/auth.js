@@ -55,6 +55,8 @@ export async function registerMember(env, user) {
 }
 
 export async function callback(request, env) {
+  const ip = request.headers.get('CF-Connecting-IP');
+  if (ip && !(await env.LOGIN_LIMITER.limit({ key: ip })).success) throw new HttpError(429, 'Too many sign-in attempts. Please wait a minute and try again.');
   const url = new URL(request.url);
   let saved;
   try { saved = JSON.parse(decodeURIComponent(getCookie(request, 'thelab_oauth') || '')); } catch { /* Rejected below. */ }

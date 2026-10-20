@@ -2,6 +2,7 @@ import { env } from 'cloudflare:workers';
 import { applyD1Migrations, createExecutionContext, reset, waitOnExecutionContext } from 'cloudflare:test';
 import { vi } from 'vitest';
 import worker from '../src/index.js';
+import { clearPriceCache } from '../src/billing.js';
 import { hex, sessionCookie } from '../src/lib.js';
 
 const encoder = new TextEncoder();
@@ -9,7 +10,9 @@ const encoder = new TextEncoder();
 // RFC 8032 test seed in PKCS#8; public test material, never a deployment key.
 export const edgeEnv = { ...env, EDGE_URL: 'https://edge.example', EDGE_LAN_URL: 'http://edge.lan.example', EDGE_JWT_PRIVATE_KEY: 'MC4CAQAwBQYDK2VwBCIEIJ1hsZ3v/VpguoRK9JLsLMREScVpezJpGXA7rAMcrn9g' };
 
+// Also clears in-memory caches so each test starts from a clean state.
 export async function resetDB() {
+  clearPriceCache();
   await reset();
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
 }

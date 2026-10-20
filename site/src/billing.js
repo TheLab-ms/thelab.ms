@@ -79,10 +79,22 @@ export async function stripeWebhook(request, env) {
   return new Response(null, { status: 204 });
 }
 
+// Prices rarely change, so each isolate reuses a lookup for a few minutes.
+const prices = new Map();
+export const clearPriceCache = () => prices.clear();
+
+async function membershipPrice(env, annual) {
+  const interval = annual ? 'year' : 'month';
+  const cached = prices.get(interval);
+  if (cached?.expires > Date.now()) return cached.price;
+  const price = (await stripeList(env, '/prices', { active: 'true', 'lookup_keys[]': annual ? 'yearly' : 'monthly' }))
+    .find(item => item.type === 'recurring' && item.recurring?.interval === interval && item.recurring.interval_count === 1);
+  if (price) prices.set(interval, { price, expires: Date.now() + 300000 });
+  return price;
+}
+
 async function resolvePricing(env, member) {
-  const annual = Boolean(member.bill_annually);
-  const prices = await stripeList(env, '/prices', { active: 'true', 'lookup_keys[]': annual ? 'yearly' : 'monthly' });
-  const price = prices.find(item => item.type === 'recurring' && item.recurring?.interval === (annual ? 'year' : 'month') && item.recurring.interval_count === 1);
+  const price = await membershipPrice(env, Boolean(member.bill_annually));
   if (!price) throw new HttpError(503, 'Membership checkout is temporarily unavailable. Please contact leadership.');
   if (!member.discount_type) return { price };
   const product = typeof price.product === 'string' ? price.product : price.product.id;
