@@ -287,10 +287,9 @@ async function updateMember(env, member, value) {
   };
 }
 
-async function memberWaivers(env, member) {
-  const { results } = await env.DB.prepare('SELECT * FROM waivers WHERE member_id = ? ORDER BY id DESC').bind(member.member_id).all();
+function memberWaivers(member, waivers) {
   const legacy = member.legacy_waiver_signed ? '<p>Conway recorded a signed waiver. The original signature record was not included in the export.</p>' : '';
-  const rows = results.map(w => `<details><summary>Signature #${w.id} · ${e(date(w.created))}</summary><p>${e(w.name)} · ${e(w.email)}</p>${w.content ? `<pre class="admin-waiver">${e(w.content)}</pre>` : ''}</details>`).join('');
+  const rows = waivers.map(w => `<details><summary>Signature #${w.id} · ${e(date(w.created))}</summary><p>${e(w.name)} · ${e(w.email)}</p>${w.content ? `<pre class="admin-waiver">${e(w.content)}</pre>` : ''}</details>`).join('');
   return `<section class="card admin-section"><h2>Signed waivers</h2>${legacy}${rows || (legacy ? '' : '<p>No linked waiver.</p>')}</section>`;
 }
 
@@ -301,9 +300,9 @@ const notices = {
 
 async function editor(env, member, { fields, message = '', status = 200, checkout = '' } = {}) {
   const f = fields || { ...member, billing: member.bill_annually ? 'yearly' : 'monthly' };
-  const [{ results: events }, waivers] = await Promise.all([
-    env.DB.prepare('SELECT * FROM member_events WHERE member_id = ? ORDER BY created DESC, id DESC LIMIT 10').bind(member.member_id).all(),
-    memberWaivers(env, member),
+  const [{ results: events }, { results: waivers }] = await env.DB.batch([
+    env.DB.prepare('SELECT * FROM member_events WHERE member_id = ? ORDER BY created DESC, id DESC LIMIT 10').bind(member.member_id),
+    env.DB.prepare('SELECT * FROM waivers WHERE member_id = ? ORDER BY id DESC').bind(member.member_id),
   ]);
   const account = [
     ['Member email', member.email], ['Waiver name', member.waiver_name],
@@ -336,7 +335,7 @@ async function editor(env, member, { fields, message = '', status = 200, checkou
     <form id="sync-member" method="post" action="${e(path)}/sync"></form>
     <form id="delete-member" method="post" action="${e(path)}/delete" data-confirm="${e(`Delete ${memberName(member)}? This cannot be undone. Cancel any Stripe subscription separately.`)}"></form>
     <noscript><p class="admin-help">Enable JavaScript to delete a member with confirmation.</p></noscript>
-    ${waivers}<section class="card admin-section"><h2>Recent member history</h2>${eventTable(events, false)}<p><a href="${e(path)}/events">View full member history</a></p></section>`, { status, admin: true });
+    ${memberWaivers(member, waivers)}<section class="card admin-section"><h2>Recent member history</h2>${eventTable(events, false)}<p><a href="${e(path)}/events">View full member history</a></p></section>`, { status, admin: true });
 }
 
 // ────────────────────────────────────────────────────────────────────────

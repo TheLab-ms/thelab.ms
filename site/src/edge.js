@@ -2,7 +2,7 @@
 import { renderSVG } from 'uqr';
 import {
   HttpError, base64url, currentMember, encodeJSON, escapeHTML as e, hex, json, logError, loginRedirect,
-  memberAccessSQL, fobEnabledSQL, now, origin, page, randomToken, redirect,
+  memberAccessSQL, memberQuery, fobEnabledSQL, now, origin, page, randomToken, readSession, redirect,
 } from './lib.js';
 
 const encoder = new TextEncoder();
@@ -120,18 +120,22 @@ export async function swipeWebhook(request, env, ctx) {
     && typeof event.time === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?Z$/.test(event.time)
     && Number.isFinite(Date.parse(event.time)))) throw new HttpError(400, 'Invalid swipe batch.');
   // Event IDs make redelivery idempotent; ownership is resolved at swipe time.
-  for (let i = 0; i < events.length; i += 50) {
-    await env.DB.batch(events.slice(i, i + 50).map(event => env.DB.prepare(`
-      INSERT INTO member_events(source_event_id, created, event_type, details, member_id)
-      VALUES (?1, CAST(unixepoch(?2) AS INTEGER), 'FobSwipe',
-        json_object('id', ?1, 'time', ?2, 'controller', ?3, 'fob', ?4, 'allowed', ?5),
-        (SELECT member_id FROM fob_assignments WHERE fob = ?4 AND started <= ?6
-          AND (ended IS NULL OR ended > ?6) ORDER BY started DESC, id DESC LIMIT 1))
-      ON CONFLICT(source_event_id) DO NOTHING`)
-      .bind(event.id, event.time, event.controller, event.fob, event.allowed ? 1 : 0, Date.parse(event.time) / 1000)));
+  const inserts = events.map(event => env.DB.prepare(`
+    INSERT INTO member_events(source_event_id, created, event_type, details, member_id)
+    VALUES (?1, CAST(unixepoch(?2) AS INTEGER), 'FobSwipe',
+      json_object('id', ?1, 'time', ?2, 'controller', ?3, 'fob', ?4, 'allowed', ?5),
+      (SELECT member_id FROM fob_assignments WHERE fob = ?4 AND started <= ?6
+        AND (ended IS NULL OR ended > ?6) ORDER BY started DESC, id DESC LIMIT 1))
+    ON CONFLICT(source_event_id) DO NOTHING`)
+    .bind(event.id, event.time, event.controller, event.fob, event.allowed ? 1 : 0, Date.parse(event.time) / 1000));
+  // The last batch also reads the revision.
+  let results;
+  for (let i = 0; !results || i < inserts.length; i += 50) {
+    const last = i + 50 >= inserts.length;
+    results = await env.DB.batch([...inserts.slice(i, i + 50), ...(last ? [env.DB.prepare('SELECT revision FROM edge_changes WHERE id = 1')] : [])]);
   }
   // A stale edge missed a push; correct it now rather than waiting for its staleness timer.
-  const { revision } = await env.DB.prepare('SELECT revision FROM edge_changes WHERE id = 1').first();
+  const { revision } = results.at(-1).results[0];
   if (request.headers.get('X-Edge-Revision') !== String(revision)) ctx.waitUntil(pushFobs(env));
   return new Response(null, { status: 204 });
 }
@@ -163,10 +167,13 @@ export async function kioskClaim(request, env) {
   try { input = await request.json(); } catch { throw unrecognized; }
   if (!validFob(input?.fob_id)) throw unrecognized;
   const created = now();
-  await env.DB.prepare('DELETE FROM fob_claims WHERE expires <= ?').bind(created).run();
-  const claim = await env.DB.prepare(`INSERT INTO fob_claims(id, fob_id, created, expires)
-    SELECT ?1, ?2, ?3, ?3 + 300 WHERE (SELECT COUNT(*) FROM fob_claims WHERE created > ?3 - 60) < 30
-    RETURNING id, expires`).bind(randomToken(), input.fob_id, created).first();
+  const [, inserted] = await env.DB.batch([
+    env.DB.prepare('DELETE FROM fob_claims WHERE expires <= ?').bind(created),
+    env.DB.prepare(`INSERT INTO fob_claims(id, fob_id, created, expires)
+      SELECT ?1, ?2, ?3, ?3 + 300 WHERE (SELECT COUNT(*) FROM fob_claims WHERE created > ?3 - 60) < 30
+      RETURNING id, expires`).bind(randomToken(), input.fob_id, created),
+  ]);
+  const claim = inserted.results[0];
   if (!claim) throw new HttpError(429, 'Too many scans. Please wait a minute.');
   const url = `${origin(env)}/keyfob/bind?token=${claim.id}`;
   return json({ token: claim.id, url, expires: claim.expires, qr: `data:image/svg+xml;base64,${btoa(renderSVG(url))}` }, 201);
@@ -175,10 +182,13 @@ export async function kioskClaim(request, env) {
 export async function bindFob(request, env) {
   const url = new URL(request.url);
   const token = url.searchParams.get('token') || '';
-  const claim = /^[a-f0-9]{64}$/.test(token) ? await env.DB.prepare('SELECT * FROM fob_claims WHERE id = ?').bind(token).first() : null;
+  const session = await readSession(request, env);
+  const [claim, member] = /^[a-f0-9]{64}$/.test(token) ? (await env.DB.batch([
+    env.DB.prepare('SELECT * FROM fob_claims WHERE id = ?').bind(token),
+    memberQuery(env, session),
+  ])).map(result => result.results[0] ?? null) : [null, null];
   if (!claim || claim.expires <= now()) throw new HttpError(410, 'This QR code is invalid or expired. Scan your fob at the kiosk again.');
   if (claim.claimed_by !== null) throw new HttpError(409, 'This QR code has already been used. Scan your fob again.');
-  const member = await currentMember(request, env);
   if (!member) {
     if (request.method === 'GET') return loginRedirect(url.pathname + url.search);
     throw new HttpError(401, 'Your sign-in expired. Reload this enrollment link to sign in again.');

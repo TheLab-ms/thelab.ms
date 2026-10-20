@@ -96,11 +96,15 @@ export async function readSession(request, env) {
   } catch { return null; }
 }
 
+// Matches no member without a session, so callers can batch it with other reads.
+export const memberQuery = (env, session, columns = '*') =>
+  env.DB.prepare(`SELECT ${columns} FROM members WHERE discord_user_id = ?`).bind(session?.sub ?? null);
+
 // Callers may select access policy alongside identity in one query.
 export async function currentMember(request, env, columns = '*') {
   const session = await readSession(request, env);
   if (!session) return null;
-  return env.DB.prepare(`SELECT ${columns} FROM members WHERE discord_user_id = ?`).bind(session.sub).first();
+  return memberQuery(env, session, columns).first();
 }
 
 // ────────────────────────────────────────────────────────────────────────

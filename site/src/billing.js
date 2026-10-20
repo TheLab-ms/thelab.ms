@@ -58,13 +58,14 @@ export async function stripeWebhook(request, env) {
   try { event = JSON.parse(text); } catch { throw new HttpError(400, 'Invalid Stripe event.'); }
   const object = event?.data?.object;
   let customer;
+  const statements = [];
   if (event?.type === 'checkout.session.completed') {
     customer = object.customer;
     // Also accept checkouts created before customers were linked up front.
     if (typeof customer === 'string' && /^[a-f0-9]{32}$/.test(object.client_reference_id || '')) {
-      await env.DB.prepare(`UPDATE members SET stripe_customer_id = ?, metadata_version = metadata_version + 1
+      statements.push(env.DB.prepare(`UPDATE members SET stripe_customer_id = ?, metadata_version = metadata_version + 1
         WHERE member_id = ? AND stripe_customer_id IS NULL`)
-        .bind(customer, object.client_reference_id).run();
+        .bind(customer, object.client_reference_id));
     }
   } else if (event?.type === 'customer.updated') {
     customer = object.id;
@@ -74,7 +75,8 @@ export async function stripeWebhook(request, env) {
   if (typeof customer !== 'string') return new Response(null, { status: 204 });
   // Unmapped customers (e.g. donors) are outside this app. Failures return an
   // error so Stripe retries the delivery.
-  const member = await env.DB.prepare('SELECT * FROM members WHERE stripe_customer_id = ?').bind(customer).first();
+  statements.push(env.DB.prepare('SELECT * FROM members WHERE stripe_customer_id = ?').bind(customer));
+  const member = (await env.DB.batch(statements)).at(-1).results[0];
   if (member) await syncMember(env, member);
   return new Response(null, { status: 204 });
 }
