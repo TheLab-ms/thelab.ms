@@ -5,9 +5,9 @@ import { call, insertMember, mockFetch, post, quiet, resetDB, session } from './
 const siteverify = 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
 const verified = (overrides = {}) => ({ success: true, hostname: 'thelab.example', action: 'waiver', ...overrides });
 const fields = (overrides = {}) => ({
-  version: '2', agree_signature: 'on', agree_terms: 'on', name: ' Maker Person ', email: ' Maker@Example.com ', 'cf-turnstile-response': 'token', ...overrides,
+  agree_signature: 'on', agree_terms: 'on', name: ' Maker Person ', email: ' Maker@Example.com ', 'cf-turnstile-response': 'token', ...overrides,
 });
-const waivers = async () => (await env.DB.prepare('SELECT member_id, version, name, email FROM waivers ORDER BY id').all()).results;
+const waivers = async () => (await env.DB.prepare('SELECT member_id, name, email FROM waivers ORDER BY id').all()).results;
 
 describe('Waiver signing', () => {
   beforeEach(resetDB);
@@ -20,7 +20,7 @@ describe('Waiver signing', () => {
     expect(await response.text()).toContain('Thanks, Maker Person. Your waiver has been recorded.');
     const member = await env.DB.prepare('SELECT * FROM members').first();
     expect(member).toMatchObject({ email: 'maker@example.com', waiver_name: 'Maker Person' });
-    expect(await waivers()).toEqual([{ member_id: member.member_id, version: 2, name: 'Maker Person', email: 'maker@example.com' }]);
+    expect(await waivers()).toEqual([{ member_id: member.member_id, name: 'Maker Person', email: 'maker@example.com' }]);
     expect(Object.fromEntries(new URLSearchParams(calls[0].body))).toMatchObject({ secret: env.TURNSTILE_SECRET_KEY, response: 'token' });
   });
 
@@ -51,7 +51,6 @@ describe('Waiver signing', () => {
   });
 
   it.each([
-    ['an outdated waiver version', { version: '1' }, 409, 'The waiver has changed'],
     ['a missing agreement', { agree_terms: '' }, 400, 'You must agree'],
     ['a missing name', { name: ' ' }, 400, 'Enter your legal name'],
     ['an invalid email', { email: 'maker' }, 400, 'Enter a valid email'],

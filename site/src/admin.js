@@ -144,7 +144,7 @@ function eventDetails(event) {
   const details = JSON.parse(event.details);
   if (event.event_type === 'ConwayEvent') return `${details.event}: ${details.details}`;
   if (event.event_type === 'FobSwipe') return `Fob ${details.fob} · ${details.allowed ? 'Allowed' : 'Denied'} · Controller ${details.controller} · ${details.time}`;
-  if (event.event_type === 'WaiverSigned') return `Signature #${details.waiver_id}, waiver version ${details.version}.`;
+  if (event.event_type === 'WaiverSigned') return `Signature #${details.waiver_id}.`;
   const value = item => {
     if (item === null) return 'Not set';
     if (event.event_type === 'BillingCycleChanged') return item ? 'Yearly' : 'Monthly';
@@ -290,7 +290,7 @@ async function updateMember(env, member, value) {
 async function memberWaivers(env, member) {
   const { results } = await env.DB.prepare('SELECT * FROM waivers WHERE member_id = ? ORDER BY id DESC').bind(member.member_id).all();
   const legacy = member.legacy_waiver_signed ? '<p>Conway recorded a signed waiver. The original signature record was not included in the export.</p>' : '';
-  const rows = results.map(w => `<details><summary>Signature #${w.id} · Version ${w.version} · ${e(date(w.created))}</summary><p>${e(w.name)} · ${e(w.email)}</p>${w.content ? `<pre class="admin-waiver">${e(w.content)}</pre>` : ''}</details>`).join('');
+  const rows = results.map(w => `<details><summary>Signature #${w.id} · ${e(date(w.created))}</summary><p>${e(w.name)} · ${e(w.email)}</p>${w.content ? `<pre class="admin-waiver">${e(w.content)}</pre>` : ''}</details>`).join('');
   return `<section class="card admin-section"><h2>Signed waivers</h2>${legacy}${rows || (legacy ? '' : '<p>No linked waiver.</p>')}</section>`;
 }
 

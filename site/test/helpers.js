@@ -57,8 +57,8 @@ export async function insertMember(fields = {}) {
   return env.DB.prepare(`INSERT INTO members ${sql} RETURNING *`).bind(...Object.values(fields)).first();
 }
 
-export const addWaiver = memberID => env.DB.prepare(`INSERT INTO waivers(member_id, version, content, name, email, agreements)
-  VALUES (?, 2, '', 'Maker', 'maker@example.com', '[]')`).bind(memberID).run();
+export const addWaiver = memberID => env.DB.prepare(`INSERT INTO waivers(member_id, content, name, email, agreements)
+  VALUES (?, '', 'Maker', 'maker@example.com', '[]')`).bind(memberID).run();
 
 export const readMember = memberID => env.DB.prepare('SELECT * FROM members WHERE member_id = ?').bind(memberID).first();
 

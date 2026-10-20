@@ -12,16 +12,13 @@
   <main class="container membership-main">
     <a class="membership-brand" href="/"><img src="/assets/favicon.svg" alt="" width="48" height="48">TheLab</a>
     <section class="card waiver-page">
-      <!-- Increment the version here and in src/waiver.js whenever this text changes. -->
       <h1>TheLab Liability Waiver</h1>
-      <p class="signup-help">Version 2</p>
       <p>I agree and acknowledge as follows:</p>
       <p>1. I WAIVE ANY AND ALL RIGHTS OF RECOVERY, CLAIM, ACTION OR CAUSE OF ACTION AGAINST THELAB.MS FOR ANY INJURY OR DAMAGE THAT MAY OCCUR, REGARDLESS OF CAUSE OR ORIGIN, INCLUDING NEGLIGENCE AND GROSS NEGLIGENCE.</p>
       <p>2. I also understand that I am personally responsible for my safety and actions and that I will follow all safety instructions and signage while at TheLab.ms.</p>
       <p>3. I affirm that I am at least 18 years of age and mentally competent to sign this liability waiver.</p>
       <p>Anyone can sign; no Discord login is needed. Use the email on your Discord account so this waiver links to your membership. If you are signed in, it links to your signed-in membership.</p>
       <form class="waiver-form" method="post" action="/waiver/sign">
-        <input type="hidden" name="version" value="2">
         <label class="waiver-agreement"><input type="checkbox" name="agree_signature" required>By checking here, you are consenting to the use of your electronic signature in lieu of an original signature on paper.</label>
         <label class="waiver-agreement"><input type="checkbox" name="agree_terms" required>By checking this box, I agree and acknowledge to be bound by this waiver and release and further agree and acknowledge that this waiver and release shall also apply to all of my future participation in TheLab.</label>
         <label for="name">Legal name</label>
