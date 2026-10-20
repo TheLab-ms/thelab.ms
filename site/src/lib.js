@@ -187,13 +187,9 @@ export function selectCurrentSubscription(subscriptions) {
   return subscriptions.toSorted((a, b) => priority(b) - priority(a) || b.created - a.created)[0];
 }
 
-// The outer query must select from members so linked waivers resolve.
-export const waiverSignedSQL = `(members.legacy_waiver_signed = 1
-  OR EXISTS (SELECT 1 FROM waivers WHERE waivers.member_id = members.member_id))`;
-
 export const memberAccessSQL = `(members.non_billable = 1
   OR ((members.legacy_billing = 1 OR members.stripe_subscription_state IN ('active', 'trialing'))
-    AND ${waiverSignedSQL}))`;
+    AND members.waiver_signed = 1))`;
 
 export const fobEnabledSQL = `members.fob_id IS NOT NULL AND ${memberAccessSQL}`;
 

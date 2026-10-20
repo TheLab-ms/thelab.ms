@@ -1,7 +1,7 @@
 // Admin pages for members and their history.
 import {
   HttpError, discordID, escapeHTML as e, fobEnabledSQL, grantsMembership, logError, loginRedirect, memberName,
-  memberPath, page, readForm, readSession, redirect, stripe, guildUsername, validEmail, waiverSignedSQL,
+  memberPath, page, readForm, readSession, redirect, stripe, guildUsername, validEmail,
 } from './lib.js';
 import { checkoutLink, setDiscordRole, syncDiscordRole, syncMember } from './billing.js';
 import { pushFobs } from './edge.js';
@@ -83,7 +83,7 @@ async function memberList(url, env) {
     conditions.push(`(${columns.map(column => `${column} LIKE ? ESCAPE '\\'`).join(' OR ')})`);
     bindings.push(...columns.map(() => `%${query.replace(/[\\%_]/g, '\\$&')}%`));
   } else {
-    if (values.waiver !== 'all') conditions.push(`${waiverSignedSQL} = ${values.waiver === 'signed' ? 1 : 0}`);
+    if (values.waiver !== 'all') conditions.push(`waiver_signed = ${values.waiver === 'signed' ? 1 : 0}`);
     if (values.discord !== 'all') conditions.push(`discord_user_id IS ${values.discord === 'linked' ? 'NOT ' : ''}NULL`);
     if (values.payment !== 'all') {
       conditions.push(`(CASE WHEN non_billable = 1 THEN 'non_billable' WHEN legacy_billing = 1 THEN 'legacy_billing'

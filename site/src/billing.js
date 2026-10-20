@@ -1,7 +1,7 @@
 // Stripe checkout, subscription webhooks, and the Discord member role.
 import {
   HttpError, currentMember, discord, grantsMembership, isOngoingSubscription, loginRedirect, now, origin, redirect,
-  selectCurrentSubscription, stripe, stripeList, verifyStripe, waiverSignedSQL,
+  selectCurrentSubscription, stripe, stripeList, verifyStripe,
 } from './lib.js';
 import { pushFobs } from './edge.js';
 
@@ -174,7 +174,7 @@ export async function checkoutLink(env, member, { shared = false } = {}) {
 }
 
 export async function checkout(request, env) {
-  const member = await currentMember(request, env, `*, ${waiverSignedSQL} AS waiver_signed`);
+  const member = await currentMember(request, env);
   if (!member) return loginRedirect('/checkout');
   return redirect((await checkoutLink(env, member)).url);
 }
