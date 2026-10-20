@@ -1,15 +1,15 @@
 // Waiver signatures. The waiver text and form live in static/waiver.html.
-import { h, Fragment } from './html.js';
-import { page } from './page.jsx';
+import { h, Fragment } from './html.ts';
+import { page } from './page.tsx';
 import {
   HttpError, currentMember, grantsMembership, origin, provider, readForm, redirect, validEmail,
-} from './lib.js';
-import { pushFobs } from './edge.jsx';
+} from './lib.ts';
+import { pushFobs } from './edge.tsx';
 
-async function verifyHuman(request, env, token) {
+async function verifyHuman(request: Request, env: Env, token: string | undefined) {
   if (!env.TURNSTILE_SECRET_KEY) return;
   if (!token) throw new HttpError(400, 'Please complete the human verification and try again.');
-  const result = await provider('Cloudflare verification', 'https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+  const result = await provider<Partial<Record<'success' | 'hostname' | 'action', unknown>>>('Cloudflare verification', 'https://challenges.cloudflare.com/turnstile/v0/siteverify', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ secret: env.TURNSTILE_SECRET_KEY, response: token, remoteip: request.headers.get('CF-Connecting-IP') || '' }).toString(),
   });
@@ -18,7 +18,7 @@ async function verifyHuman(request, env, token) {
   }
 }
 
-export async function signWaiver(request, env) {
+export async function signWaiver(request: Request, env: Env) {
   const form = await readForm(request);
   const name = (form.name || '').trim(), email = (form.email || '').trim().toLowerCase();
   if (form.agree_signature !== 'on' || form.agree_terms !== 'on') throw new HttpError(400, 'You must agree to all waiver terms.');
@@ -32,15 +32,15 @@ export async function signWaiver(request, env) {
   const insert = `INSERT INTO waivers (name, email, content, agreements, member_id)`;
   let signed;
   if (member) {
-    signed = await env.DB.prepare(`${insert} VALUES (?, ?, '', '[]', ?) RETURNING id`).bind(name, email, member.member_id).first();
+    signed = await env.DB.prepare(`${insert} VALUES (?, ?, '', '[]', ?) RETURNING id`).bind(name, email, member.member_id).first<{ id: number }>();
   } else {
-    const [, inserted] = await env.DB.batch([
+    const [, inserted] = await env.DB.batch<{ id: number }>([
       env.DB.prepare(`INSERT INTO members (email) SELECT ?1 WHERE NOT EXISTS
         (SELECT 1 FROM members WHERE email = ?1 OR discord_email = ?1) ON CONFLICT DO NOTHING`).bind(email),
       env.DB.prepare(`${insert} SELECT ?1, ?2, '', '[]', member_id FROM members WHERE (email = ?2 OR discord_email = ?2)
         AND (SELECT COUNT(*) FROM members WHERE email = ?2 OR discord_email = ?2) = 1 RETURNING id`).bind(name, email),
     ]);
-    signed = inserted.results[0];
+    signed = inserted?.results[0];
   }
   if (!signed) throw new HttpError(409, 'We couldn’t link your waiver to a membership. Please contact leadership.');
   await pushFobs(env);

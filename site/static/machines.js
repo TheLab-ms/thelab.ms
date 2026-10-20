@@ -1,8 +1,21 @@
 // Member sessions stay on the Worker. Short-lived, read-only tokens authorize
 // direct edge fetches; neither tokens nor image bytes pass through image URLs.
-const status = document.getElementById('refresh-status');
-const printers = document.getElementById('printers');
-let stopped = false, suspended = false, current, interval, expiryTimer, access;
+/** @typedef {{ edge: string, token: string, expires: number, renew: number }} Access */
+/** @typedef {{ controller: AbortController, timeout?: ReturnType<typeof setTimeout> }} Operation */
+/** @typedef {{ Name: string, Status: string, Remaining: string, Updated: string, Image: string, Unavailable: boolean }} Card */
+
+const statusLine = /** @type {HTMLElement} */ (document.getElementById('refresh-status'));
+const printers = /** @type {HTMLElement} */ (document.getElementById('printers'));
+let stopped = false, suspended = false;
+/** @type {Operation | undefined} */
+let current;
+/** @type {ReturnType<typeof setInterval> | undefined} */
+let interval;
+/** @type {ReturnType<typeof setTimeout> | undefined} */
+let expiryTimer;
+/** @type {Access | undefined} */
+let access;
+/** @type {Set<string>} */
 const blobs = new Set();
 
 function clearImages() {
@@ -18,8 +31,8 @@ function denyAccess() {
   stopped = true;
   access = undefined;
   pause();
-  status.textContent = 'Printer access ended. Sign in again or check your membership eligibility.';
-  document.getElementById('access-help').hidden = false;
+  statusLine.textContent = 'Printer access ended. Sign in again or check your membership eligibility.';
+  /** @type {HTMLElement} */ (document.getElementById('access-help')).hidden = false;
 }
 
 function clearDashboard() {
@@ -45,7 +58,7 @@ function expire() {
   access = undefined;
   cancelRefresh();
   clearDashboard();
-  status.textContent = 'Checking printer access…';
+  statusLine.textContent = 'Checking printer access…';
   refresh();
 }
 
@@ -58,30 +71,56 @@ function resume() {
   refresh();
 }
 
+/**
+ * @param {unknown} data
+ * @param {number} started
+ * @returns {Access}
+ */
 function credentials(data, started) {
-  if (!data || typeof data.token !== 'string' || data.token.length > 4096
+  if (typeof data !== 'object' || data === null || !('token' in data) || !('edge' in data)
+    || typeof data.token !== 'string' || data.token.length > 4096 || typeof data.edge !== 'string'
     || new URL(data.edge).protocol !== 'https:' || new URL(data.edge).origin !== data.edge) throw new Error('Invalid credentials');
   // The edge verifies the signature. Decode only to bound local reuse/display.
-  const claims = JSON.parse(atob(data.token.split('.')[1].replaceAll('-', '+').replaceAll('_', '/')));
+  /** @type {Partial<Record<string, unknown>>} */
+  const claims = JSON.parse(atob((data.token.split('.')[1] ?? '').replaceAll('-', '+').replaceAll('_', '/')));
   if (claims.scope !== 'printers:read' || claims.aud !== data.edge
-    || !Number.isInteger(claims.iat) || !Number.isInteger(claims.exp)
+    || typeof claims.iat !== 'number' || !Number.isInteger(claims.iat) || typeof claims.exp !== 'number' || !Number.isInteger(claims.exp)
     || claims.exp <= claims.iat || claims.exp - claims.iat > 60) throw new Error('Invalid token lifetime');
   const expires = Math.min(claims.exp * 1000, started + 60000);
   if (expires <= Date.now()) throw new Error('Expired credentials');
   return { edge: data.edge, token: data.token, expires, renew: expires - 15000 };
 }
 
+/**
+ * @param {unknown} card
+ * @returns {card is Card}
+ */
+function isCard(card) {
+  if (typeof card !== 'object' || card === null) return false;
+  const fields = /** @type {Partial<Record<string, unknown>>} */ (card);
+  return ['Name', 'Status', 'Remaining', 'Updated', 'Image'].every(key => typeof fields[key] === 'string') && typeof fields.Unavailable === 'boolean';
+}
+
+/**
+ * @param {unknown} cards
+ * @param {string} edge
+ */
 function validateCards(cards, edge) {
-  if (!Array.isArray(cards) || cards.length > 32 || cards.some(card => !card
-    || ['Name', 'Status', 'Remaining', 'Updated', 'Image'].some(key => typeof card[key] !== 'string')
-    || typeof card.Unavailable !== 'boolean'
-    || !/^\/machines\/images\/[^/?#\\\s]+\.jpg$/.test(card.Image)
+  if (!Array.isArray(cards) || cards.length > 32 || !cards.every(isCard) || cards.some(card =>
+    !/^\/machines\/images\/[^/?#\\\s]+\.jpg$/.test(card.Image)
     || new URL(card.Image, edge).origin !== edge
     || new URL(card.Image, edge).pathname !== card.Image)
     || new Set(cards.map(card => card.Image)).size !== cards.length) throw new Error('Invalid printer status');
   return cards;
 }
 
+/**
+ * @template {keyof HTMLElementTagNameMap} K
+ * @param {K} tag
+ * @param {string} [text]
+ * @param {string} [className]
+ * @returns {HTMLElementTagNameMap[K]}
+ */
 function element(tag, text, className) {
   const node = document.createElement(tag);
   if (text !== undefined) node.textContent = text;
@@ -91,6 +130,7 @@ function element(tag, text, className) {
 
 async function refresh() {
   if (current || stopped || suspended || document.hidden) return;
+  /** @type {Operation} */
   const operation = { controller: new AbortController() };
   current = operation;
   const { signal } = operation.controller;
@@ -112,8 +152,9 @@ async function refresh() {
       clearTimeout(expiryTimer);
       expiryTimer = setTimeout(expire, access.expires - Date.now());
     }
-    if (!usable()) return;
+    if (!usable() || !access) return;
     const { edge, token } = access;
+    /** @type {RequestInit} */
     const options = {
       headers: { Authorization: `Bearer ${token}` }, credentials: 'omit', mode: 'cors',
       cache: 'no-store', redirect: 'error', signal,
@@ -125,6 +166,7 @@ async function refresh() {
     const cards = validateCards(await response.json(), edge);
     if (!usable()) return;
     clearDashboard();
+    /** @type {{ image: HTMLImageElement, path: string }[]} */
     const images = [];
     for (const card of cards) {
       const article = element('article', undefined, 'card');
@@ -147,7 +189,7 @@ async function refresh() {
       images.push({ image, path: card.Image });
     }
     if (!cards.length) printers.append(element('p', 'No printers are configured yet.'));
-    status.textContent = '';
+    statusLine.textContent = '';
     await Promise.all(images.map(async ({ image, path }) => {
       try {
         const response = await fetch(new URL(path, edge), options);
@@ -164,7 +206,7 @@ async function refresh() {
   } catch {
     if (active()) {
       clearDashboard();
-      status.textContent = 'Connection lost — printer status unavailable. Retrying every 5 seconds.';
+      statusLine.textContent = 'Connection lost — printer status unavailable. Retrying every 5 seconds.';
     }
   } finally {
     clearTimeout(operation.timeout);
@@ -175,7 +217,7 @@ async function refresh() {
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
     pause();
-    if (!stopped) status.textContent = 'Refresh paused while this page is hidden.';
+    if (!stopped) statusLine.textContent = 'Refresh paused while this page is hidden.';
   } else resume();
 });
 window.addEventListener('pagehide', () => { suspended = true; access = undefined; pause(); });

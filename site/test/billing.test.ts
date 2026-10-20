@@ -1,15 +1,16 @@
 import { env } from 'cloudflare:workers';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { addWaiver, call, insertMember, mockFetch, quiet, readMember, resetDB, session, stripeEvent } from './helpers.js';
+import type { Member } from '../src/lib.ts';
+import { addWaiver, call, insertMember, mockFetch, quiet, readMember, resetDB, session, stripeEvent, type Call } from './helpers.ts';
 
 const discordID = '333333333333333333';
 const stripeAPI = 'https://api.stripe.com/v1';
 const roleURL = `https://discord.com/api/v10/guilds/${env.DISCORD_GUILD_ID}/members/${discordID}/roles/${env.DISCORD_ROLE_ID}`;
 const monthly = { id: 'price_monthly', type: 'recurring', recurring: { interval: 'month', interval_count: 1 }, product: 'prod_member' };
-const list = data => ({ data, has_more: false });
+const list = (data: unknown[]) => ({ data, has_more: false });
 
 describe('Checkout', () => {
-  let member, cookie;
+  let member: Member, cookie: string;
   beforeEach(async () => {
     await resetDB();
     member = await insertMember({ discord_user_id: discordID, discord_username: 'maker', discord_email: 'maker@example.com' });
@@ -42,9 +43,9 @@ describe('Checkout', () => {
     ]);
     const response = await call('/checkout', { headers: { Cookie: cookie } });
     expect(response.headers.get('Location')).toBe('https://checkout.stripe.com/c/pay/cs_1');
-    expect(new URL(calls.find(c => c.url.includes('/prices?')).url).searchParams.get('lookup_keys[]')).toBe('monthly');
-    expect(new URLSearchParams(calls.find(c => c.url === `${stripeAPI}/customers`).body).get('email')).toBe('maker@example.com');
-    expect(Object.fromEntries(new URLSearchParams(calls.at(-1).body))).toEqual({
+    expect(new URL(calls.find(c => c.url.includes('/prices?'))!.url).searchParams.get('lookup_keys[]')).toBe('monthly');
+    expect(new URLSearchParams(calls.find(c => c.url === `${stripeAPI}/customers`)?.body).get('email')).toBe('maker@example.com');
+    expect(Object.fromEntries(new URLSearchParams(calls.at(-1)?.body))).toEqual({
       mode: 'subscription', customer: 'cus_new', 'customer_update[name]': 'auto', client_reference_id: member.member_id,
       success_url: `${env.SITE_URL}/welcome`, cancel_url: `${env.SITE_URL}/#membership`,
       'line_items[0][price]': 'price_monthly', 'line_items[0][quantity]': '1', 'payment_method_types[0]': 'card',
@@ -63,8 +64,8 @@ describe('Checkout', () => {
       ['POST', `${stripeAPI}/checkout/sessions`, { url: 'https://checkout.stripe.com/c/pay/cs_2' }],
     ]);
     await call('/checkout', { headers: { Cookie: cookie } });
-    expect(new URLSearchParams(calls.at(-1).body).get('customer')).toBe('cus_1');
-    expect(new URLSearchParams(calls.at(-1).body).has('customer_email')).toBe(false);
+    expect(new URLSearchParams(calls.at(-1)?.body).get('customer')).toBe('cus_1');
+    expect(new URLSearchParams(calls.at(-1)?.body).has('customer_email')).toBe(false);
     vi.restoreAllMocks();
     calls = mockFetch([
       ['GET', /\/v1\/checkout\/sessions\?/, list([])],
@@ -99,13 +100,13 @@ describe('Checkout', () => {
 
   it('reuses an unfinished checkout so returning members cannot start a second payment', async () => {
     await addWaiver(member.member_id);
-    const sessions = [];
+    const sessions: { id: string; url: string }[] = [];
     const calls = mockFetch([
       ['POST', `${stripeAPI}/customers`, { id: 'cus_pending' }],
       ['GET', /\/v1\/subscriptions\?/, list([])],
       ['GET', /\/v1\/checkout\/sessions\?/, () => list(sessions)],
       ['GET', /\/v1\/prices\?/, list([monthly])],
-      ['POST', `${stripeAPI}/checkout/sessions`, (_url, init) => {
+      ['POST', `${stripeAPI}/checkout/sessions`, (_url: string, init: Call) => {
         const form = new URLSearchParams(init.body);
         const session = { id: `cs_${sessions.length + 1}`, url: `https://checkout.stripe.com/c/pay/cs_${sessions.length + 1}`,
           status: 'open', mode: 'subscription', client_reference_id: form.get('client_reference_id'),
@@ -119,14 +120,14 @@ describe('Checkout', () => {
     expect(first.status).toBe(303);
     expect(again.headers.get('Location')).toBe(first.headers.get('Location'));
     expect(sessions).toHaveLength(1);
-    expect((await readMember(member.member_id)).stripe_customer_id).toBe('cus_pending');
+    expect((await readMember(member.member_id))?.stripe_customer_id).toBe('cus_pending');
     expect(calls.filter(c => c.method === 'POST' && c.url === `${stripeAPI}/checkout/sessions`)).toHaveLength(1);
   });
 });
 
 describe('Stripe webhooks', () => {
-  let member;
-  const sync = ({ subscriptions = [{ id: 'sub_1', status: 'active', created: 2 }], role = {} } = {}) => mockFetch([
+  let member: Member;
+  const sync = ({ subscriptions = [{ id: 'sub_1', status: 'active', created: 2 }], role = {} as { delete?: Response } } = {}) => mockFetch([
     ['GET', `${stripeAPI}/customers/cus_1`, { id: 'cus_1', name: 'Billing Name', email: 'billing@example.com' }],
     ['GET', /\/v1\/subscriptions\?customer=cus_1/, list(subscriptions)],
     ['PUT', roleURL, new Response(null, { status: 204 })],
@@ -166,7 +167,7 @@ describe('Stripe webhooks', () => {
     const response = await call('/webhooks/stripe', await stripeEvent({ type: 'customer.subscription.deleted', data: { object: { customer: 'cus_1' } } }));
     expect(response.status).toBe(204);
     expect(await readMember(member.member_id)).toMatchObject({ stripe_subscription_state: 'canceled' });
-    expect(calls.at(-1).method).toBe('DELETE');
+    expect(calls.at(-1)?.method).toBe('DELETE');
     const event = await env.DB.prepare("SELECT details FROM member_events WHERE event_type = 'SubscriptionStatusChanged' ORDER BY id DESC").first();
     expect(event).toEqual({ details: '{"from":"active","to":"canceled"}' });
   });
@@ -187,7 +188,7 @@ describe('Stripe webhooks', () => {
   it('skips the role grant for members who left Discord, but not other Discord 404s', async () => {
     quiet();
     await env.DB.prepare("UPDATE members SET stripe_customer_id = 'cus_1' WHERE member_id = ?").bind(member.member_id).run();
-    const deliver = async code => {
+    const deliver = async (code: number) => {
       vi.restoreAllMocks();
       quiet();
       mockFetch([
@@ -210,7 +211,7 @@ describe('Stripe webhooks', () => {
       { type: 'checkout.session.completed', data: { object: { customer: 'cus_new', client_reference_id: 'not-a-member' } } },
     ]) expect((await call('/webhooks/stripe', await stripeEvent(event))).status).toBe(204);
     expect(calls).toHaveLength(0);
-    expect((await readMember(member.member_id)).stripe_customer_id).toBeNull();
+    expect((await readMember(member.member_id))?.stripe_customer_id).toBeNull();
   });
 
   it('discards a sync for a customer that was replaced while Stripe was responding', async () => {
@@ -232,12 +233,11 @@ describe('Stripe webhooks', () => {
 
   it('keeps a newer cancellation when an older Stripe lookup finishes late', async () => {
     await env.DB.prepare("UPDATE members SET stripe_customer_id = 'cus_1', stripe_subscription_state = 'active'").run();
-    let release, started;
-    const waiting = new Promise(resolve => { started = resolve; });
+    const started = Promise.withResolvers<void>(), release = Promise.withResolvers<object>();
     let status = 'active', lookups = 0;
     const calls = mockFetch([
       ['GET', `${stripeAPI}/customers/cus_1`, () => {
-        if (lookups++ === 0) { started(); return new Promise(resolve => { release = resolve; }); }
+        if (lookups++ === 0) { started.resolve(); return release.promise; }
         return { id: 'cus_1' };
       }],
       ['GET', /\/v1\/subscriptions\?customer=cus_1/, () => list([{ id: 'sub_1', status }])],
@@ -246,36 +246,38 @@ describe('Stripe webhooks', () => {
     ]);
     const event = await stripeEvent({ type: 'customer.subscription.updated', data: { object: { customer: 'cus_1' } } });
     const older = call('/webhooks/stripe', event);
-    await waiting;
+    await started.promise;
     status = 'canceled';
     expect((await call('/webhooks/stripe', event)).status).toBe(204);
-    release({ id: 'cus_1' });
+    release.resolve({ id: 'cus_1' });
     expect((await older).status).toBe(204);
-    expect((await readMember(member.member_id)).stripe_subscription_state).toBe('canceled');
+    expect((await readMember(member.member_id))?.stripe_subscription_state).toBe('canceled');
     expect(calls.some(c => c.method === 'PUT')).toBe(false);
   });
 
   it('repairs a late Discord role grant after a newer cancellation has revoked it', async () => {
     await env.DB.prepare("UPDATE members SET stripe_customer_id = 'cus_1'").run();
-    let release, started, granted = false, status = 'active';
-    const waiting = new Promise(resolve => { started = resolve; });
+    const started = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+    let granted = false, status = 'active';
     mockFetch([
       ['GET', `${stripeAPI}/customers/cus_1`, { id: 'cus_1' }],
       ['GET', /\/v1\/subscriptions\?customer=cus_1/, () => list([{ id: 'sub_1', status }])],
-      ['PUT', roleURL, () => {
-        started();
-        return new Promise(resolve => { release = () => { granted = true; resolve(new Response(null, { status: 204 })); }; });
+      ['PUT', roleURL, async () => {
+        started.resolve();
+        await release.promise;
+        granted = true;
+        return new Response(null, { status: 204 });
       }],
       ['DELETE', roleURL, () => { granted = false; return new Response(null, { status: 204 }); }],
     ]);
     const event = await stripeEvent({ type: 'customer.subscription.updated', data: { object: { customer: 'cus_1' } } });
     const older = call('/webhooks/stripe', event);
-    await waiting;
+    await started.promise;
     status = 'canceled';
     expect((await call('/webhooks/stripe', event)).status).toBe(204);
-    release();
+    release.resolve();
     expect((await older).status).toBe(204);
-    expect((await readMember(member.member_id)).stripe_subscription_state).toBe('canceled');
+    expect((await readMember(member.member_id))?.stripe_subscription_state).toBe('canceled');
     expect(granted).toBe(false);
   });
 });

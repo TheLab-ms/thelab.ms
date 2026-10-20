@@ -1,4 +1,4 @@
-import { h, Fragment, render } from './html.js';
+import { h, Fragment, render, type Child } from './html.ts';
 
 const htmlHeaders = {
   'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store',
@@ -7,7 +7,7 @@ const htmlHeaders = {
   'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
 };
 
-export function page(title, body, { status = 200, admin = false } = {}) {
+export function page(title: string, body: Child, { status = 200, admin = false } = {}) {
   const content = admin ? <>
     <header class="admin-header">
       <a class="membership-brand" href="/">TheLab</a>

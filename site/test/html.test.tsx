@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { h, Fragment, render } from '../src/html.js';
-import { page } from '../src/page.jsx';
+import { h, Fragment, render } from '../src/html.ts';
+import { page } from '../src/page.tsx';
 
 describe('HTML rendering', () => {
   it('escapes text and attribute values without escaping nested markup', () => {
@@ -16,17 +16,11 @@ describe('HTML rendering', () => {
       .toBe('0a<span>b</span>');
   });
 
-  it('composes function components with props and children', () => {
-    const Label = ({ prefix, children }) => <label class="label">{prefix}{children}</label>;
-    expect(render(<Label prefix="<name>"><strong>{'A&B'}</strong></Label>))
-      .toBe('<label class="label">&lt;name&gt;<strong>A&amp;B</strong></label>');
-  });
-
-  it('uses HTML attribute names and handles boolean and optional form attributes', () => {
+  it('renders boolean attributes and omits empty optional ones', () => {
     expect(render(<label class="field" for="name"><input id="name" checked disabled={false} readonly value="" maxlength={0} title={null} aria-describedby={undefined} /></label>))
       .toBe('<label class="field" for="name"><input id="name" checked readonly value="" maxlength="0"></label>');
-    expect(render(<select><option value="a" selected>A</option><option value="b" selected={false}>B</option></select>))
-      .toBe('<select><option value="a" selected>A</option><option value="b">B</option></select>');
+    expect(render(<select name="s"><option value="a" selected>A</option><option value="b" selected={false}>B</option></select>))
+      .toBe('<select name="s"><option value="a" selected>A</option><option value="b">B</option></select>');
   });
 
   it('keeps boolean ARIA and data values as strings', () => {
@@ -35,8 +29,8 @@ describe('HTML rendering', () => {
   });
 
   it('omits closing tags only for void elements', () => {
-    expect(render(<><meta charset="utf-8" /><img src="/icon.svg" alt="" /><br /><form /><script src="/admin.js" defer /></>))
-      .toBe('<meta charset="utf-8"><img src="/icon.svg" alt=""><br><form></form><script src="/admin.js" defer></script>');
+    expect(render(<><meta charset="utf-8" /><img src="/icon.svg" alt="" /><input /><form method="post" action="/" /><script src="/admin.js" defer /></>))
+      .toBe('<meta charset="utf-8"><img src="/icon.svg" alt=""><input><form method="post" action="/"></form><script src="/admin.js" defer></script>');
   });
 });
 

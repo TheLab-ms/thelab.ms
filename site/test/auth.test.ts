@@ -1,12 +1,13 @@
 import { env } from 'cloudflare:workers';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { call, edgeEnv, insertMember, mockFetch, quiet, readMember, resetDB, session } from './helpers.js';
+import type { Member } from '../src/lib.ts';
+import { call, count, edgeEnv, insertMember, mockFetch, quiet, readMember, resetDB, session } from './helpers.ts';
 
 const user = { id: '333333333333333333', username: 'maker', email: 'Maker@Example.com', verified: true };
 const oauthCookie = (state = 'state-1', next = '/machines') => `thelab_oauth=${encodeURIComponent(JSON.stringify({ state, next }))}`;
-const setCookies = response => response.headers.getSetCookie();
+const setCookies = (response: Response) => response.headers.getSetCookie();
 
-function discordMocks({ me = user, roles = [], guild = true } = {}) {
+function discordMocks({ me = user, roles = [] as string[], guild = true } = {}) {
   return mockFetch([
     ['POST', 'https://discord.com/api/v10/oauth2/token', { access_token: 'access', token_type: 'Bearer' }],
     ['GET', 'https://discord.com/api/v10/users/@me', me],
@@ -24,7 +25,7 @@ describe('Sign-in', () => {
     for (const [next, expected] of [['/keyfob/bind?token=abc', '/keyfob/bind?token=abc'], ['//evil.example', '/'], ['https://evil.example', '/'], ['/\\evil.example', '/'], ['/\t/evil.example', '/'], [null, '/']]) {
       const response = await call(`/login${next === null ? '' : `?next=${encodeURIComponent(next)}`}`);
       expect(response.status).toBe(303);
-      const target = new URL(response.headers.get('Location'));
+      const target = new URL(response.headers.get('Location')!);
       expect(target.origin + target.pathname).toBe('https://discord.com/oauth2/authorize');
       expect(target.searchParams.get('redirect_uri')).toBe(`${env.SITE_URL}/login/callback`);
       const cookie = setCookies(response)[0];
@@ -67,7 +68,7 @@ describe('Sign-in', () => {
     expect(sessionCookie).toMatch(/^thelab_session=[\w-]+\.[\w-]+; Path=\/; HttpOnly; SameSite=Lax; Max-Age=86400; Secure$/);
     expect(cleared).toMatch(/^thelab_oauth=; .*Max-Age=0/);
     expect(new URLSearchParams(calls[0].body).get('redirect_uri')).toBe(`${env.SITE_URL}/login/callback`);
-    const member = await env.DB.prepare('SELECT * FROM members WHERE discord_user_id = ?').bind(user.id).first();
+    const member = (await env.DB.prepare('SELECT * FROM members WHERE discord_user_id = ?').bind(user.id).first<Member>())!;
     expect(member).toMatchObject({ discord_username: 'maker', discord_email: 'maker@example.com', email: 'maker@example.com' });
 
     // A later login refreshes the username without creating another member.
@@ -75,11 +76,11 @@ describe('Sign-in', () => {
     discordMocks({ me: { ...user, username: 'renamed' } });
     await call('/login/callback?state=state-1&code=c', { headers: { Cookie: oauthCookie() } });
     expect(await readMember(member.member_id)).toMatchObject({ discord_username: 'renamed' });
-    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM members').first()).n).toBe(1);
+    expect(await count('SELECT COUNT(*) AS n FROM members')).toBe(1);
   });
 
   it('links a pre-registered member by email but never moves a linked account', async () => {
-    const pending = await env.DB.prepare("INSERT INTO members (email) VALUES ('maker@example.com') RETURNING *").first();
+    const pending = await insertMember({ email: 'maker@example.com' });
     discordMocks();
     await call('/login/callback?state=state-1&code=c', { headers: { Cookie: oauthCookie() } });
     expect(await readMember(pending.member_id)).toMatchObject({ discord_user_id: user.id, metadata_version: 1 });
@@ -135,7 +136,7 @@ describe('Sign-in', () => {
     discordMocks({ me: { ...user, verified: false } });
     response = await call('/login/callback?state=state-1&code=c', { headers: { Cookie: oauthCookie() } });
     expect(response.status).toBe(403);
-    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM members').first()).n).toBe(0);
+    expect(await count('SELECT COUNT(*) AS n FROM members')).toBe(0);
   });
 
   it('ignores tampered and expired sessions', async () => {

@@ -3,12 +3,12 @@
   'use strict';
   const navbar = document.getElementById('navbar');
   if (!navbar) return;
-  const navToggle = document.getElementById('nav-toggle');
-  const navMenu = document.getElementById('nav-menu');
-  const sections = document.querySelectorAll('.section');
+  const navToggle = /** @type {HTMLElement} */ (document.getElementById('nav-toggle'));
+  const navMenu = /** @type {HTMLElement} */ (document.getElementById('nav-menu'));
+  const sections = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.section'));
   const sectionLinks = document.querySelectorAll('.nav-link:not(.nav-cta)');
 
-  function handleScroll() {
+  const handleScroll = function () {
     navbar.classList.toggle('scrolled', window.scrollY > 50);
     const scrollPos = window.scrollY + 120;
     sections.forEach(function (section) {
@@ -18,10 +18,11 @@
         });
       }
     });
-  }
+  };
   window.addEventListener('scroll', handleScroll, { passive: true });
   handleScroll();
 
+  /** @param {boolean} open */
   function setNav(open) {
     navToggle.classList.toggle('active', open);
     navToggle.setAttribute('aria-expanded', String(open));
@@ -41,13 +42,14 @@
     }
   });
   document.addEventListener('click', function (e) {
-    if (isOpen() && !navMenu.contains(e.target) && !navToggle.contains(e.target)) setNav(false);
+    const target = /** @type {Node | null} */ (e.target);
+    if (isOpen() && !navMenu.contains(target) && !navToggle.contains(target)) setNav(false);
   });
 
   // Reveal the browser-selected responsive hero image, including cached loads.
   const heroBg = document.querySelector('.hero-bg');
   const heroImage = heroBg && heroBg.querySelector('img');
-  if (heroImage) {
+  if (heroBg && heroImage) {
     const revealHero = function () { heroBg.classList.add('loaded'); };
     heroImage.addEventListener('load', revealHero, { once: true });
     heroImage.addEventListener('error', revealHero, { once: true });

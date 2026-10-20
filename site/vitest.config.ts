@@ -2,7 +2,7 @@ import { cloudflareTest, readD1Migrations } from '@cloudflare/vitest-pool-worker
 import { defineConfig } from 'vitest/config';
 
 export default defineConfig(async () => ({
-  oxc: { jsx: { runtime: 'classic', pragma: 'h', pragmaFrag: 'Fragment', development: false } },
+  oxc: { jsx: { runtime: 'classic' as const, pragma: 'h', pragmaFrag: 'Fragment', development: false } },
   plugins: [cloudflareTest({
     wrangler: { configPath: './wrangler.jsonc' },
     miniflare: {
@@ -27,5 +27,5 @@ export default defineConfig(async () => ({
       },
     },
   })],
-  test: { include: ['test/**/*.test.{js,jsx}'], fileParallelism: false },
+  test: { include: ['test/*.test.{ts,tsx}'], fileParallelism: false },
 }));

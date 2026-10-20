@@ -7,15 +7,19 @@
   },
   "scripts": {
     "dev": "wrangler dev",
-    "predeploy": "npm run db:remote",
+    "predeploy": "npm run typecheck && npm run db:remote",
     "deploy": "wrangler deploy",
     "test": "vitest run",
-    "test:browser": "node --test test/*.browser.mjs",
+    "test:browser": "node --experimental-strip-types --test test/browser/*.test.ts",
+    "types": "wrangler types --strict-vars=false",
+    "typecheck": "wrangler types --strict-vars=false --check && tsc -p . && tsc -p test && tsc -p test/browser && tsc -p static",
     "db:local": "wrangler d1 migrations apply DB --local",
     "db:remote": "wrangler d1 migrations apply DB --remote"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.22.0",
+    "@types/node": "^22.20.5",
+    "typescript": "^7.0.2",
     "vitest": "~4.1.0",
     "wrangler": "^4.130.0"
   },

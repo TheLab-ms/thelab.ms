@@ -1,6 +1,7 @@
 import { env } from 'cloudflare:workers';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { call, insertMember, mockFetch, post, quiet, resetDB, session } from './helpers.js';
+import type { Member } from '../src/lib.ts';
+import { call, count, insertMember, mockFetch, post, quiet, resetDB, session } from './helpers.ts';
 
 const siteverify = 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
 const verified = (overrides = {}) => ({ success: true, hostname: 'thelab.example', action: 'waiver', ...overrides });
@@ -18,7 +19,7 @@ describe('Waiver signing', () => {
     const response = await call('/waiver/sign', post(fields()));
     expect(response.status).toBe(200);
     expect(await response.text()).toContain('Thanks, Maker Person. Your waiver has been recorded.');
-    const member = await env.DB.prepare('SELECT * FROM members').first();
+    const member = (await env.DB.prepare('SELECT * FROM members').first<Member>())!;
     expect(member).toMatchObject({ email: 'maker@example.com', waiver_name: 'Maker Person' });
     expect(await waivers()).toEqual([{ member_id: member.member_id, name: 'Maker Person', email: 'maker@example.com' }]);
     expect(Object.fromEntries(new URLSearchParams(calls[0].body))).toMatchObject({ secret: env.TURNSTILE_SECRET_KEY, response: 'token' });
@@ -39,7 +40,7 @@ describe('Waiver signing', () => {
   it('links signed-in members to their own membership and continues to checkout when unpaid', async () => {
     mockFetch([['POST', siteverify, verified()]]);
     const member = await insertMember({ discord_user_id: '333333333333333333', email: 'member@example.com' });
-    const cookie = await session(member.discord_user_id);
+    const cookie = await session(member.discord_user_id!);
     let response = await call('/waiver/sign', post(fields({ email: 'other@example.com' }), { Cookie: cookie }));
     expect(response.status).toBe(303);
     expect(response.headers.get('Location')).toBe('/checkout');
@@ -47,7 +48,7 @@ describe('Waiver signing', () => {
     await env.DB.prepare("UPDATE members SET stripe_subscription_state = 'active'").run();
     response = await call('/waiver/sign', post(fields(), { Cookie: cookie }));
     expect(response.status).toBe(200);
-    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM members').first()).n).toBe(1);
+    expect(await count('SELECT COUNT(*) AS n FROM members')).toBe(1);
   });
 
   it.each([

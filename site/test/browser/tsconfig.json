@@ -1,0 +1,10 @@
+{
+  // Node runs these with type stripping; see test:browser in package.json.
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "lib": ["es2024"],
+    "types": ["node"],
+    "noUncheckedIndexedAccess": false
+  },
+  "include": ["."]
+}

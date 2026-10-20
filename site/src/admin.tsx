@@ -1,38 +1,57 @@
 // Admin pages for members and their history.
-import { h, Fragment } from './html.js';
-import { page } from './page.jsx';
+import { h, Fragment } from './html.ts';
+import { page } from './page.tsx';
 import {
-  HttpError, discordID, fobEnabledSQL, grantsMembership, logError, loginRedirect, memberName,
+  HttpError, discordID, discounts, fobEnabledSQL, grantsMembership, isDiscount, logError, loginRedirect, memberName,
   memberPath, readForm, readSession, redirect, stripe, guildUsername, validEmail,
-} from './lib.js';
-import { checkoutLink, setDiscordRole, syncDiscordRole, syncMember } from './billing.js';
-import { pushFobs } from './edge.jsx';
+  type Discount, type Form, type Member, type MemberEvent,
+} from './lib.ts';
+import { checkoutLink, setDiscordRole, syncDiscordRole, syncMember } from './billing.ts';
+import { pushFobs } from './edge.tsx';
 
 const PAGE_SIZE = 25;
-const discounts = ['', 'military', 'retired', 'firstResponder', 'student', 'family'];
-const labelDiscount = value => ({ '': 'Standard rate', firstResponder: 'First responder' })[value] ?? value.charAt(0).toUpperCase() + value.slice(1);
-const pageNumber = params => Math.max(1, Math.min(1e7, parseInt(params.get('page'), 10) || 1));
+const labelDiscount = (value: Discount) => value === '' ? 'Standard rate' : value === 'firstResponder' ? 'First responder' : value.charAt(0).toUpperCase() + value.slice(1);
+const pageNumber = (params: URLSearchParams) => Math.max(1, Math.min(1e7, parseInt(params.get('page') ?? '', 10) || 1));
+const hasKey = <T extends object>(object: T, key: unknown): key is keyof T => typeof key === 'string' && Object.hasOwn(object, key);
+
+// An admin-viewed member, with whether its fob currently opens doors.
+type AdminMember = Member & { fob_enabled: number };
+
+// Form values to display: a saved member, or a resubmitted draft.
+interface Fields {
+  name_override?: string | undefined;
+  email?: string | null | undefined;
+  notes?: string | undefined;
+  discord_user_id?: string | null | undefined;
+  stripe_customer_id?: string | null | undefined;
+  fob_id?: string | number | null | undefined;
+  non_billable?: string | number | undefined;
+  legacy_billing?: string | number | undefined;
+  billing?: string | undefined;
+  discount_type?: string | undefined;
+  metadata_version?: string | number | undefined;
+}
 
 // ────────────────────────────────────────────────────────────────────────
 // Shared rendering
 // ────────────────────────────────────────────────────────────────────────
 
-const date = value => value ? new Date(value * 1000).toISOString().replace('T', ' ').replace('.000Z', ' UTC') : '—';
+const date = (value: number) => value ? new Date(value * 1000).toISOString().replace('T', ' ').replace('.000Z', ' UTC') : '—';
 
-function statusBadge(member) {
+function statusBadge(member: Member) {
   const state = member.stripe_subscription_state;
   const tone = grantsMembership(state) ? 'active' : state ? 'inactive' : 'unknown';
   const text = state ? state.charAt(0).toUpperCase() + state.slice(1).replaceAll('_', ' ') : member.stripe_subscription_id ? 'Unknown — not yet synced' : 'No subscription';
   return <span class={`admin-status admin-status--${tone}`}>{text}</span>;
 }
 
-function subscriptionLink(member, env) {
+function subscriptionLink(member: Member, env: Env) {
   if (!/^sub_[A-Za-z0-9]+$/.test(member.stripe_subscription_id || '')) return '';
   const mode = /^(sk|rk)_test_/.test(env.STRIPE_SECRET_KEY || '') ? 'test/' : '';
   return <a href={`https://dashboard.stripe.com/${mode}subscriptions/${member.stripe_subscription_id}`} target="_blank" rel="noopener noreferrer">View in Stripe <span aria-hidden="true">↗</span><span class="sr-only"> (opens in a new tab)</span></a>;
 }
 
-function input(name, label, value, max, help = '', type = 'text') {
+function input(name: string, label: string, value: string | number | null | undefined, max: number, help = '', type: 'text' | 'email' = 'text') {
   return <div class="admin-field">
     <label for={name}>{label}</label>
     <input id={name} name={name} type={type} value={value ?? ''} maxlength={max} aria-describedby={help ? `${name}-help` : undefined} />
@@ -40,28 +59,29 @@ function input(name, label, value, max, help = '', type = 'text') {
   </div>;
 }
 
-const options = (choices, value) => choices.map(([key, text]) => <option value={key} selected={key === value}>{text}</option>);
+type Choices = readonly (readonly [string, string])[];
+const options = (choices: Choices, value: string | undefined) => choices.map(([key, text]) => <option value={key} selected={key === value}>{text}</option>);
 
-function select(name, label, value, choices) {
+function select(name: string, label: string, value: string | undefined, choices: Choices) {
   return <div class="admin-field">
     <label for={name}>{label}</label>
     <select id={name} name={name}>{options(choices, value)}</select>
   </div>;
 }
 
-function checkbox(name, label, value) {
+function checkbox(name: string, label: string, value: string | number | undefined) {
   return <div class="admin-field">
     <label class="admin-checkbox" for={name}><input id={name} name={name} type="checkbox" checked={value === 1 || value === 'on'} />{label}</label>
   </div>;
 }
 
-const notice = (message, error) => message ? <p class={`admin-notice${error ? ' admin-notice--error' : ''}`} role={error ? 'alert' : 'status'}>{message}</p> : null;
-const billingSelects = f => <div class="admin-field-grid">
+const notice = (message: string, error: boolean) => message ? <p class={`admin-notice${error ? ' admin-notice--error' : ''}`} role={error ? 'alert' : 'status'}>{message}</p> : null;
+const billingSelects = (f: Fields) => <div class="admin-field-grid">
   {select('billing', 'Billing cycle', f.billing, [['monthly', 'Monthly'], ['yearly', 'Yearly']])}
-  {select('discount_type', 'Discount category', f.discount_type, discounts.map(key => [key, labelDiscount(key)]))}
+  {select('discount_type', 'Discount category', f.discount_type, discounts.map(key => [key, labelDiscount(key)] as const))}
 </div>;
 
-function pagination(label, current, pages, url) {
+function pagination(label: string, current: number, pages: number, url: (page: number) => string) {
   return <nav class="admin-pagination" aria-label={label}>
     {current > 1 && <a class="btn btn-outline" href={url(current - 1)}>Previous</a>}
     <span>Page {current} of {pages}</span>
@@ -73,20 +93,30 @@ function pagination(label, current, pages, url) {
 // Member list
 // ────────────────────────────────────────────────────────────────────────
 
+// The default must be one of the filter's choices.
+const filter = <const Name extends string, const Key extends string>(value: {
+  name: Name; label: string; defaultValue: NoInfer<Key>; choices: readonly (readonly [Key, string])[];
+}) => value;
+
 const filters = [
-  { name: 'waiver', label: 'Waiver status', defaultValue: 'signed', choices: [['all', 'Any waiver'], ['signed', 'Waiver signed'], ['unsigned', 'No waiver']] },
-  { name: 'discord', label: 'Discord status', defaultValue: 'linked', choices: [['all', 'Any Discord'], ['linked', 'Discord linked'], ['unlinked', 'No Discord']] },
-  { name: 'payment', label: 'Payment status', defaultValue: 'all', choices: [['all', 'Any payment'], ['stripe_active', 'Stripe active'], ['legacy_billing', 'Legacy billing'], ['non_billable', 'Non-billable'], ['inactive', 'Inactive']] },
-];
+  filter({ name: 'waiver', label: 'Waiver status', defaultValue: 'signed', choices: [['all', 'Any waiver'], ['signed', 'Waiver signed'], ['unsigned', 'No waiver']] }),
+  filter({ name: 'discord', label: 'Discord status', defaultValue: 'linked', choices: [['all', 'Any Discord'], ['linked', 'Discord linked'], ['unlinked', 'No Discord']] }),
+  filter({ name: 'payment', label: 'Payment status', defaultValue: 'all', choices: [['all', 'Any payment'], ['stripe_active', 'Stripe active'], ['legacy_billing', 'Legacy billing'], ['non_billable', 'Non-billable'], ['inactive', 'Inactive']] }),
+] as const;
+type Filter = typeof filters[number];
+type FilterValues = { [F in Filter as F['name']]: F['defaultValue'] };
+
+const chosen = <Key extends string>(filter: { name: string; defaultValue: Key; choices: readonly (readonly [Key, string])[] }, params: URLSearchParams) =>
+  filter.choices.find(([key]) => key === params.get(filter.name))?.[0] ?? filter.defaultValue;
 
 // Filter selects have visually hidden labels and apply on change (see static/admin.js).
-const filterSelect = ({ name, label, choices }, value, disabled = false) =>
+const filterSelect = ({ name, label, choices }: Filter, value: string, disabled = false) =>
   <>
     <label class="sr-only" for={name}>{label}</label>
     <select id={name} name={name} disabled={disabled} data-autosubmit>{options(choices, value)}</select>
   </>;
 
-function listURL(current, query, values) {
+function listURL(current: number, query: string, values: FilterValues) {
   const params = new URLSearchParams({ page: String(current) });
   if (query) params.set('q', query);
   for (const { name, defaultValue } of filters) if (values[name] !== defaultValue) params.set(name, values[name]);
@@ -94,12 +124,13 @@ function listURL(current, query, values) {
 }
 
 // Searches cover all members; filters apply only when not searching.
-async function memberList(url, env) {
+async function memberList(url: URL, env: Env) {
   const params = url.searchParams;
   const query = (params.get('q') || '').trim().slice(0, 254);
-  const values = Object.fromEntries(filters.map(({ name, defaultValue, choices }) => [name, choices.some(([key]) => key === params.get(name)) ? params.get(name) : defaultValue]));
-  const columns = ['discord_user_id', 'discord_username', 'discord_email', 'billing_name', 'billing_email', 'name_override', 'email', 'waiver_name', 'fob_id'];
-  const conditions = [], bindings = [];
+  const [waiver, discord, payment] = filters;
+  const values: FilterValues = { waiver: chosen(waiver, params), discord: chosen(discord, params), payment: chosen(payment, params) };
+  const columns = ['discord_user_id', 'discord_username', 'discord_email', 'billing_name', 'billing_email', 'name_override', 'email', 'waiver_name', 'fob_id'] satisfies (keyof Member)[];
+  const conditions: string[] = [], bindings: string[] = [];
   if (query) {
     conditions.push(`(${columns.map(column => `${column} LIKE ? ESCAPE '\\'`).join(' OR ')})`);
     bindings.push(...columns.map(() => `%${query.replace(/[\\%_]/g, '\\$&')}%`));
@@ -119,11 +150,11 @@ async function memberList(url, env) {
     env.DB.prepare(`SELECT * FROM members${where}
       ORDER BY created DESC, discord_user_id DESC, member_id DESC LIMIT ? OFFSET ?`).bind(...bindings, PAGE_SIZE, (current - 1) * PAGE_SIZE),
   ]);
-  const total = count.results[0].total, pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const total = (count?.results[0] as { total: number } | undefined)?.total ?? 0, pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   if (current > pages) return redirect(listURL(pages, query, values));
   const filtered = query || filters.some(({ name }) => values[name] !== 'all');
   const changed = query || filters.some(({ name, defaultValue }) => values[name] !== defaultValue);
-  const tableRows = rows.results.map(m => <tr>
+  const tableRows = ((rows?.results ?? []) as Member[]).map(m => <tr>
     <th scope="row">
       <a class="admin-member-name" href={memberPath(m)}>{memberName(m)}</a>
       <small>{m.discord_email || m.email || 'No email'}</small>
@@ -184,30 +215,35 @@ const eventTypes = {
   StripeCustomerChanged: 'Stripe customer changed',
   StripeSubscriptionChanged: 'Stripe subscription changed',
   SubscriptionStatusChanged: 'Subscription status changed',
-};
+} as const;
+type EventType = keyof typeof eventTypes;
 
-function eventDetails(event) {
-  if (event.event_type === 'MemberRegistered') return 'Membership registered.';
-  if (event.event_type === 'NotesUpdated') return 'Internal notes updated.';
-  const details = JSON.parse(event.details);
-  if (event.event_type === 'ConwayEvent') return `${details.event}: ${details.details}`;
-  if (event.event_type === 'FobSwipe') return `Fob ${details.fob} · ${details.allowed ? 'Allowed' : 'Denied'} · Controller ${details.controller} · ${details.time}`;
-  if (event.event_type === 'WaiverSigned') return `Signature #${details.waiver_id}.`;
-  const value = item => {
+// History rows carry the member's display-name columns, when it still exists.
+type HistoryEvent = MemberEvent & Partial<Pick<Member, 'discord_username' | 'billing_name' | 'name_override' | 'email' | 'waiver_name'>>;
+
+function eventDetails(event: MemberEvent) {
+  const type = event.event_type;
+  if (type === 'MemberRegistered') return 'Membership registered.';
+  if (type === 'NotesUpdated') return 'Internal notes updated.';
+  const details: Partial<Record<string, unknown>> = JSON.parse(event.details);
+  if (type === 'ConwayEvent') return `${details.event}: ${details.details}`;
+  if (type === 'FobSwipe') return `Fob ${details.fob} · ${details.allowed ? 'Allowed' : 'Denied'} · Controller ${details.controller} · ${details.time}`;
+  if (type === 'WaiverSigned') return `Signature #${details.waiver_id}.`;
+  const value = (item: unknown) => {
     if (item === null) return 'Not set';
-    if (event.event_type === 'BillingCycleChanged') return item ? 'Yearly' : 'Monthly';
-    if (['NonBillableChanged', 'LegacyBillingChanged'].includes(event.event_type)) return item ? 'Enabled' : 'Disabled';
-    if (event.event_type === 'DiscountTypeModified' && item === '') return 'Standard rate';
+    if (type === 'BillingCycleChanged') return item ? 'Yearly' : 'Monthly';
+    if (type === 'NonBillableChanged' || type === 'LegacyBillingChanged') return item ? 'Enabled' : 'Disabled';
+    if (type === 'DiscountTypeModified' && item === '') return 'Standard rate';
     return item === '' ? '(blank)' : String(item);
   };
   return `${value(details.from)} → ${value(details.to)}`;
 }
 
-function eventTable(events, showMember = true) {
+function eventTable(events: readonly HistoryEvent[], showMember = true) {
   const rows = events.map(event => {
-    const member = event.member_id ? <a href={memberPath(event)}>{memberName(event)}</a> : 'Unknown or deleted member';
+    const member = event.member_id ? <a href={memberPath({ member_id: event.member_id })}>{memberName(event)}</a> : 'Unknown or deleted member';
     return <tr>
-      <td>{date(event.created)}</td><td>{eventTypes[event.event_type] || event.event_type}</td>
+      <td>{date(event.created)}</td><td>{hasKey(eventTypes, event.event_type) ? eventTypes[event.event_type] : event.event_type}</td>
       {showMember && <td>{member}</td>}<td>{eventDetails(event)}</td>
     </tr>;
   });
@@ -219,10 +255,11 @@ function eventTable(events, showMember = true) {
   </div>;
 }
 
-async function history(url, env, member) {
-  const type = Object.hasOwn(eventTypes, url.searchParams.get('event_type')) ? url.searchParams.get('event_type') : '';
+async function history(url: URL, env: Env, member?: Member) {
+  const requested = url.searchParams.get('event_type');
+  const type: EventType | '' = hasKey(eventTypes, requested) ? requested : '';
   const current = pageNumber(url.searchParams);
-  const clauses = [], values = [];
+  const clauses: string[] = [], values: string[] = [];
   if (member) { clauses.push('e.member_id = ?'); values.push(member.member_id); }
   if (type) { clauses.push('e.event_type = ?'); values.push(type); }
   const where = clauses.length ? ` WHERE ${clauses.join(' AND ')}` : '';
@@ -232,8 +269,8 @@ async function history(url, env, member) {
       FROM member_events e LEFT JOIN members m ON m.member_id = e.member_id${where}
       ORDER BY e.created DESC, e.id DESC LIMIT ? OFFSET ?`).bind(...values, PAGE_SIZE, (current - 1) * PAGE_SIZE),
   ]);
-  const total = count.results[0].total, pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const pageURL = n => `${url.pathname}?${new URLSearchParams({ page: n, ...(type ? { event_type: type } : {}) })}`;
+  const total = (count?.results[0] as { total: number } | undefined)?.total ?? 0, pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const pageURL = (n: number) => `${url.pathname}?${new URLSearchParams({ page: String(n), ...(type ? { event_type: type } : {}) })}`;
   if (current > pages) return redirect(pageURL(pages));
   return page(member ? `History for ${memberName(member)}` : 'Events', <>
     {member && <p><a href={memberPath(member)}>← Back to member</a></p>}
@@ -245,7 +282,7 @@ async function history(url, env, member) {
       {type && <a href={url.pathname}>Clear</a>}
     </form>
     <p>{total} event{total === 1 ? '' : 's'}.</p>
-    {eventTable(rows.results, !member)}
+    {eventTable((rows?.results ?? []) as HistoryEvent[], !member)}
     {pagination('History pages', current, pages, pageURL)}
   </>, { admin: true });
 }
@@ -254,49 +291,58 @@ async function history(url, env, member) {
 // Member create, edit, and delete
 // ────────────────────────────────────────────────────────────────────────
 
-function billingFields(form) {
-  const value = { bill_annually: form.billing === 'yearly' ? 1 : 0, discount_type: form.discount_type ?? '' };
-  if (!discounts.includes(value.discount_type)) throw new HttpError(400, 'Choose standard rate or a valid discount category.');
+function billingFields(form: Form) {
+  const discount_type = form.discount_type ?? '';
+  if (!isDiscount(discount_type)) throw new HttpError(400, 'Choose standard rate or a valid discount category.');
+  return { bill_annually: form.billing === 'yearly' ? 1 : 0, discount_type } as const;
+}
+
+function text(form: Form, key: string, label: string, max: number) {
+  const value = (form[key] ?? '').trim();
+  if (value.length > max) throw new HttpError(400, `${label} must be at most ${max} characters.`);
   return value;
 }
 
-function validate(form, { create = false } = {}) {
-  const text = (key, label, max) => {
-    const value = (form[key] ?? '').trim();
-    if (value.length > max) throw new HttpError(400, `${label} must be at most ${max} characters.`);
-    return value;
-  };
+// Fields shared by the create and edit forms, in the order they are reported.
+function validateCommon(form: Form) {
   const value = {
-    name_override: text('name_override', 'Name', 160),
-    notes: text('notes', 'Notes', 5000),
-    discord_user_id: text('discord_user_id', 'Discord ID', 20) || null,
+    name_override: text(form, 'name_override', 'Name', 160),
+    notes: text(form, 'notes', 'Notes', 5000),
+    discord_user_id: text(form, 'discord_user_id', 'Discord ID', 20) || null,
   };
   if (value.discord_user_id && !discordID.test(value.discord_user_id)) throw new HttpError(400, 'Enter a valid Discord ID.');
-  Object.assign(value, billingFields(form));
-  if (create) {
-    value.email = text('email', 'Email', 254).toLowerCase();
-    if (!validEmail(value.email)) throw new HttpError(400, 'Enter a valid email address.');
-    return value;
-  }
-  value.stripe_customer_id = text('stripe_customer_id', 'Stripe customer ID', 255) || null;
-  if (value.stripe_customer_id && !/^cus_[A-Za-z0-9]+$/.test(value.stripe_customer_id)) throw new HttpError(400, 'Enter a valid Stripe customer ID.');
-  const fob = text('fob_id', 'Fob ID', 10);
-  if (fob && (!/^[1-9]\d{0,9}$/.test(fob) || Number(fob) > 4294967295)) throw new HttpError(400, 'Enter a fob ID from 1 through 4294967295, or leave blank.');
-  value.fob_id = fob ? Number(fob) : null;
-  value.non_billable = form.non_billable === 'on' ? 1 : 0;
-  value.legacy_billing = form.legacy_billing === 'on' ? 1 : 0;
-  value.metadata_version = Number(form.metadata_version);
+  return { ...value, ...billingFields(form) };
+}
+
+function validateNew(form: Form) {
+  const value = { ...validateCommon(form), email: text(form, 'email', 'Email', 254).toLowerCase() };
+  if (!validEmail(value.email)) throw new HttpError(400, 'Enter a valid email address.');
   return value;
 }
 
-const conflict = error => {
-  for (const [column, message] of [['fob_id', 'That fob already belongs to another member.'], ['discord_user_id', 'That Discord account already belongs to another member.'], ['stripe_customer_id', 'That Stripe customer already belongs to another member.'], ['email', 'That email already belongs to another member.']]) {
+function validateEdit(form: Form) {
+  const common = validateCommon(form);
+  const stripe_customer_id = text(form, 'stripe_customer_id', 'Stripe customer ID', 255) || null;
+  if (stripe_customer_id && !/^cus_[A-Za-z0-9]+$/.test(stripe_customer_id)) throw new HttpError(400, 'Enter a valid Stripe customer ID.');
+  const fob = text(form, 'fob_id', 'Fob ID', 10);
+  if (fob && (!/^[1-9]\d{0,9}$/.test(fob) || Number(fob) > 4294967295)) throw new HttpError(400, 'Enter a fob ID from 1 through 4294967295, or leave blank.');
+  return {
+    ...common, stripe_customer_id,
+    fob_id: fob ? Number(fob) : null,
+    non_billable: form.non_billable === 'on' ? 1 : 0,
+    legacy_billing: form.legacy_billing === 'on' ? 1 : 0,
+    metadata_version: Number(form.metadata_version),
+  };
+}
+
+const conflict = (error: unknown) => {
+  for (const [column, message] of [['fob_id', 'That fob already belongs to another member.'], ['discord_user_id', 'That Discord account already belongs to another member.'], ['stripe_customer_id', 'That Stripe customer already belongs to another member.'], ['email', 'That email already belongs to another member.']] as const) {
     if (String(error).includes(`members.${column}`)) return new HttpError(409, message);
   }
   return error;
 };
 
-function newMemberForm(fields, message = '', status = 200) {
+function newMemberForm(fields?: Fields, message = '', status = 200) {
   const f = fields || { billing: 'monthly', discount_type: '' };
   return page('New member', <>
     <p class="admin-back"><a href="/admin">← All members</a></p>
@@ -312,26 +358,28 @@ function newMemberForm(fields, message = '', status = 200) {
   </>, { status, admin: true });
 }
 
-async function createMember(env, form) {
-  const value = validate(form, { create: true });
+async function createMember(env: Env, form: Form) {
+  const value = validateNew(form);
   const username = value.discord_user_id ? await guildUsername(env, value.discord_user_id) : '';
   let member;
   try {
     member = await env.DB.prepare(`INSERT INTO members (email, name_override, notes, discord_user_id, discord_username, bill_annually, discount_type)
       SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7 WHERE NOT EXISTS (SELECT 1 FROM members WHERE discord_email = ?1) RETURNING *`)
-      .bind(value.email, value.name_override, value.notes, value.discord_user_id, username, value.bill_annually, value.discount_type).first();
+      .bind(value.email, value.name_override, value.notes, value.discord_user_id, username, value.bill_annually, value.discount_type).first<Member>();
   } catch (error) { throw conflict(error); }
   if (!member) throw new HttpError(409, 'That email already belongs to another member.');
   return member;
 }
 
-async function updateMember(env, member, value) {
-  if (member.metadata_version !== value.metadata_version) throw new HttpError(409, 'This member was changed after you opened the form. Reload the member and reapply your edits.');
+const staleForm = () => new HttpError(409, 'This member was changed after you opened the form. Reload the member and reapply your edits.');
+
+async function updateMember(env: Env, member: Member, value: ReturnType<typeof validateEdit>) {
+  if (member.metadata_version !== value.metadata_version) throw staleForm();
   if (member.discord_user_id && !value.discord_user_id) throw new HttpError(400, 'A linked Discord account can be transferred to another account, but not removed.');
   const discordChanged = member.discord_user_id !== value.discord_user_id;
   const customerChanged = member.stripe_customer_id !== value.stripe_customer_id;
-  const username = discordChanged ? await guildUsername(env, value.discord_user_id) : member.discord_username;
-  if (customerChanged && value.stripe_customer_id && (await stripe(env, `/customers/${value.stripe_customer_id}`)).deleted) {
+  const username = discordChanged && value.discord_user_id ? await guildUsername(env, value.discord_user_id) : member.discord_username;
+  if (customerChanged && value.stripe_customer_id && (await stripe<{ deleted?: boolean }>(env, `/customers/${value.stripe_customer_id}`)).deleted) {
     throw new HttpError(400, 'This Stripe customer has been deleted.');
   }
   let updated;
@@ -343,9 +391,9 @@ async function updateMember(env, member, value) {
       .bind(value.discord_user_id, ...(discordChanged ? [username] : []),
         value.name_override, value.notes, value.bill_annually, value.discount_type, value.fob_id, value.non_billable, value.legacy_billing,
         value.stripe_customer_id,
-        member.member_id, value.metadata_version).first();
+        member.member_id, value.metadata_version).first<Member>();
   } catch (error) { throw conflict(error); }
-  if (!updated) throw new HttpError(409, 'This member was changed after you opened the form. Reload the member and reapply your edits.');
+  if (!updated) throw staleForm();
   await pushFobs(env);
   return async () => {
     if (discordChanged) await setDiscordRole(env, member.discord_user_id, false);
@@ -357,16 +405,18 @@ async function updateMember(env, member, value) {
 const notices = {
   saved: 'Member saved.', created: 'Member created. Open Billing info to generate a checkout link.', synced: 'Stripe and Discord synchronized.',
   sync_failed: 'Saved, but Stripe or Discord synchronization failed. Use Sync with Stripe to retry.',
-};
+} as const;
 
-async function editor(env, member, { fields, message = '', status = 200, checkout = '' } = {}) {
-  const f = fields || { ...member, billing: member.bill_annually ? 'yearly' : 'monthly' };
-  const { results: events } = await env.DB.prepare('SELECT * FROM member_events WHERE member_id = ? ORDER BY created DESC, id DESC LIMIT 10').bind(member.member_id).all();
+interface EditorOptions { fields?: Fields | undefined; message?: string | undefined; status?: number | undefined; checkout?: string | undefined }
+
+async function editor(env: Env, member: AdminMember, { fields, message = '', status = 200, checkout = '' }: EditorOptions = {}) {
+  const f: Fields = fields || { ...member, billing: member.bill_annually ? 'yearly' : 'monthly' };
+  const { results: events } = await env.DB.prepare('SELECT * FROM member_events WHERE member_id = ? ORDER BY created DESC, id DESC LIMIT 10').bind(member.member_id).all<MemberEvent>();
   const account = [
     ['Member email', member.email], ['Waiver name', member.waiver_name],
     ['Discord username', member.discord_username], ['Discord email', member.discord_email],
     ['Billing name (Stripe)', member.billing_name], ['Billing email (Stripe)', member.billing_email],
-  ];
+  ] as const;
   const path = memberPath(member);
   return page(`Edit ${memberName(member)}`, <>
     <p class="admin-back"><a href="/admin">← All members</a></p>
@@ -432,7 +482,7 @@ async function editor(env, member, { fields, message = '', status = 200, checkou
 // Routing
 // ────────────────────────────────────────────────────────────────────────
 
-export async function adminRequest(request, env) {
+export async function adminRequest(request: Request, env: Env) {
   const url = new URL(request.url);
   const session = await readSession(request, env);
   if (!session) {
@@ -455,15 +505,18 @@ export async function adminRequest(request, env) {
   }
   const match = path.match(/^\/admin\/members\/([a-f0-9]{32})(\/events|\/checkout|\/sync|\/delete)?$/);
   if (!match) throw new HttpError(404, 'Admin page not found.');
-  const member = await env.DB.prepare(`SELECT *, COALESCE(${fobEnabledSQL}, 0) AS fob_enabled FROM members WHERE member_id = ?`).bind(match[1]).first();
+  const member = await env.DB.prepare(`SELECT *, COALESCE(${fobEnabledSQL}, 0) AS fob_enabled FROM members WHERE member_id = ?`).bind(match[1]).first<AdminMember>();
   if (!member) throw new HttpError(404, 'Member not found.');
   const action = `${request.method} ${match[2] || ''}`;
-  if (action === 'GET ') return editor(env, member, { message: notices[url.searchParams.get('notice')] });
+  if (action === 'GET ') {
+    const key = url.searchParams.get('notice');
+    return editor(env, member, { message: hasKey(notices, key) ? notices[key] : '' });
+  }
   if (action === 'GET /events') return history(url, env, member);
   if (action === 'POST ') {
     const form = await readForm(request);
     let sideEffects;
-    try { sideEffects = await updateMember(env, member, validate(form)); }
+    try { sideEffects = await updateMember(env, member, validateEdit(form)); }
     catch (error) {
       if (!(error instanceof HttpError)) throw error;
       return editor(env, member, { fields: form, message: error.message, status: error.status });
@@ -483,16 +536,16 @@ export async function adminRequest(request, env) {
     // Submitted with the editor form: save the billing choices the link uses and
     // keep the admin's other unsaved edits in the redisplayed form.
     const form = await readForm(request);
-    let current = member, fields = form;
-    const redisplay = options => editor(env, current, { ...options, fields });
+    let current = member, fields: Fields = form;
+    const redisplay = (options: EditorOptions) => editor(env, current, { ...options, fields });
     try {
-      if (Number(form.metadata_version) !== member.metadata_version) throw new HttpError(409, 'This member was changed after you opened the form. Reload the member and reapply your edits.');
+      if (Number(form.metadata_version) !== member.metadata_version) throw staleForm();
       const billing = billingFields(form);
       if (billing.bill_annually !== member.bill_annually || billing.discount_type !== member.discount_type) {
         const updated = await env.DB.prepare(`UPDATE members SET bill_annually = ?, discount_type = ?, metadata_version = metadata_version + 1
           WHERE member_id = ? AND metadata_version = ? RETURNING *`)
-          .bind(billing.bill_annually, billing.discount_type, member.member_id, Number(form.metadata_version)).first();
-        if (!updated) throw new HttpError(409, 'This member was changed after you opened the form. Reload the member and reapply your edits.');
+          .bind(billing.bill_annually, billing.discount_type, member.member_id, Number(form.metadata_version)).first<Member>();
+        if (!updated) throw staleForm();
         current = { ...member, ...updated };
         fields = { ...form, metadata_version: updated.metadata_version };
       }

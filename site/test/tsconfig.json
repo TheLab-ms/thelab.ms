@@ -1,0 +1,10 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "types": ["@cloudflare/vitest-pool-workers/types"],
+    // Fixtures index into arrays the test itself just built.
+    "noUncheckedIndexedAccess": false
+  },
+  "include": ["../worker-configuration.d.ts", "../src", ".", "../vitest.config.ts"],
+  "exclude": ["browser"]
+}

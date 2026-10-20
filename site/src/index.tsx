@@ -1,15 +1,15 @@
 // Worker entrypoint. Static assets are served directly, except the gated kiosk
 // page; requests that match no asset reach these routes.
-import { h, Fragment } from './html.js';
-import { page } from './page.jsx';
-import { HttpError, json, logError, origin } from './lib.js';
-import { adminRequest } from './admin.jsx';
-import { callback, login, logout } from './auth.js';
-import { checkout, stripeWebhook } from './billing.js';
-import { bindFob, edgeJWKS, edgeSyncRequest, kioskClaim, kioskPage, machinesData, swipeWebhook } from './edge.jsx';
-import { signWaiver } from './waiver.jsx';
+import { h, Fragment } from './html.ts';
+import { page } from './page.tsx';
+import { HttpError, json, logError, origin, type Handler } from './lib.ts';
+import { adminRequest } from './admin.tsx';
+import { callback, login, logout } from './auth.ts';
+import { checkout, stripeWebhook } from './billing.ts';
+import { bindFob, edgeJWKS, edgeSyncRequest, kioskClaim, kioskPage, machinesData, swipeWebhook } from './edge.tsx';
+import { signWaiver } from './waiver.tsx';
 
-const routes = {
+const routes = new Map<string, Handler>(Object.entries({
   'GET /.well-known/edge-jwks.json': edgeJWKS,
   'GET /login': login,
   'GET /login/callback': callback,
@@ -24,7 +24,7 @@ const routes = {
   'POST /webhooks/stripe': stripeWebhook,
   'POST /webhooks/edge/swipes': swipeWebhook,
   'POST /webhooks/edge/sync': edgeSyncRequest,
-};
+} satisfies Record<`${'GET' | 'POST'} /${string}`, Handler>));
 
 // Machine clients receive JSON errors; people receive an HTML page.
 const jsonPaths = ['/machines/data', '/kiosk/claims', '/webhooks/'];
@@ -32,7 +32,7 @@ const jsonPaths = ['/machines/data', '/kiosk/claims', '/webhooks/'];
 const crossOriginPaths = ['/kiosk/claims', '/webhooks/'];
 
 export default {
-  async fetch(request, env, ctx) {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url);
     const path = url.pathname;
     try {
@@ -40,7 +40,7 @@ export default {
       if (request.method === 'POST' && !crossOriginPaths.some(p => path.startsWith(p)) && request.headers.get('Origin') !== origin(env)) {
         throw new HttpError(403, 'We couldn’t verify where this form came from. Reload the page and try again.');
       }
-      const handler = routes[`${request.method} ${path}`] ?? (path === '/admin' || path.startsWith('/admin/') ? adminRequest : null);
+      const handler = routes.get(`${request.method} ${path}`) ?? (path === '/admin' || path.startsWith('/admin/') ? adminRequest : null);
       if (!handler) throw new HttpError(404, 'Page not found.');
       return await handler(request, env, ctx);
     } catch (error) {
@@ -58,4 +58,4 @@ export default {
       </>, { status });
     }
   },
-};
+} satisfies ExportedHandler<Env>;

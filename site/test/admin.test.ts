@@ -1,16 +1,17 @@
 import { env } from 'cloudflare:workers';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { addWaiver, call, insertMember, mockFetch, post, quiet, readMember, resetDB, session, stripeEvent } from './helpers.js';
+import type { Member } from '../src/lib.ts';
+import { addWaiver, call, count, insertMember, mockFetch, post, quiet, readMember, resetDB, session, stripeEvent, type Route } from './helpers.ts';
 
 const adminID = '444444444444444444';
 const discordAPI = `https://discord.com/api/v10/guilds/${env.DISCORD_GUILD_ID}/members`;
-const guildMember = id => [`GET`, `${discordAPI}/${id}`, { user: { id, username: `user-${id.slice(0, 3)}` } }];
-const role = (method, id, status = 204) => [method, `${discordAPI}/${id}/roles/${env.DISCORD_ROLE_ID}`, new Response(null, { status })];
+const guildMember = (id: string): Route => [`GET`, `${discordAPI}/${id}`, { user: { id, username: `user-${id.slice(0, 3)}` } }];
+const role = (method: string, id: string, status = 204): Route => [method, `${discordAPI}/${id}/roles/${env.DISCORD_ROLE_ID}`, new Response(null, { status })];
 
 describe('Admin', () => {
-  let cookie;
-  const get = path => call(path, { headers: { Cookie: cookie } });
-  const save = (member, fields = {}) => call(`/admin/members/${member.member_id}`, post({
+  let cookie: string;
+  const get = (path: string) => call(path, { headers: { Cookie: cookie } });
+  const save = (member: Member, fields: Record<string, string> = {}) => call(`/admin/members/${member.member_id}`, post({
     metadata_version: String(member.metadata_version), name_override: '', notes: '', fob_id: member.fob_id ?? '',
     discord_user_id: member.discord_user_id ?? '', stripe_customer_id: member.stripe_customer_id ?? '',
     billing: 'monthly', discount_type: '', ...fields,
@@ -33,7 +34,7 @@ describe('Admin', () => {
     expect(response.status).toBe(401);
     response = await call('/admin/members/new', post({ email: 'a@example.com' }, { Cookie: cookie, Origin: 'https://evil.example' }));
     expect(response.status).toBe(403);
-    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM members').first()).n).toBe(0);
+    expect(await count('SELECT COUNT(*) AS n FROM members')).toBe(0);
   });
 
   it('lists members with filters and searches all members', async () => {
@@ -88,7 +89,7 @@ describe('Admin', () => {
       email: ' New@Example.com ', name_override: 'New Maker', discord_user_id: '333333333333333333', billing: 'yearly', discount_type: 'student', notes: '',
     }, { Cookie: cookie }));
     expect(response.status).toBe(303);
-    const member = await env.DB.prepare('SELECT * FROM members').first();
+    const member = (await env.DB.prepare('SELECT * FROM members').first<Member>())!;
     expect(response.headers.get('Location')).toBe(`/admin/members/${member.member_id}?notice=created`);
     expect(member).toMatchObject({ email: 'new@example.com', discord_username: 'user-333', bill_annually: 1, discount_type: 'student' });
     const duplicate = await call('/admin/members/new', post({ email: 'new@example.com', name_override: 'Draft name', billing: 'monthly', discount_type: '' }, { Cookie: cookie }));
@@ -109,8 +110,8 @@ describe('Admin', () => {
     expect(html).toContain('<script src="/admin.js" defer>');
     // Pressing Enter submits the first submit button, which must be Save, not Generate checkout link.
     const editorForm = html.slice(html.indexOf('class="admin-form admin-editor"'));
-    expect(editorForm.match(/<button[^>]*type="submit"[^>]*>([^<]*)/)[1]).toBe('Save changes');
-    const events = (await env.DB.prepare('SELECT event_type FROM member_events ORDER BY event_type').all()).results.map(e => e.event_type);
+    expect(editorForm.match(/<button[^>]*type="submit"[^>]*>([^<]*)/)?.[1]).toBe('Save changes');
+    const events = (await env.DB.prepare('SELECT event_type FROM member_events ORDER BY event_type').all<{ event_type: string }>()).results.map(e => e.event_type);
     expect(events).toEqual(['FobChanged', 'MemberRegistered', 'NameOverrideChanged', 'NonBillableChanged', 'NotesUpdated']);
   });
 
@@ -119,12 +120,13 @@ describe('Admin', () => {
     mockFetch();
     await insertMember({ fob_id: 7 });
     const member = await insertMember({});
-    for (const [fields, status, message] of [
+    const cases: [Record<string, string>, number, string][] = [
       [{ metadata_version: '5', notes: 'Keep <me>' }, 409, 'changed after you opened the form'],
       [{ fob_id: '7', notes: 'Keep <me>' }, 409, 'That fob already belongs to another member.'],
       [{ fob_id: '0', notes: 'Keep <me>' }, 400, 'Enter a fob ID'],
       [{ stripe_customer_id: 'bogus', notes: 'Keep <me>' }, 400, 'valid Stripe customer ID'],
-    ]) {
+    ];
+    for (const [fields, status, message] of cases) {
       const response = await save(member, fields);
       expect(response.status).toBe(status);
       const html = await response.text();
@@ -149,7 +151,7 @@ describe('Admin', () => {
     });
     expect(calls.filter(c => c.url.includes('/roles/')).map(c => `${c.method} ${c.url.split('/members/')[1].slice(0, 3)}`)).toEqual(['DELETE 333', 'PUT 555']);
     quiet();
-    expect((await save(await readMember(member.member_id), { discord_user_id: '' })).status).toBe(400);
+    expect((await save((await readMember(member.member_id))!, { discord_user_id: '' })).status).toBe(400);
   });
 
   it('prevents an old admin form from unlinking a newly completed payment', async () => {
@@ -192,7 +194,7 @@ describe('Admin', () => {
     mockFetch([guildMember('555555555555555555'), role('DELETE', '333333333333333333', 500)]);
     const response = await save(member, { discord_user_id: '555555555555555555' });
     expect(response.headers.get('Location')).toContain('notice=sync_failed');
-    expect((await readMember(member.member_id)).discord_user_id).toBe('555555555555555555');
+    expect((await readMember(member.member_id))?.discord_user_id).toBe('555555555555555555');
   });
 
   it('generates shareable checkout links and refuses them for ongoing subscriptions', async () => {
@@ -215,7 +217,7 @@ describe('Admin', () => {
     expect(html).toContain('value="Unsaved name"');
     expect(html).toContain('name="metadata_version" value="1"');
     expect(html).toContain('name="stripe_customer_id" type="text" value="cus_1"');
-    expect((await readMember(member.member_id)).metadata_version).toBe(1);
+    expect((await readMember(member.member_id))?.metadata_version).toBe(1);
 
     // Unsaved billing choices are used for the link and saved with it.
     vi.restoreAllMocks();
@@ -231,7 +233,7 @@ describe('Admin', () => {
     html = await response.text();
     expect(html).toContain('value="https://checkout.stripe.com/c/pay/cs_2"');
     expect(html).toContain('name="metadata_version" value="2"');
-    const body = new URLSearchParams(calls.at(-1).body);
+    const body = new URLSearchParams(calls.at(-1)?.body);
     expect(body.get('line_items[0][price]')).toBe('price_y');
     expect(body.get('discounts[0][coupon]')).toBe('coupon_s');
     expect(await readMember(member.member_id)).toMatchObject({ bill_annually: 1, discount_type: 'student', name_override: '', metadata_version: 2 });
@@ -265,7 +267,7 @@ describe('Admin', () => {
     expect(response.headers.get('Location')).toBe('/admin');
     expect(calls).toHaveLength(1);
     expect(await readMember(member.member_id)).toBeNull();
-    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM waivers').first()).n).toBe(1);
+    expect(await count('SELECT COUNT(*) AS n FROM waivers')).toBe(1);
   });
 
   it('renders member and global history with event filters', async () => {
