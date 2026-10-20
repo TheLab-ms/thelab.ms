@@ -1,8 +1,10 @@
 // Waiver signatures. The waiver text and form live in static/waiver.html.
+import { h, Fragment } from './html.js';
+import { page } from './page.jsx';
 import {
-  HttpError, currentMember, escapeHTML as e, grantsMembership, origin, page, provider, readForm, redirect, validEmail,
+  HttpError, currentMember, grantsMembership, origin, provider, readForm, redirect, validEmail,
 } from './lib.js';
-import { pushFobs } from './edge.js';
+import { pushFobs } from './edge.jsx';
 
 async function verifyHuman(request, env, token) {
   if (!env.TURNSTILE_SECRET_KEY) return;
@@ -43,7 +45,9 @@ export async function signWaiver(request, env) {
   if (!signed) throw new HttpError(409, 'We couldn’t link your waiver to a membership. Please contact leadership.');
   await pushFobs(env);
   if (member && !member.non_billable && !member.legacy_billing && !grantsMembership(member.stripe_subscription_state)) return redirect('/checkout');
-  return page('Waiver signed', `<p role="status">Thanks, ${e(name)}. Your waiver has been recorded.</p>
-    <p>Signature #${signed.id} · ${e(email)} · ${e(new Date().toISOString())}</p>
-    <div class="membership-actions"><a class="btn btn-primary" href="/">Done</a></div>`);
+  return page('Waiver signed', <>
+    <p role="status">Thanks, {name}. Your waiver has been recorded.</p>
+    <p>Signature #{signed.id} · {email} · {new Date().toISOString()}</p>
+    <div class="membership-actions"><a class="btn btn-primary" href="/">Done</a></div>
+  </>);
 }

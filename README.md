@@ -7,6 +7,7 @@ Cloudflare Worker: public site, membership, billing, and D1 database.
 - Dev: `npm ci`, `cp .dev.vars.example .dev.vars` and fill it in (`AUTH_SECRET`: `openssl rand -base64 32`; `EDGE_JWT_PRIVATE_KEY`: `openssl genpkey -algorithm ed25519 -outform DER | base64`), then `npm run db:local && npm run dev`
 - Test: `npm ci && npm test && npm run test:browser`
 - Deploy: `npm run deploy` (applies D1 migrations; needs secrets from `wrangler.jsonc`)
+- HTML: server-only JSX via `site/src/html.js`; use HTML attribute names (`class`, `for`). Values are escaped automatically.
 
 ## `edgeproxy/`
 

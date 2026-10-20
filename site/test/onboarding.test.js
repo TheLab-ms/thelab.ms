@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:workers';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { edgeEventKey } from '../src/edge.js';
+import { edgeEventKey } from '../src/edge.jsx';
 import { addWaiver, call, edgeEnv, insertMember, mockFetch, post, quiet, readMember, resetDB, session, stripeEvent } from './helpers.js';
 
 const user = { id: '333333333333333333', username: 'new-maker', email: 'maker@example.com', verified: true };

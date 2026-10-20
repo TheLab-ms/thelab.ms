@@ -1,10 +1,12 @@
 // Admin pages for members and their history.
+import { h, Fragment } from './html.js';
+import { page } from './page.jsx';
 import {
-  HttpError, discordID, escapeHTML as e, fobEnabledSQL, grantsMembership, logError, loginRedirect, memberName,
-  memberPath, page, readForm, readSession, redirect, stripe, guildUsername, validEmail,
+  HttpError, discordID, fobEnabledSQL, grantsMembership, logError, loginRedirect, memberName,
+  memberPath, readForm, readSession, redirect, stripe, guildUsername, validEmail,
 } from './lib.js';
 import { checkoutLink, setDiscordRole, syncDiscordRole, syncMember } from './billing.js';
-import { pushFobs } from './edge.js';
+import { pushFobs } from './edge.jsx';
 
 const PAGE_SIZE = 25;
 const discounts = ['', 'military', 'retired', 'firstResponder', 'student', 'family'];
@@ -21,34 +23,50 @@ function statusBadge(member) {
   const state = member.stripe_subscription_state;
   const tone = grantsMembership(state) ? 'active' : state ? 'inactive' : 'unknown';
   const text = state ? state.charAt(0).toUpperCase() + state.slice(1).replaceAll('_', ' ') : member.stripe_subscription_id ? 'Unknown — not yet synced' : 'No subscription';
-  return `<span class="admin-status admin-status--${tone}">${e(text)}</span>`;
+  return <span class={`admin-status admin-status--${tone}`}>{text}</span>;
 }
 
 function subscriptionLink(member, env) {
   if (!/^sub_[A-Za-z0-9]+$/.test(member.stripe_subscription_id || '')) return '';
   const mode = /^(sk|rk)_test_/.test(env.STRIPE_SECRET_KEY || '') ? 'test/' : '';
-  return `<a href="https://dashboard.stripe.com/${mode}subscriptions/${e(member.stripe_subscription_id)}" target="_blank" rel="noopener noreferrer">View in Stripe <span aria-hidden="true">↗</span><span class="sr-only"> (opens in a new tab)</span></a>`;
+  return <a href={`https://dashboard.stripe.com/${mode}subscriptions/${member.stripe_subscription_id}`} target="_blank" rel="noopener noreferrer">View in Stripe <span aria-hidden="true">↗</span><span class="sr-only"> (opens in a new tab)</span></a>;
 }
 
 function input(name, label, value, max, help = '', type = 'text') {
-  return `<div class="admin-field"><label for="${name}">${e(label)}</label><input id="${name}" name="${name}" type="${type}" value="${e(value)}" maxlength="${max}"${help ? ` aria-describedby="${name}-help"` : ''}>${help ? `<p class="admin-help" id="${name}-help">${e(help)}</p>` : ''}</div>`;
+  return <div class="admin-field">
+    <label for={name}>{label}</label>
+    <input id={name} name={name} type={type} value={value ?? ''} maxlength={max} aria-describedby={help ? `${name}-help` : undefined} />
+    {help && <p class="admin-help" id={`${name}-help`}>{help}</p>}
+  </div>;
 }
 
-const options = (choices, value) => choices.map(([key, text]) => `<option value="${e(key)}"${key === value ? ' selected' : ''}>${e(text)}</option>`).join('');
+const options = (choices, value) => choices.map(([key, text]) => <option value={key} selected={key === value}>{text}</option>);
 
 function select(name, label, value, choices) {
-  return `<div class="admin-field"><label for="${name}">${e(label)}</label><select id="${name}" name="${name}">${options(choices, value)}</select></div>`;
+  return <div class="admin-field">
+    <label for={name}>{label}</label>
+    <select id={name} name={name}>{options(choices, value)}</select>
+  </div>;
 }
 
 function checkbox(name, label, value) {
-  return `<div class="admin-field"><label class="admin-checkbox" for="${name}"><input id="${name}" name="${name}" type="checkbox"${value === 1 || value === 'on' ? ' checked' : ''}>${e(label)}</label></div>`;
+  return <div class="admin-field">
+    <label class="admin-checkbox" for={name}><input id={name} name={name} type="checkbox" checked={value === 1 || value === 'on'} />{label}</label>
+  </div>;
 }
 
-const notice = (message, error) => message ? `<p class="admin-notice${error ? ' admin-notice--error' : ''}" role="${error ? 'alert' : 'status'}">${e(message)}</p>` : '';
-const billingSelects = f => `<div class="admin-field-grid">${select('billing', 'Billing cycle', f.billing, [['monthly', 'Monthly'], ['yearly', 'Yearly']])}${select('discount_type', 'Discount category', f.discount_type, discounts.map(key => [key, labelDiscount(key)]))}</div>`;
+const notice = (message, error) => message ? <p class={`admin-notice${error ? ' admin-notice--error' : ''}`} role={error ? 'alert' : 'status'}>{message}</p> : null;
+const billingSelects = f => <div class="admin-field-grid">
+  {select('billing', 'Billing cycle', f.billing, [['monthly', 'Monthly'], ['yearly', 'Yearly']])}
+  {select('discount_type', 'Discount category', f.discount_type, discounts.map(key => [key, labelDiscount(key)]))}
+</div>;
 
 function pagination(label, current, pages, url) {
-  return `<nav class="admin-pagination" aria-label="${label}">${current > 1 ? `<a class="btn btn-outline" href="${e(url(current - 1))}">Previous</a>` : ''}<span>Page ${current} of ${pages}</span>${current < pages ? `<a class="btn btn-outline" href="${e(url(current + 1))}">Next</a>` : ''}</nav>`;
+  return <nav class="admin-pagination" aria-label={label}>
+    {current > 1 && <a class="btn btn-outline" href={url(current - 1)}>Previous</a>}
+    <span>Page {current} of {pages}</span>
+    {current < pages && <a class="btn btn-outline" href={url(current + 1)}>Next</a>}
+  </nav>;
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -63,7 +81,10 @@ const filters = [
 
 // Filter selects have visually hidden labels and apply on change (see static/admin.js).
 const filterSelect = ({ name, label, choices }, value, disabled = false) =>
-  `<label class="sr-only" for="${name}">${e(label)}</label><select id="${name}" name="${name}"${disabled ? ' disabled' : ''} data-autosubmit>${options(choices, value)}</select>`;
+  <>
+    <label class="sr-only" for={name}>{label}</label>
+    <select id={name} name={name} disabled={disabled} data-autosubmit>{options(choices, value)}</select>
+  </>;
 
 function listURL(current, query, values) {
   const params = new URLSearchParams({ page: String(current) });
@@ -102,14 +123,41 @@ async function memberList(url, env) {
   if (current > pages) return redirect(listURL(pages, query, values));
   const filtered = query || filters.some(({ name }) => values[name] !== 'all');
   const changed = query || filters.some(({ name, defaultValue }) => values[name] !== defaultValue);
-  const tableRows = rows.results.map(m => `<tr><th scope="row"><a class="admin-member-name" href="${e(memberPath(m))}">${e(memberName(m))}</a><small>${e(m.discord_email || m.email || 'No email')}</small>${m.non_billable ? '<small>Non-billable</small>' : ''}${m.legacy_billing ? '<small>Legacy billing</small>' : ''}</th><td>${statusBadge(m)}<small>${subscriptionLink(m, env)}</small></td></tr>`).join('');
-  return page('Registered members', `<form method="get" action="/admin" role="search" class="admin-form admin-search-panel">
-    <div class="admin-search-row"><label class="sr-only" for="member-search">Search members</label><input id="member-search" type="search" name="q" value="${e(query)}" maxlength="254" placeholder="Search name, email, Discord, or fob ID" data-search>
-    <button class="btn btn-primary" type="submit">Search</button><a class="btn btn-accent-outline" href="/admin/members/new">New member</a></div>
-    <div class="admin-filter-row"><span class="admin-filter-label" aria-hidden="true">Filter</span>${filters.map(filter => filterSelect(filter, values[filter.name], !!query)).join('')}${changed ? '<a href="/admin">Clear</a>' : ''}</div></form>
-    <div class="admin-list-summary"><p><strong>${total} ${filtered ? 'matching' : 'registered'} member${total === 1 ? '' : 's'}</strong>${query ? ` for “${e(query)}”` : ''}</p><p class="admin-help">${query ? 'Searching all members; filters are ignored' : 'Newest first'}</p></div>
-    <div class="admin-table" role="region" aria-label="Registered members" tabindex="0"><table class="admin-member-table"><thead><tr><th scope="col">Member</th><th scope="col">Subscription</th></tr></thead><tbody>${tableRows || `<tr><td colspan="2" class="admin-empty">${filtered ? 'No members match your search and filters.' : 'No members have registered yet.'}</td></tr>`}</tbody></table></div>
-    ${pagination('Member pages', current, pages, n => listURL(n, query, values))}`, { admin: true });
+  const tableRows = rows.results.map(m => <tr>
+    <th scope="row">
+      <a class="admin-member-name" href={memberPath(m)}>{memberName(m)}</a>
+      <small>{m.discord_email || m.email || 'No email'}</small>
+      {m.non_billable ? <small>Non-billable</small> : null}
+      {m.legacy_billing ? <small>Legacy billing</small> : null}
+    </th>
+    <td>{statusBadge(m)}<small>{subscriptionLink(m, env)}</small></td>
+  </tr>);
+  return page('Registered members', <>
+    <form method="get" action="/admin" role="search" class="admin-form admin-search-panel">
+      <div class="admin-search-row">
+        <label class="sr-only" for="member-search">Search members</label>
+        <input id="member-search" type="search" name="q" value={query} maxlength="254" placeholder="Search name, email, Discord, or fob ID" data-search />
+        <button class="btn btn-primary" type="submit">Search</button>
+        <a class="btn btn-accent-outline" href="/admin/members/new">New member</a>
+      </div>
+      <div class="admin-filter-row">
+        <span class="admin-filter-label" aria-hidden="true">Filter</span>
+        {filters.map(filter => filterSelect(filter, values[filter.name], !!query))}
+        {changed && <a href="/admin">Clear</a>}
+      </div>
+    </form>
+    <div class="admin-list-summary">
+      <p><strong>{total} {filtered ? 'matching' : 'registered'} member{total === 1 ? '' : 's'}</strong>{query ? ` for “${query}”` : ''}</p>
+      <p class="admin-help">{query ? 'Searching all members; filters are ignored' : 'Newest first'}</p>
+    </div>
+    <div class="admin-table" role="region" aria-label="Registered members" tabindex="0">
+      <table class="admin-member-table">
+        <thead><tr><th scope="col">Member</th><th scope="col">Subscription</th></tr></thead>
+        <tbody>{tableRows.length ? tableRows : <tr><td colspan="2" class="admin-empty">{filtered ? 'No members match your search and filters.' : 'No members have registered yet.'}</td></tr>}</tbody>
+      </table>
+    </div>
+    {pagination('Member pages', current, pages, n => listURL(n, query, values))}
+  </>, { admin: true });
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -157,10 +205,18 @@ function eventDetails(event) {
 
 function eventTable(events, showMember = true) {
   const rows = events.map(event => {
-    const member = event.member_id ? `<a href="${e(memberPath(event))}">${e(memberName(event))}</a>` : 'Unknown or deleted member';
-    return `<tr><td>${e(date(event.created))}</td><td>${e(eventTypes[event.event_type] || event.event_type)}</td>${showMember ? `<td>${member}</td>` : ''}<td>${e(eventDetails(event))}</td></tr>`;
-  }).join('');
-  return `<div class="admin-table" role="region" aria-label="Member history" tabindex="0"><table><thead><tr><th scope="col">Timestamp</th><th scope="col">Event</th>${showMember ? '<th scope="col">Member</th>' : ''}<th scope="col">Details</th></tr></thead><tbody>${rows || `<tr><td colspan="${showMember ? 4 : 3}">No member history found.</td></tr>`}</tbody></table></div>`;
+    const member = event.member_id ? <a href={memberPath(event)}>{memberName(event)}</a> : 'Unknown or deleted member';
+    return <tr>
+      <td>{date(event.created)}</td><td>{eventTypes[event.event_type] || event.event_type}</td>
+      {showMember && <td>{member}</td>}<td>{eventDetails(event)}</td>
+    </tr>;
+  });
+  return <div class="admin-table" role="region" aria-label="Member history" tabindex="0">
+    <table>
+      <thead><tr><th scope="col">Timestamp</th><th scope="col">Event</th>{showMember && <th scope="col">Member</th>}<th scope="col">Details</th></tr></thead>
+      <tbody>{rows.length ? rows : <tr><td colspan={showMember ? 4 : 3}>No member history found.</td></tr>}</tbody>
+    </table>
+  </div>;
 }
 
 async function history(url, env, member) {
@@ -179,12 +235,19 @@ async function history(url, env, member) {
   const total = count.results[0].total, pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const pageURL = n => `${url.pathname}?${new URLSearchParams({ page: n, ...(type ? { event_type: type } : {}) })}`;
   if (current > pages) return redirect(pageURL(pages));
-  return page(member ? `History for ${memberName(member)}` : 'Events', `${member ? `<p><a href="${e(memberPath(member))}">← Back to member</a></p>` : ''}
+  return page(member ? `History for ${memberName(member)}` : 'Events', <>
+    {member && <p><a href={memberPath(member)}>← Back to member</a></p>}
     <p>Member changes are retained indefinitely. Timestamps are UTC.</p>
-    <form method="get" action="${e(url.pathname)}" class="admin-form admin-toolbar"><label class="sr-only" for="event-type">Event type</label>
-    <select id="event-type" name="event_type" data-autosubmit>${options([['', 'All event types'], ...Object.entries(eventTypes)], type)}</select><button class="btn btn-primary" type="submit">Filter</button>${type ? `<a href="${e(url.pathname)}">Clear</a>` : ''}</form>
-    <p>${total} event${total === 1 ? '' : 's'}.</p>${eventTable(rows.results, !member)}
-    ${pagination('History pages', current, pages, pageURL)}`, { admin: true });
+    <form method="get" action={url.pathname} class="admin-form admin-toolbar">
+      <label class="sr-only" for="event-type">Event type</label>
+      <select id="event-type" name="event_type" data-autosubmit>{options([['', 'All event types'], ...Object.entries(eventTypes)], type)}</select>
+      <button class="btn btn-primary" type="submit">Filter</button>
+      {type && <a href={url.pathname}>Clear</a>}
+    </form>
+    <p>{total} event{total === 1 ? '' : 's'}.</p>
+    {eventTable(rows.results, !member)}
+    {pagination('History pages', current, pages, pageURL)}
+  </>, { admin: true });
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -235,14 +298,18 @@ const conflict = error => {
 
 function newMemberForm(fields, message = '', status = 200) {
   const f = fields || { billing: 'monthly', discount_type: '' };
-  return page('New member', `<p class="admin-back"><a href="/admin">← All members</a></p>${notice(message, true)}
+  return page('New member', <>
+    <p class="admin-back"><a href="/admin">← All members</a></p>
+    {notice(message, true)}
     <form method="post" action="/admin/members/new" class="admin-form admin-section">
-    ${input('name_override', 'Member name', f.name_override, 160)}
-    ${input('email', 'Member email', f.email, 254, 'Use the member’s Discord email so their account and waiver link when they sign in.', 'email')}
-    ${input('discord_user_id', 'Discord ID (optional)', f.discord_user_id, 20, 'Leave blank if the member has not joined Discord yet.')}
-    ${billingSelects(f)}
-    <div class="admin-field"><label for="notes">Internal notes</label><textarea id="notes" name="notes" maxlength="5000" rows="4">${e(f.notes)}</textarea></div>
-    <div class="admin-actions"><button class="btn btn-primary" type="submit">Create member</button><a href="/admin">Cancel</a></div></form>`, { status, admin: true });
+      {input('name_override', 'Member name', f.name_override, 160)}
+      {input('email', 'Member email', f.email, 254, 'Use the member’s Discord email so their account and waiver link when they sign in.', 'email')}
+      {input('discord_user_id', 'Discord ID (optional)', f.discord_user_id, 20, 'Leave blank if the member has not joined Discord yet.')}
+      {billingSelects(f)}
+      <div class="admin-field"><label for="notes">Internal notes</label><textarea id="notes" name="notes" maxlength="5000" rows="4">{f.notes}</textarea></div>
+      <div class="admin-actions"><button class="btn btn-primary" type="submit">Create member</button><a href="/admin">Cancel</a></div>
+    </form>
+  </>, { status, admin: true });
 }
 
 async function createMember(env, form) {
@@ -301,32 +368,64 @@ async function editor(env, member, { fields, message = '', status = 200, checkou
     ['Billing name (Stripe)', member.billing_name], ['Billing email (Stripe)', member.billing_email],
   ];
   const path = memberPath(member);
-  return page(`Edit ${memberName(member)}`, `<p class="admin-back"><a href="/admin">← All members</a></p>${notice(message, status >= 400)}
-    <section class="admin-member-summary" aria-label="Subscription summary"><div class="admin-summary-line">${statusBadge(member)}${subscriptionLink(member, env)}</div></section>
-    <div class="admin-editor-layout"><form method="post" action="${e(path)}" class="admin-form admin-editor">
-    <button class="sr-only" type="submit" tabindex="-1" aria-hidden="true">Save changes</button>
-    <input type="hidden" name="metadata_version" value="${e(f.metadata_version)}">
-    <section class="admin-section" aria-labelledby="member-settings"><h2 id="member-settings">Member settings</h2>
-    ${input('name_override', 'Name override', f.name_override, 160)}
-    <div class="admin-field" aria-label="Saved fob status"><span class="admin-status admin-status--${member.fob_enabled ? 'active' : 'inactive'}">Fob ${member.fob_enabled ? 'enabled' : 'disabled'}</span></div>
-    ${input('fob_id', 'Fob ID', f.fob_id, 10)}
-    ${checkbox('non_billable', 'Non-billable', f.non_billable)}
-    ${checkbox('legacy_billing', 'Legacy billing', f.legacy_billing)}
-    <details class="admin-billing admin-linked-accounts"${checkout || status >= 400 ? ' open' : ''}><summary>Billing info</summary>
-    <p class="admin-help">Used for new checkouts only. Generating a link saves these choices. Manage existing subscriptions in Stripe.</p>${billingSelects(f)}
-    <div class="admin-actions"><button class="btn btn-outline" type="submit" formaction="${e(path)}/checkout">Generate checkout link</button></div>
-    <p class="admin-help">Share this Stripe link with the member, even before they link Discord. A signed waiver is still required for door access.</p>
-    ${checkout ? `<div class="admin-field"><label for="checkout-url">Shareable Stripe checkout URL</label><input id="checkout-url" type="url" readonly value="${e(checkout)}"></div>` : ''}
-    </details><div class="admin-field"><label for="notes">Internal notes</label><textarea id="notes" name="notes" maxlength="5000" rows="4">${e(f.notes)}</textarea></div>
-    </section><details class="admin-section admin-linked-accounts"${status >= 400 ? ' open' : ''}><summary>Linked accounts <span>Edit Discord and Stripe IDs</span></summary><div class="admin-linked-fields">
-    ${input('discord_user_id', 'Discord ID', f.discord_user_id, 20, 'Changing this ID transfers membership to that Discord account.')}
-    ${input('stripe_customer_id', 'Stripe customer ID', f.stripe_customer_id, 255, 'The current subscription is read from this customer.')}
-    </div></details><div class="admin-actions"><button class="btn btn-primary" type="submit">Save changes</button><a href="${e(path)}">Reload member</a><button class="btn btn-outline" type="submit" form="sync-member">Sync with Stripe</button><button class="btn btn-outline admin-delete" type="submit" form="delete-member" disabled>Delete member</button></div></form>
-    <aside class="admin-section admin-account" aria-labelledby="account-details"><h2 id="account-details">Account details</h2><dl class="admin-account-fields">${account.map(([label, value]) => `<div><dt>${e(label)}</dt><dd>${e(value || '—')}</dd></div>`).join('')}<div><dt>Registered</dt><dd>${e(date(member.created))}</dd></div></dl></aside></div>
-    <form id="sync-member" method="post" action="${e(path)}/sync"></form>
-    <form id="delete-member" method="post" action="${e(path)}/delete" data-confirm="${e(`Delete ${memberName(member)}? This cannot be undone. Cancel any Stripe subscription separately.`)}"></form>
+  return page(`Edit ${memberName(member)}`, <>
+    <p class="admin-back"><a href="/admin">← All members</a></p>
+    {notice(message, status >= 400)}
+    <section class="admin-member-summary" aria-label="Subscription summary">
+      <div class="admin-summary-line">{statusBadge(member)}{subscriptionLink(member, env)}</div>
+    </section>
+    <div class="admin-editor-layout">
+      <form method="post" action={path} class="admin-form admin-editor">
+        <button class="sr-only" type="submit" tabindex="-1" aria-hidden="true">Save changes</button>
+        <input type="hidden" name="metadata_version" value={f.metadata_version ?? ''} />
+        <section class="admin-section" aria-labelledby="member-settings">
+          <h2 id="member-settings">Member settings</h2>
+          {input('name_override', 'Name override', f.name_override, 160)}
+          <div class="admin-field" aria-label="Saved fob status"><span class={`admin-status admin-status--${member.fob_enabled ? 'active' : 'inactive'}`}>Fob {member.fob_enabled ? 'enabled' : 'disabled'}</span></div>
+          {input('fob_id', 'Fob ID', f.fob_id, 10)}
+          {checkbox('non_billable', 'Non-billable', f.non_billable)}
+          {checkbox('legacy_billing', 'Legacy billing', f.legacy_billing)}
+          <details class="admin-billing admin-linked-accounts" open={!!checkout || status >= 400}>
+            <summary>Billing info</summary>
+            <p class="admin-help">Used for new checkouts only. Generating a link saves these choices. Manage existing subscriptions in Stripe.</p>
+            {billingSelects(f)}
+            <div class="admin-actions"><button class="btn btn-outline" type="submit" formaction={`${path}/checkout`}>Generate checkout link</button></div>
+            <p class="admin-help">Share this Stripe link with the member, even before they link Discord. A signed waiver is still required for door access.</p>
+            {checkout && <div class="admin-field"><label for="checkout-url">Shareable Stripe checkout URL</label><input id="checkout-url" type="url" readonly value={checkout} /></div>}
+          </details>
+          <div class="admin-field"><label for="notes">Internal notes</label><textarea id="notes" name="notes" maxlength="5000" rows="4">{f.notes}</textarea></div>
+        </section>
+        <details class="admin-section admin-linked-accounts" open={status >= 400}>
+          <summary>Linked accounts <span>Edit Discord and Stripe IDs</span></summary>
+          <div class="admin-linked-fields">
+            {input('discord_user_id', 'Discord ID', f.discord_user_id, 20, 'Changing this ID transfers membership to that Discord account.')}
+            {input('stripe_customer_id', 'Stripe customer ID', f.stripe_customer_id, 255, 'The current subscription is read from this customer.')}
+          </div>
+        </details>
+        <div class="admin-actions">
+          <button class="btn btn-primary" type="submit">Save changes</button>
+          <a href={path}>Reload member</a>
+          <button class="btn btn-outline" type="submit" form="sync-member">Sync with Stripe</button>
+          <button class="btn btn-outline admin-delete" type="submit" form="delete-member" disabled>Delete member</button>
+        </div>
+      </form>
+      <aside class="admin-section admin-account" aria-labelledby="account-details">
+        <h2 id="account-details">Account details</h2>
+        <dl class="admin-account-fields">
+          {account.map(([label, value]) => <div><dt>{label}</dt><dd>{value || '—'}</dd></div>)}
+          <div><dt>Registered</dt><dd>{date(member.created)}</dd></div>
+        </dl>
+      </aside>
+    </div>
+    <form id="sync-member" method="post" action={`${path}/sync`} />
+    <form id="delete-member" method="post" action={`${path}/delete`} data-confirm={`Delete ${memberName(member)}? This cannot be undone. Cancel any Stripe subscription separately.`} />
     <noscript><p class="admin-help">Enable JavaScript to delete a member with confirmation.</p></noscript>
-    <section class="card admin-section"><h2>Recent member history</h2>${eventTable(events, false)}<p><a href="${e(path)}/events">View full member history</a></p></section>`, { status, admin: true });
+    <section class="card admin-section">
+      <h2>Recent member history</h2>
+      {eventTable(events, false)}
+      <p><a href={`${path}/events`}>View full member history</a></p>
+    </section>
+  </>, { status, admin: true });
 }
 
 // ────────────────────────────────────────────────────────────────────────

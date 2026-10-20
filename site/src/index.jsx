@@ -1,11 +1,13 @@
 // Worker entrypoint. Static assets are served directly, except the gated kiosk
 // page; requests that match no asset reach these routes.
-import { HttpError, escapeHTML as e, json, logError, origin, page } from './lib.js';
-import { adminRequest } from './admin.js';
+import { h, Fragment } from './html.js';
+import { page } from './page.jsx';
+import { HttpError, json, logError, origin } from './lib.js';
+import { adminRequest } from './admin.jsx';
 import { callback, login, logout } from './auth.js';
 import { checkout, stripeWebhook } from './billing.js';
-import { bindFob, edgeJWKS, edgeSyncRequest, kioskClaim, kioskPage, machinesData, swipeWebhook } from './edge.js';
-import { signWaiver } from './waiver.js';
+import { bindFob, edgeJWKS, edgeSyncRequest, kioskClaim, kioskPage, machinesData, swipeWebhook } from './edge.jsx';
+import { signWaiver } from './waiver.jsx';
 
 const routes = {
   'GET /.well-known/edge-jwks.json': edgeJWKS,
@@ -46,7 +48,14 @@ export default {
       const status = error instanceof HttpError ? error.status : 500;
       const message = error instanceof HttpError ? error.message : 'Something went wrong. Please try again.';
       if (jsonPaths.some(p => path.startsWith(p))) return json({ error: message }, status);
-      return page('Let’s try that again', `<p>${e(message)}</p><div class="membership-actions"><a class="btn btn-primary" href="/">Back to TheLab</a><a class="btn btn-outline" href="https://discord.thelab.ms">Join our Discord</a></div><p class="card-desc">Need a hand? <a href="mailto:leadership@thelab.ms">Contact leadership</a>.</p>`, { status });
+      return page('Let’s try that again', <>
+        <p>{message}</p>
+        <div class="membership-actions">
+          <a class="btn btn-primary" href="/">Back to TheLab</a>
+          <a class="btn btn-outline" href="https://discord.thelab.ms">Join our Discord</a>
+        </div>
+        <p class="card-desc">Need a hand? <a href="mailto:leadership@thelab.ms">Contact leadership</a>.</p>
+      </>, { status });
     }
   },
 };

@@ -17,9 +17,6 @@ export const base64url = bytes => btoa(String.fromCharCode(...new Uint8Array(byt
 const fromBase64url = value => Uint8Array.from(atob(value.replaceAll('-', '+').replaceAll('_', '/')), c => c.charCodeAt(0));
 export const encodeJSON = value => base64url(encoder.encode(JSON.stringify(value)));
 
-export const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-const e = escapeHTML;
-
 export const origin = env => new URL(env.SITE_URL).origin;
 
 export function logError(event, error, context = {}) {
@@ -34,20 +31,6 @@ export function logError(event, error, context = {}) {
 // ────────────────────────────────────────────────────────────────────────
 // Responses and cookies
 // ────────────────────────────────────────────────────────────────────────
-
-const htmlHeaders = {
-  'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store',
-  // no-referrer can turn the Origin of a native form POST into "null".
-  'Referrer-Policy': 'same-origin', 'X-Content-Type-Options': 'nosniff',
-  'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
-};
-
-export function page(title, body, { status = 200, admin = false } = {}) {
-  const content = admin
-    ? `<header class="admin-header"><a class="membership-brand" href="/">TheLab</a><nav aria-label="Admin navigation"><a href="/admin">Members</a><a href="/admin/events">Events</a></nav><div class="admin-toolbar-actions"><form method="post" action="/logout"><button class="btn btn-outline" type="submit">Log Out</button></form></div></header><h1>${e(title)}</h1>${body}`
-    : `<a class="membership-brand" href="/"><img src="/assets/favicon.svg" alt="" width="48" height="48">TheLab</a><section class="card membership-message"><h1>${e(title)}</h1>${body}</section>`;
-  return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>${e(title)} | TheLab</title><link rel="icon" href="/assets/favicon.svg"><link rel="stylesheet" href="/style.css">${admin ? '<script src="/admin.js" defer></script>' : ''}</head><body class="membership-page${admin ? ' admin-page' : ''}"><main class="container membership-main${admin ? ' admin-main' : ''}">${content}</main></body></html>`, { status, headers: htmlHeaders });
-}
 
 export const json = (value, status = 200) => Response.json(value, { status, headers: { 'Cache-Control': 'no-store' } });
 

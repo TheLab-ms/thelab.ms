@@ -1,8 +1,10 @@
 // Edge proxy integration: signing, fob list pushes, swipes, kiosk claims, and printer tokens.
 import { renderSVG } from 'uqr';
+import { h, Fragment } from './html.js';
+import { page } from './page.jsx';
 import {
-  HttpError, base64url, currentMember, encodeJSON, escapeHTML as e, hex, json, logError, loginRedirect,
-  memberAccessSQL, memberQuery, fobEnabledSQL, now, origin, page, readSession, readToken, redirect, signToken,
+  HttpError, base64url, currentMember, encodeJSON, hex, json, logError, loginRedirect,
+  memberAccessSQL, memberQuery, fobEnabledSQL, now, origin, readSession, readToken, redirect, signToken,
 } from './lib.js';
 
 const encoder = new TextEncoder();
@@ -186,13 +188,19 @@ export async function bindFob(request, env) {
     if (request.method === 'GET') return loginRedirect(url.pathname + url.search);
     throw new HttpError(401, 'Your sign-in expired. Reload this enrollment link to sign in again.');
   }
-  const linkedPage = () => page('Fob linked', `<p role="status">Fob ${fob} is now linked to your membership.</p><p>You can close this page.</p>`);
+  const linkedPage = () => page('Fob linked', <>
+    <p role="status">Fob {fob} is now linked to your membership.</p>
+    <p>You can close this page.</p>
+  </>);
   if (request.method === 'GET') {
     if (member.fob_id === fob) return linkedPage();
-    return page('Link your fob', `<p>Signed in as <strong>${e(member.discord_username)}</strong>.</p><p>Link fob <strong>${fob}</strong> to your membership.</p>
-      ${member.fob_id ? `<p>This replaces fob <strong>${member.fob_id}</strong>, which will lose door access.</p>` : ''}
+    return page('Link your fob', <>
+      <p>Signed in as <strong>{member.discord_username}</strong>.</p>
+      <p>Link fob <strong>{fob}</strong> to your membership.</p>
+      {member.fob_id ? <p>This replaces fob <strong>{member.fob_id}</strong>, which will lose door access.</p> : null}
       <p>Door access follows your membership and waiver status.</p>
-      <form method="post" action="/keyfob/bind?token=${e(token)}"><button class="btn btn-primary" type="submit">Link fob</button></form>`);
+      <form method="post" action={`/keyfob/bind?token=${token}`}><button class="btn btn-primary" type="submit">Link fob</button></form>
+    </>);
   }
   let changed;
   try {

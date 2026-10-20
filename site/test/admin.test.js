@@ -56,6 +56,31 @@ describe('Admin', () => {
     expect((await get('/admin?page=bogus&waiver=bogus')).status).toBe(200);
   });
 
+  it('renders empty member and event tables', async () => {
+    expect(await (await get('/admin')).text()).toContain('<td colspan="2" class="admin-empty">No members match your search and filters.</td>');
+    const html = await (await get('/admin?waiver=all&discord=all')).text();
+    expect(html).toContain('0 registered members</strong>');
+    expect(html).toContain('<td colspan="2" class="admin-empty">No members have registered yet.</td>');
+    expect(await (await get('/admin/events')).text()).toContain('<td colspan="4">No member history found.</td>');
+  });
+
+  it('escapes editor content and preserves selected, checked, and empty field values', async () => {
+    const member = await insertMember({
+      name_override: 'Maker "<&>', notes: '</textarea><script>alert(1)</script>',
+      non_billable: 1, bill_annually: 1, discount_type: 'student',
+    });
+    const html = await (await get(`/admin/members/${member.member_id}`)).text();
+    expect(html).toContain('<title>Edit Maker &quot;&lt;&amp;&gt; | TheLab</title>');
+    expect(html).toContain('name="name_override" type="text" value="Maker &quot;&lt;&amp;&gt;"');
+    expect(html).toContain('data-confirm="Delete Maker &quot;&lt;&amp;&gt;? This cannot be undone.');
+    expect(html).toContain('rows="4">&lt;/textarea&gt;&lt;script&gt;alert(1)&lt;/script&gt;</textarea>');
+    expect(html).toContain('name="non_billable" type="checkbox" checked>');
+    expect(html).toContain('name="legacy_billing" type="checkbox">');
+    expect(html).toContain('<option value="yearly" selected>Yearly</option>');
+    expect(html).toContain('<option value="student" selected>Student</option>');
+    expect(html).toContain('name="fob_id" type="text" value=""');
+  });
+
   it('creates members, verifying Discord accounts and rejecting duplicates with the draft kept', async () => {
     quiet();
     mockFetch([guildMember('333333333333333333')]);

@@ -3,7 +3,7 @@ import {
   HttpError, currentMember, discord, grantsMembership, isOngoingSubscription, loginRedirect, now, origin, redirect,
   selectCurrentSubscription, stripe, stripeList, verifyStripe,
 } from './lib.js';
-import { pushFobs } from './edge.js';
+import { pushFobs } from './edge.jsx';
 
 export async function setDiscordRole(env, discordUserID, granted) {
   if (!discordUserID) return;

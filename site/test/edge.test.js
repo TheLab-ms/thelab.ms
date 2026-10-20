@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:workers';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { edgeEventKey, edgeJWKS, edgeToken, pushFobs } from '../src/edge.js';
+import { edgeEventKey, edgeJWKS, edgeToken, pushFobs } from '../src/edge.jsx';
 import { encodeJSON, now, randomToken, signToken } from '../src/lib.js';
 import { addWaiver, call, edgeEnv, insertMember, post, quiet, readMember, resetDB, session } from './helpers.js';
 

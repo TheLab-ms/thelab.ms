@@ -1,7 +1,7 @@
 import { env } from 'cloudflare:workers';
 import { applyD1Migrations, createExecutionContext, reset, waitOnExecutionContext } from 'cloudflare:test';
 import { vi } from 'vitest';
-import worker from '../src/index.js';
+import worker from '../src/index.jsx';
 import { clearPriceCache } from '../src/billing.js';
 import { hex, sessionCookie } from '../src/lib.js';
 
