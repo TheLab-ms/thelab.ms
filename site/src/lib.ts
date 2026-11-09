@@ -99,6 +99,33 @@ export interface WalletEntry {
   details: string;
 }
 
+export interface CalendarEvent {
+  event_id: string;
+  organizer_id: string | null;
+  revision: string;
+  cancel_from: number | null;
+  created: number;
+}
+
+export interface CalendarSchedule {
+  event_id: string;
+  first_occurrence: number;
+  schedule: string;
+}
+
+export interface CalendarOverride {
+  event_id: string;
+  occurrence: number;
+  schedule: string;
+}
+
+export interface CalendarRSVP {
+  event_id: string;
+  occurrence: number;
+  member_id: string;
+  created: number;
+}
+
 // Cents in, "$12.50" out; negative amounts keep their sign.
 export const formatMoney = (cents: number) => `${cents < 0 ? '-' : ''}$${(Math.abs(cents) / 100).toFixed(2)}`;
 

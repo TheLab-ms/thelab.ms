@@ -59,22 +59,22 @@ interface Elements {
   html: { lang: string };
   img: { src: string; alt: string; width?: Numeric; height?: Numeric };
   input: {
-    type?: 'checkbox' | 'email' | 'hidden' | 'number' | 'search' | 'text' | 'url'; name?: string; value?: Optional<string | number>;
+    type?: 'checkbox' | 'email' | 'hidden' | 'number' | 'search' | 'text' | 'url' | 'date' | 'datetime-local'; name?: string; value?: Optional<string | number>;
     maxlength?: Optional<Numeric>; min?: Optional<Numeric>; max?: Optional<Numeric>; step?: Optional<Numeric>; inputmode?: 'decimal' | 'numeric';
     placeholder?: string; checked?: boolean; readonly?: boolean; disabled?: boolean; required?: boolean;
   };
   label: { for: string };
   link: { rel: 'icon' | 'stylesheet'; href: string };
   meta: { charset: 'utf-8' } | { name: string; content: string };
-  option: { value: string; selected?: boolean };
+  option: { value: string; selected?: boolean; disabled?: boolean };
   script: { src: string; defer?: boolean };
-  select: { name: string; disabled?: boolean };
+  select: { name: string; disabled?: boolean; required?: boolean };
   td: { colspan?: Numeric };
   textarea: { name: string; maxlength?: Numeric; rows?: Numeric };
   th: { scope?: 'col' | 'row' };
 }
 
-type PlainTag = 'aside' | 'body' | 'dd' | 'div' | 'dl' | 'dt' | 'h1' | 'h2' | 'head' | 'header' | 'main' | 'nav' | 'noscript'
+type PlainTag = 'aside' | 'body' | 'dd' | 'div' | 'dl' | 'dt' | 'h1' | 'h2' | 'h3' | 'head' | 'header' | 'main' | 'nav' | 'noscript'
   | 'p' | 'section' | 'small' | 'span' | 'strong' | 'summary' | 'table' | 'tbody' | 'thead' | 'title' | 'tr';
 
 export declare namespace h.JSX {

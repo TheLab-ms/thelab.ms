@@ -9,14 +9,14 @@ const htmlHeaders = (checkout: boolean) => ({
 	'Content-Security-Policy': `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'${checkout ? ' https://checkout.stripe.com' : ''}; base-uri 'none'; frame-ancestors 'none'`,
 });
 
-interface PageOptions { status?: number; admin?: boolean; dev?: boolean; checkout?: boolean }
+interface PageOptions { status?: number; admin?: boolean; dev?: boolean; checkout?: boolean; wide?: boolean; afterCard?: Child }
 
 export function page(title: string, body: Child, options: PageOptions = {}) {
 	const { status = 200, admin = false, checkout = false } = options;
 	const content = admin ? <>
 		<header class="admin-header">
 			<a class="membership-brand" href="/">TheLab</a>
-			<nav aria-label="Admin navigation"><a href="/admin">Members</a><a href="/admin/events">Events</a></nav>
+			<nav aria-label="Admin navigation"><a href="/admin">Members</a><a href="/admin/events">Events</a><a href="/events">Calendar</a></nav>
 			<div class="admin-toolbar-actions">
 				<form method="post" action="/logout"><button class="btn btn-outline" type="submit">Log Out</button></form>
 			</div>
@@ -28,6 +28,7 @@ export function page(title: string, body: Child, options: PageOptions = {}) {
 		<section class="card membership-message">
 			<h1>{title}</h1>{body}
 		</section>
+		{options.afterCard}
 	</>;
 	const document = <html lang="en">
 		<head>
@@ -40,7 +41,7 @@ export function page(title: string, body: Child, options: PageOptions = {}) {
 			{admin && <script src="/admin.js" defer />}
 		</head>
 		<body class={`membership-page${admin ? ' admin-page' : ''}`}>
-			<main class={`container membership-main${admin ? ' admin-main' : ''}`}>{content}</main>
+			<main class={`container membership-main${admin ? ' admin-main' : ''}${options.wide ? ' event-main' : ''}`}>{content}</main>
 		</body>
 	</html>;
 	return new Response(`<!doctype html>${render(document)}`, { status, headers: htmlHeaders(checkout) });

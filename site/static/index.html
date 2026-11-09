@@ -72,6 +72,7 @@
       <ul class="nav-menu" id="nav-menu">
         <li><a href="#about" class="nav-link">About</a></li>
         <li><a href="#equipment" class="nav-link">Facilities</a></li>
+        <li><a href="#events" class="nav-link">Events</a></li>
         <li><a href="#support" class="nav-link">Give</a></li>
         <li><a href="#membership" class="nav-link nav-cta">Join</a></li>
       </ul>
@@ -367,6 +368,26 @@
     </div>
   </section>
 
+  <!-- ======= EVENTS ======= -->
+  <section class="section section-divider-top" id="events">
+    <div class="container">
+      <div class="section-header">
+        <h2 class="section-title">Events</h2>
+        <div class="section-line"></div>
+      </div>
+      <div id="event-calendar">
+        <div class="calendar-toolbar">
+          <button class="btn btn-outline" type="button" id="calendar-prev" aria-label="Previous month">←</button>
+          <h3 id="calendar-month">Events</h3>
+          <button class="btn btn-outline" type="button" id="calendar-next" aria-label="Next month">→</button>
+        </div>
+        <p id="calendar-status" role="status" aria-live="polite">Loading events…</p>
+        <div id="calendar-grid" class="calendar-grid"></div>
+        <div id="calendar-agenda" class="calendar-agenda"></div>
+      </div>
+    </div>
+  </section>
+
   <!-- ======= WAYS TO GIVE ======= -->
   <section class="section support section-accent-top" id="support">
     <div class="container">
@@ -465,5 +486,6 @@
   </footer>
 
   <script src="script.js"></script>
+  <script src="calendar.js" defer></script>
 </body>
 </html>

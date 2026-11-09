@@ -50,6 +50,51 @@
 }
 
 
+/* ---------- Calendar and event forms ---------- */
+.calendar-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin: 1.5rem 0; }
+.calendar-toolbar h2, .calendar-toolbar h3 { text-align: center; font-family: var(--font-heading); }
+.calendar-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 1px; background: var(--color-border); border: 1px solid var(--color-border); border-radius: var(--radius-md); overflow: hidden; }
+.calendar-grid:empty { display: none; }
+.calendar-weekday { background: var(--color-surface-alt); text-align: center; padding: .5rem; font-size: .8rem; }
+.calendar-day, .calendar-blank { min-height: 7rem; padding: .5rem; background: var(--color-bg-alt); }
+.calendar-day-number { display: block; font-size: .8rem; margin-bottom: .3rem; }
+.calendar-day--today { box-shadow: inset 0 0 0 2px var(--color-accent); }
+.calendar-event { display: block; padding: .5rem; margin: .3rem 0; border-left: 2px solid var(--color-accent); background: var(--color-accent-subtle); overflow-wrap: anywhere; font-size: .8rem; }
+.calendar-event span, .calendar-event small { display: block; color: var(--color-text-muted); }
+.calendar-event--cancelled { border-color: var(--color-text-dim); opacity: .7; }
+.calendar-event--cancelled strong { text-decoration: line-through; }
+.calendar-agenda { display: none; }
+.calendar-fallback { margin-top: 1rem; }
+.event-main { max-width: 1000px; }
+.event-main .membership-message { text-align: left; }
+.event-main h1, .event-main h2, .event-main h3 { margin-bottom: .75rem; }
+.event-main p { margin: .75rem 0; }
+.event-form { display: grid; gap: .65rem; margin: 1.5rem 0; }
+.event-form label { margin-top: .75rem; font-weight: 600; }
+.event-form input:not([type="checkbox"]), .event-form select, .event-form textarea { width: 100%; min-width: 0; min-height: 44px; padding: .65rem .75rem; background: var(--color-bg); color: var(--color-text); border: 1px solid var(--color-border-light); border-radius: var(--radius-sm); font: inherit; color-scheme: dark; }
+.event-form textarea { resize: vertical; }
+.event-form input[type="checkbox"] { width: 1.1rem; height: 1.1rem; accent-color: var(--color-accent); }
+.event-form button { justify-self: start; margin-top: .75rem; }
+.event-list-item, .event-main .event-rsvp-summary { margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid var(--color-border); }
+.event-management { margin-top: 1.5rem; }
+.event-description { overflow-wrap: anywhere; }
+.event-description :is(h2, h3, h4, h5, h6) { margin-top: 1.25rem; }
+.event-description :is(ul, ol) { margin: .75rem 0; padding-left: 1.5rem; }
+.event-description li { margin: .25rem 0; }
+.event-description blockquote { margin: .75rem 0; padding-left: 1rem; border-left: 3px solid var(--color-border-light); color: var(--color-text-muted); }
+.event-description code { padding: .15rem .3rem; border-radius: var(--radius-sm); background: var(--color-bg); font-family: monospace; }
+.event-description pre { margin: .75rem 0; padding: 1rem; overflow-x: auto; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg); }
+.event-description pre code { padding: 0; white-space: pre; overflow-wrap: normal; }
+.event-description hr { margin: 1.25rem 0; border: 0; border-top: 1px solid var(--color-border); }
+.event-main :is(a, button, input, select, textarea):focus-visible, #events :is(a, button):focus-visible { outline: 2px solid var(--color-accent); outline-offset: 3px; }
+.event-main button:disabled, #events button:disabled { opacity: .5; cursor: not-allowed; }
+@media (max-width: 767px) {
+  .calendar-grid { display: none; }
+  .calendar-agenda { display: block; }
+  .calendar-agenda .calendar-event { font-size: 1rem; padding: 1rem; margin-bottom: .75rem; }
+  .calendar-toolbar { gap: .5rem; font-size: .85rem; }
+}
+
 /* ---------- Reset & Base ---------- */
 *,
 *::before,

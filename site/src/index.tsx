@@ -10,6 +10,7 @@ import { checkout, stripeWebhook } from './billing.ts';
 import { bindFob, edgeJWKS, edgeSyncRequest, kioskClaim, kioskPage, machinesData, swipeWebhook } from './edge.tsx';
 import { signWaiver } from './waiver.tsx';
 import { redeem, redeemPage, walletPage, walletReceipt, walletTopup } from './wallet.tsx';
+import { eventsRequest } from './events.tsx';
 
 const routes = new Map<string, Handler>(Object.entries({
   'GET /.well-known/edge-jwks.json': edgeJWKS,
@@ -34,7 +35,7 @@ const routes = new Map<string, Handler>(Object.entries({
 } satisfies Record<`${'GET' | 'POST'} /${string}`, Handler>));
 
 // Machine clients receive JSON errors; people receive an HTML page.
-const jsonPaths = ['/machines/data', '/kiosk/claims', '/webhooks/'];
+const jsonPaths = ['/machines/data', '/events/data', '/kiosk/claims', '/webhooks/'];
 // Machine clients authenticate with credentials, not browser cookies.
 const crossOriginPaths = ['/kiosk/claims', '/webhooks/'];
 
@@ -48,6 +49,7 @@ export default {
         throw new HttpError(403, 'We couldn’t verify where this form came from. Reload the page and try again.');
       }
       const handler = routes.get(`${request.method} ${path}`)
+        ?? (path === '/events' || path.startsWith('/events/') ? eventsRequest : null)
         ?? (request.method === 'GET' && path.startsWith('/wallet/receipt/') ? walletReceipt : null)
         ?? (path === '/admin' || path.startsWith('/admin/') ? adminRequest : null);
       if (!handler) throw new HttpError(404, 'Page not found.');

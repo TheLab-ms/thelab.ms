@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:workers';
 import { beforeAll, describe, expect, it } from 'vitest';
-import type { Member, MemberEvent, WalletEntry } from '../src/lib.ts';
+import type { CalendarEvent, CalendarOverride, CalendarRSVP, CalendarSchedule, Member, MemberEvent, WalletEntry } from '../src/lib.ts';
 import { resetDB } from './helpers.ts';
 
 // The compiler derives each expected column from the row type, so these maps
@@ -26,6 +26,18 @@ const tables = {
     entry_id: 'NOT NULL INTEGER', member_id: 'NULL TEXT', created: 'NOT NULL INTEGER', amount: 'NOT NULL INTEGER',
     item: 'NOT NULL TEXT', key: 'NOT NULL TEXT', details: 'NOT NULL TEXT',
   } satisfies Columns<WalletEntry>,
+  calendar_events: {
+    event_id: 'NOT NULL TEXT', organizer_id: 'NULL TEXT', revision: 'NOT NULL TEXT', cancel_from: 'NULL INTEGER', created: 'NOT NULL INTEGER',
+  } satisfies Columns<CalendarEvent>,
+  calendar_schedules: {
+    event_id: 'NOT NULL TEXT', first_occurrence: 'NOT NULL INTEGER', schedule: 'NOT NULL TEXT',
+  } satisfies Columns<CalendarSchedule>,
+  calendar_overrides: {
+    event_id: 'NOT NULL TEXT', occurrence: 'NOT NULL INTEGER', schedule: 'NOT NULL TEXT',
+  } satisfies Columns<CalendarOverride>,
+  calendar_rsvps: {
+    event_id: 'NOT NULL TEXT', occurrence: 'NOT NULL INTEGER', member_id: 'NOT NULL TEXT', created: 'NOT NULL INTEGER',
+  } satisfies Columns<CalendarRSVP>,
 };
 
 describe('Row types', () => {
