@@ -1,54 +1,78 @@
 // Waiver signatures. The waiver text and form live in static/waiver.html.
 import { h, Fragment } from './html.ts';
 import { page } from './page.tsx';
-import {
-  HttpError, currentMember, grantsMembership, origin, provider, readForm, redirect, validEmail,
-} from './lib.ts';
+import { HttpError, currentMember, grantsMembership, origin, provider, readForm, redirect, validEmail } from './lib.ts';
 import { pushFobs } from './edge.tsx';
 import { devAuth } from './dev.tsx';
 
 async function verifyHuman(request: Request, env: Env, token: string | undefined) {
-  if (!env.TURNSTILE_SECRET_KEY) return;
-  if (!token) throw new HttpError(400, 'Please complete the human verification and try again.');
-  const result = await provider<Partial<Record<'success' | 'hostname' | 'action', unknown>>>('Cloudflare verification', 'https://challenges.cloudflare.com/turnstile/v0/siteverify', {
-    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ secret: env.TURNSTILE_SECRET_KEY, response: token, remoteip: request.headers.get('CF-Connecting-IP') || '' }).toString(),
-  });
-  if (result.success !== true || result.hostname !== new URL(origin(env)).hostname || result.action !== 'waiver') {
-    throw new HttpError(400, 'Human verification failed or expired. Please go back and complete it again.');
-  }
+	if (!env.TURNSTILE_SECRET_KEY) return;
+	if (!token) throw new HttpError(400, 'Please complete the human verification and try again.');
+	const result = await provider<Partial<Record<'success' | 'hostname' | 'action', unknown>>>(
+		'Cloudflare verification',
+		'https://challenges.cloudflare.com/turnstile/v0/siteverify',
+		{
+			method: 'POST',
+			headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({
+				secret: env.TURNSTILE_SECRET_KEY,
+				response: token,
+				remoteip: request.headers.get('CF-Connecting-IP') || '',
+			}).toString(),
+		},
+	);
+	if (result.success !== true || result.hostname !== new URL(origin(env)).hostname || result.action !== 'waiver') {
+		throw new HttpError(400, 'Human verification failed or expired. Please go back and complete it again.');
+	}
 }
 
 export async function signWaiver(request: Request, env: Env) {
-  const form = await readForm(request);
-  const name = (form.name || '').trim(), email = (form.email || '').trim().toLowerCase();
-  if (form.agree_signature !== 'on' || form.agree_terms !== 'on') throw new HttpError(400, 'You must agree to all waiver terms.');
-  if (!name || name.length > 160 || /[\x00-\x1f\x7f]/.test(name)) throw new HttpError(400, 'Enter your legal name (up to 160 characters).');
-  if (!validEmail(email)) throw new HttpError(400, 'Enter a valid email address.');
-  await verifyHuman(request, env, form['cf-turnstile-response']);
+	const form = await readForm(request);
+	const name = (form.name || '').trim(),
+		email = (form.email || '').trim().toLowerCase();
+	if (form.agree_signature !== 'on' || form.agree_terms !== 'on')
+		throw new HttpError(400, 'You must agree to all waiver terms.');
+	// biome-ignore lint/suspicious/noControlCharactersInRegex: Legal names must not contain control characters.
+	if (!name || name.length > 160 || /[\x00-\x1f\x7f]/.test(name))
+		throw new HttpError(400, 'Enter your legal name (up to 160 characters).');
+	if (!validEmail(email)) throw new HttpError(400, 'Enter a valid email address.');
+	await verifyHuman(request, env, form['cf-turnstile-response']);
 
-  // Signed-in members sign for their own membership. Otherwise match the
-  // email, creating a pre-registered member, but never pick between two.
-  const member = await currentMember(request, env);
-  const insert = `INSERT INTO waivers (name, email, content, agreements, member_id)`;
-  let signed;
-  if (member) {
-    signed = await env.DB.prepare(`${insert} VALUES (?, ?, '', '[]', ?) RETURNING id`).bind(name, email, member.member_id).first<{ id: number }>();
-  } else {
-    const [, inserted] = await env.DB.batch<{ id: number }>([
-      env.DB.prepare(`INSERT INTO members (email) SELECT ?1 WHERE NOT EXISTS
+	// Signed-in members sign for their own membership. Otherwise match the
+	// email, creating a pre-registered member, but never pick between two.
+	const member = await currentMember(request, env);
+	const insert = `INSERT INTO waivers (name, email, content, agreements, member_id)`;
+	let signed: { id: number } | null | undefined;
+	if (member) {
+		signed = await env.DB.prepare(`${insert} VALUES (?, ?, '', '[]', ?) RETURNING id`)
+			.bind(name, email, member.member_id)
+			.first<{ id: number }>();
+	} else {
+		const [, inserted] = await env.DB.batch<{ id: number }>([
+			env.DB.prepare(`INSERT INTO members (email) SELECT ?1 WHERE NOT EXISTS
         (SELECT 1 FROM members WHERE email = ?1 OR discord_email = ?1) ON CONFLICT DO NOTHING`).bind(email),
-      env.DB.prepare(`${insert} SELECT ?1, ?2, '', '[]', member_id FROM members WHERE (email = ?2 OR discord_email = ?2)
+			env.DB.prepare(`${insert} SELECT ?1, ?2, '', '[]', member_id FROM members WHERE (email = ?2 OR discord_email = ?2)
         AND (SELECT COUNT(*) FROM members WHERE email = ?2 OR discord_email = ?2) = 1 RETURNING id`).bind(name, email),
-    ]);
-    signed = inserted?.results[0];
-  }
-  if (!signed) throw new HttpError(409, 'We couldn’t link your waiver to a membership. Please contact leadership.');
-  await pushFobs(env);
-  if (member && !member.non_billable && !member.legacy_billing && !grantsMembership(member.stripe_subscription_state)) return redirect('/checkout');
-  return page('Waiver signed', <>
-    <p role="status">Thanks, {name}. Your waiver has been recorded.</p>
-    <p>Signature #{signed.id} · {email} · {new Date().toISOString()}</p>
-    <div class="membership-actions"><a class="btn btn-primary" href="/">Done</a></div>
-  </>, { dev: devAuth(env) });
+		]);
+		signed = inserted?.results[0];
+	}
+	if (!signed) throw new HttpError(409, 'We couldn’t link your waiver to a membership. Please contact leadership.');
+	await pushFobs(env);
+	if (member && !member.non_billable && !member.legacy_billing && !grantsMembership(member.stripe_subscription_state))
+		return redirect('/checkout');
+	return page(
+		'Waiver signed',
+		<>
+			<p role="status">Thanks, {name}. Your waiver has been recorded.</p>
+			<p>
+				Signature #{signed.id} · {email} · {new Date().toISOString()}
+			</p>
+			<div class="membership-actions">
+				<a class="btn btn-primary" href="/">
+					Done
+				</a>
+			</div>
+		</>,
+		{ dev: devAuth(env) },
+	);
 }

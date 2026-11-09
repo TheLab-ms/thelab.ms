@@ -12,27 +12,29 @@ import { signWaiver } from './waiver.tsx';
 import { redeem, redeemPage, walletPage, walletReceipt, walletTopup } from './wallet.tsx';
 import { eventsRequest } from './events.tsx';
 
-const routes = new Map<string, Handler>(Object.entries({
-  'GET /.well-known/edge-jwks.json': edgeJWKS,
-  'GET /login': (request, env) => devAuth(env) ? devLogin(request, env) : login(request, env),
-  'GET /login/callback': callback,
-  'GET /dev/login': devLogin,
-  'POST /logout': logout,
-  'GET /checkout': checkout,
-  'GET /wallet': walletPage,
-  'GET /wallet/topup': walletTopup,
-  'GET /wallet/redeem': redeemPage,
-  'POST /wallet/redeem': redeem,
-  'POST /waiver/sign': signWaiver,
-  'GET /machines/data': machinesData,
-  'GET /keyfob/bind': bindFob,
-  'POST /keyfob/bind': bindFob,
-  'GET /kiosk': kioskPage,
-  'POST /kiosk/claims': kioskClaim,
-  'POST /webhooks/stripe': stripeWebhook,
-  'POST /webhooks/edge/swipes': swipeWebhook,
-  'POST /webhooks/edge/sync': edgeSyncRequest,
-} satisfies Record<`${'GET' | 'POST'} /${string}`, Handler>));
+const routes = new Map<string, Handler>(
+	Object.entries({
+		'GET /.well-known/edge-jwks.json': edgeJWKS,
+		'GET /login': (request, env) => (devAuth(env) ? devLogin(request, env) : login(request, env)),
+		'GET /login/callback': callback,
+		'GET /dev/login': devLogin,
+		'POST /logout': logout,
+		'GET /checkout': checkout,
+		'GET /wallet': walletPage,
+		'GET /wallet/topup': walletTopup,
+		'GET /wallet/redeem': redeemPage,
+		'POST /wallet/redeem': redeem,
+		'POST /waiver/sign': signWaiver,
+		'GET /machines/data': machinesData,
+		'GET /keyfob/bind': bindFob,
+		'POST /keyfob/bind': bindFob,
+		'GET /kiosk': kioskPage,
+		'POST /kiosk/claims': kioskClaim,
+		'POST /webhooks/stripe': stripeWebhook,
+		'POST /webhooks/edge/swipes': swipeWebhook,
+		'POST /webhooks/edge/sync': edgeSyncRequest,
+	} satisfies Record<`${'GET' | 'POST'} /${string}`, Handler>),
+);
 
 // Machine clients receive JSON errors; people receive an HTML page.
 const jsonPaths = ['/machines/data', '/events/data', '/kiosk/claims', '/webhooks/'];
@@ -40,33 +42,51 @@ const jsonPaths = ['/machines/data', '/events/data', '/kiosk/claims', '/webhooks
 const crossOriginPaths = ['/kiosk/claims', '/webhooks/'];
 
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
-    const url = new URL(request.url);
-    const path = url.pathname;
-    try {
-      // Browser POSTs must come from our own pages; cookies are SameSite=Lax as well.
-      if (request.method === 'POST' && !crossOriginPaths.some(p => path.startsWith(p)) && request.headers.get('Origin') !== origin(env)) {
-        throw new HttpError(403, 'We couldn’t verify where this form came from. Reload the page and try again.');
-      }
-      const handler = routes.get(`${request.method} ${path}`)
-        ?? (path === '/events' || path.startsWith('/events/') ? eventsRequest : null)
-        ?? (request.method === 'GET' && path.startsWith('/wallet/receipt/') ? walletReceipt : null)
-        ?? (path === '/admin' || path.startsWith('/admin/') ? adminRequest : null);
-      if (!handler) throw new HttpError(404, 'Page not found.');
-      return await handler(request, env, ctx);
-    } catch (error) {
-      logError('request.failed', error, { method: request.method, path });
-      const status = error instanceof HttpError ? error.status : 500;
-      const message = error instanceof HttpError ? error.message : 'Something went wrong. Please try again.';
-      if (jsonPaths.some(p => path.startsWith(p))) return json({ error: message }, status);
-      return page('Let’s try that again', <>
-        <p>{message}</p>
-        <div class="membership-actions">
-          <a class="btn btn-primary" href="/">Back to TheLab</a>
-          <a class="btn btn-outline" href="https://discord.thelab.ms">Join our Discord</a>
-        </div>
-        <p class="card-desc">Need a hand? <a href="mailto:leadership@thelab.ms">Contact leadership</a>.</p>
-      </>, { status, dev: devAuth(env) });
-    }
-  },
+	async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+		const url = new URL(request.url);
+		const path = url.pathname;
+		try {
+			// Browser POSTs must come from our own pages; cookies are SameSite=Lax as well.
+			if (
+				request.method === 'POST' &&
+				!crossOriginPaths.some(p => path.startsWith(p)) &&
+				request.headers.get('Origin') !== origin(env)
+			) {
+				throw new HttpError(
+					403,
+					'We couldn’t verify where this form came from. Reload the page and try again.',
+				);
+			}
+			const handler =
+				routes.get(`${request.method} ${path}`) ??
+				(path === '/events' || path.startsWith('/events/') ? eventsRequest : null) ??
+				(request.method === 'GET' && path.startsWith('/wallet/receipt/') ? walletReceipt : null) ??
+				(path === '/admin' || path.startsWith('/admin/') ? adminRequest : null);
+			if (!handler) throw new HttpError(404, 'Page not found.');
+			return await handler(request, env, ctx);
+		} catch (error) {
+			logError('request.failed', error, { method: request.method, path });
+			const status = error instanceof HttpError ? error.status : 500;
+			const message = error instanceof HttpError ? error.message : 'Something went wrong. Please try again.';
+			if (jsonPaths.some(p => path.startsWith(p))) return json({ error: message }, status);
+			return page(
+				'Let’s try that again',
+				<>
+					<p>{message}</p>
+					<div class="membership-actions">
+						<a class="btn btn-primary" href="/">
+							Back to TheLab
+						</a>
+						<a class="btn btn-outline" href="https://discord.thelab.ms">
+							Join our Discord
+						</a>
+					</div>
+					<p class="card-desc">
+						Need a hand? <a href="mailto:leadership@thelab.ms">Contact leadership</a>.
+					</p>
+				</>,
+				{ status, dev: devAuth(env) },
+			);
+		}
+	},
 } satisfies ExportedHandler<Env>;

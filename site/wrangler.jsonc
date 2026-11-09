@@ -38,34 +38,23 @@
 	"migrations": [
 		{
 			"tag": "v1",
-			"new_sqlite_classes": [
-				"Membership",
-				"EdgeSync"
-			]
+			"new_sqlite_classes": ["Membership", "EdgeSync"]
 		},
 		{
 			"tag": "v2-wiki",
-			"new_sqlite_classes": [
-				"Wiki"
-			]
+			"new_sqlite_classes": ["Wiki"]
 		},
 		{
 			"tag": "v3-remove-wiki",
-			"deleted_classes": [
-				"Wiki"
-			]
+			"deleted_classes": ["Wiki"]
 		},
 		{
 			"tag": "v4-remove-edge-sync",
-			"deleted_classes": [
-				"EdgeSync"
-			]
+			"deleted_classes": ["EdgeSync"]
 		},
 		{
 			"tag": "v5-remove-membership",
-			"deleted_classes": [
-				"Membership"
-			]
+			"deleted_classes": ["Membership"]
 		}
 	],
 	"secrets": {

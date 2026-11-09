@@ -1,0 +1,43 @@
+{
+	"$schema": "https://biomejs.dev/schemas/2.6.6/schema.json",
+	"vcs": {
+		"enabled": true,
+		"clientKind": "git",
+		"root": "..",
+		"useIgnoreFile": true
+	},
+	"files": {
+		"includes": ["**", "!**/package-lock.json", "!**/worker-configuration.d.ts"]
+	},
+	"formatter": {
+		"indentStyle": "tab",
+		"indentWidth": 4,
+		"lineWidth": 120
+	},
+	"javascript": {
+		"formatter": {
+			"quoteStyle": "single",
+			"arrowParentheses": "asNeeded"
+		},
+		"jsxRuntime": "reactClassic"
+	},
+	"html": {
+		"experimentalFullSupportEnabled": true
+	},
+	"linter": {
+		"enabled": true,
+		"rules": {
+			"preset": "recommended"
+		}
+	},
+	"overrides": [
+		{
+			"includes": ["test/**"],
+			"linter": {
+				"rules": {
+					"style": { "noNonNullAssertion": "off" }
+				}
+			}
+		}
+	]
+}
