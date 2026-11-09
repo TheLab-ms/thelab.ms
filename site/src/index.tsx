@@ -5,6 +5,7 @@ import { page } from './page.tsx';
 import { HttpError, json, logError, origin, type Handler } from './lib.ts';
 import { adminRequest } from './admin.tsx';
 import { callback, login, logout } from './auth.ts';
+import { devAuth, devLogin } from './dev.tsx';
 import { checkout, stripeWebhook } from './billing.ts';
 import { bindFob, edgeJWKS, edgeSyncRequest, kioskClaim, kioskPage, machinesData, swipeWebhook } from './edge.tsx';
 import { signWaiver } from './waiver.tsx';
@@ -12,8 +13,9 @@ import { redeem, redeemPage, walletPage, walletReceipt, walletTopup } from './wa
 
 const routes = new Map<string, Handler>(Object.entries({
   'GET /.well-known/edge-jwks.json': edgeJWKS,
-  'GET /login': login,
+  'GET /login': (request, env) => devAuth(env) ? devLogin(request, env) : login(request, env),
   'GET /login/callback': callback,
+  'GET /dev/login': devLogin,
   'POST /logout': logout,
   'GET /checkout': checkout,
   'GET /wallet': walletPage,
@@ -62,7 +64,7 @@ export default {
           <a class="btn btn-outline" href="https://discord.thelab.ms">Join our Discord</a>
         </div>
         <p class="card-desc">Need a hand? <a href="mailto:leadership@thelab.ms">Contact leadership</a>.</p>
-      </>, { status });
+      </>, { status, dev: devAuth(env) });
     }
   },
 } satisfies ExportedHandler<Env>;

@@ -1,15 +1,13 @@
 // Discord sign-in. One session cookie serves members and admins.
 import {
   HttpError, ProviderError, discord, discordID, getCookie, grantsMembership, isRecord, provider, randomToken, origin, redirect,
-  sessionCookie, setCookie, validEmail,
+  safeNext, sessionCookie, setCookie, validEmail,
   type GuildMember, type Member,
 } from './lib.ts';
 import { syncDiscordRole } from './billing.ts';
+import { devAuth } from './dev.tsx';
 
 const callbackURL = (env: Env) => `${origin(env)}/login/callback`;
-// Only same-site paths survive the OAuth round trip. Browsers drop tabs and
-// newlines from redirect URLs, so "/\t/evil.example" would become "//evil.example".
-const safeNext = (value: unknown) => typeof value === 'string' && /^\/(?![/\\])[^\x00-\x1f\x7f]*$/.test(value) ? value : '/';
 
 export function login(request: Request, env: Env) {
   if (!env.DISCORD_CLIENT_ID || !env.DISCORD_CLIENT_SECRET) throw new HttpError(503, 'Sign-in is temporarily unavailable. Please contact leadership.');
@@ -92,7 +90,7 @@ export async function callback(request: Request, env: Env) {
 }
 
 export function logout(_request: Request, env: Env) {
-  const response = redirect('/');
+  const response = redirect(devAuth(env) ? '/dev/login' : '/');
   response.headers.append('Set-Cookie', setCookie(env, 'thelab_session', '', 0));
   response.headers.append('Set-Cookie', setCookie(env, 'thelab_wallet', '', 0));
   return response;

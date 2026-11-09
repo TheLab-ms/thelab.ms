@@ -9,6 +9,7 @@ import {
 import { checkoutLink, setDiscordRole, syncDiscordRole, syncMember } from './billing.ts';
 import { pushFobs } from './edge.tsx';
 import { adjustWallet } from './wallet.tsx';
+import { devAuth } from './dev.tsx';
 
 const PAGE_SIZE = 25;
 const labelDiscount = (value: Discount) => value === '' ? 'Standard rate' : value === 'firstResponder' ? 'First responder' : value.charAt(0).toUpperCase() + value.slice(1);
@@ -189,7 +190,7 @@ async function memberList(url: URL, env: Env) {
       </table>
     </div>
     {pagination('Member pages', current, pages, n => listURL(n, query, values))}
-  </>, { admin: true });
+  </>, { admin: true, dev: devAuth(env) });
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -292,7 +293,7 @@ async function history(url: URL, env: Env, member?: Member) {
     <p>{total} event{total === 1 ? '' : 's'}.</p>
     {eventTable((rows?.results ?? []) as HistoryEvent[], !member)}
     {pagination('History pages', current, pages, pageURL)}
-  </>, { admin: true });
+  </>, { admin: true, dev: devAuth(env) });
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -350,7 +351,7 @@ const conflict = (error: unknown) => {
   return error;
 };
 
-function newMemberForm(fields?: Fields, message = '', status = 200) {
+function newMemberForm(env: Env, fields?: Fields, message = '', status = 200) {
   const f = fields || { billing: 'monthly', discount_type: '' };
   return page('New member', <>
     <p class="admin-back"><a href="/admin">← All members</a></p>
@@ -363,7 +364,7 @@ function newMemberForm(fields?: Fields, message = '', status = 200) {
       <div class="admin-field"><label for="notes">Internal notes</label><textarea id="notes" name="notes" maxlength="5000" rows="4">{f.notes}</textarea></div>
       <div class="admin-actions"><button class="btn btn-primary" type="submit">Create member</button><a href="/admin">Cancel</a></div>
     </form>
-  </>, { status, admin: true });
+  </>, { status, admin: true, dev: devAuth(env) });
 }
 
 async function createMember(env: Env, form: Form) {
@@ -503,7 +504,7 @@ async function editor(env: Env, member: AdminMember, { fields, message = '', sta
       {eventTable(events, false)}
       <p><a href={`${path}/events`}>View full member history</a></p>
     </section>
-  </>, { status, admin: true });
+  </>, { status, admin: true, dev: devAuth(env) });
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -522,13 +523,13 @@ export async function adminRequest(request: Request, env: Env) {
   const route = `${request.method} ${path}`;
   if (route === 'GET /admin') return memberList(url, env);
   if (route === 'GET /admin/events') return history(url, env);
-  if (route === 'GET /admin/members/new') return newMemberForm();
+  if (route === 'GET /admin/members/new') return newMemberForm(env);
   if (route === 'POST /admin/members/new') {
     const form = await readForm(request);
     try { return redirect(`${memberPath(await createMember(env, form))}?notice=created`); }
     catch (error) {
       if (!(error instanceof HttpError)) throw error;
-      return newMemberForm(form, error.message, error.status);
+      return newMemberForm(env, form, error.message, error.status);
     }
   }
   const match = path.match(/^\/admin\/members\/([a-f0-9]{32})(\/events|\/checkout|\/sync|\/delete|\/wallet)?$/);

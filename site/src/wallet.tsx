@@ -6,6 +6,7 @@ import {
   type Form, type Member, type WalletEntry,
 } from './lib.ts';
 import { ensureCustomer } from './billing.ts';
+import { devAuth } from './dev.tsx';
 
 const TOPUP_MIN = 500, TOPUP_MAX = 20000;
 
@@ -135,7 +136,7 @@ export async function walletPage(request: Request, env: Env) {
         </table>
       </div> : <p class="card-desc">No activity yet.</p>}
     </section>
-  </div>);
+  </div>, { dev: devAuth(env) });
   return withCookie(response, identity.cookie);
 }
 
@@ -182,7 +183,7 @@ export async function walletTopup(request: Request, env: Env) {
 // Redemption
 // ────────────────────────────────────────────────────────────────────────
 
-function itemPage(member: WalletMember, spec: ItemSpec, key: string, { message = '', status = 200 } = {}) {
+function itemPage(member: WalletMember, spec: ItemSpec, key: string, { message = '', status = 200, dev = false } = {}) {
   const amount = spec.unit ? 0 : Math.round(spec.price * 100);
   return page(`Redeem ${spec.name}`, <div class="wallet">
     {message && <p role="alert" class="wallet-error">{message}</p>}
@@ -203,10 +204,10 @@ function itemPage(member: WalletMember, spec: ItemSpec, key: string, { message =
       <a href="/wallet">Wallet</a>
     </div>
     <p class="card-desc">Honor system: redeem only what you take. The charge is immediate.</p>
-  </div>, { status });
+  </div>, { status, dev });
 }
 
-function reviewPage(member: WalletMember, spec: ItemSpec, qty: number, amount: number, key: string, message = '') {
+function reviewPage(member: WalletMember, spec: ItemSpec, qty: number, amount: number, key: string, message = '', dev = false) {
   return page(`Confirm ${spec.name}`, <div class="wallet">
     {message && <p role="alert" class="wallet-error">{message}</p>}
     <p class="wallet-item">{spec.name}</p>
@@ -223,7 +224,7 @@ function reviewPage(member: WalletMember, spec: ItemSpec, qty: number, amount: n
       <a href={`/wallet/redeem?${new URLSearchParams({ n: spec.name, p: String(spec.price), ...(spec.unit ? { u: spec.unit } : {}), ...(spec.min !== undefined ? { min: String(spec.min) } : {}), ...(spec.max !== undefined ? { max: String(spec.max) } : {}) })}`}>Change quantity</a>
       <a href="/wallet">Cancel</a>
     </div>
-  </div>);
+  </div>, { dev });
 }
 
 export async function redeemPage(request: Request, env: Env) {
@@ -232,7 +233,7 @@ export async function redeemPage(request: Request, env: Env) {
   if (!identity) return loginRedirect(url.pathname + url.search);
   const member = await loadMember(env, identity.sub);
   if (!member) throw new HttpError(403, 'Your account isn’t registered with TheLab yet. Please contact leadership.');
-  return withCookie(itemPage(member, readSpec(queryParam(url.searchParams)), randomToken()), identity.cookie);
+  return withCookie(itemPage(member, readSpec(queryParam(url.searchParams)), randomToken(), { dev: devAuth(env) }), identity.cookie);
 }
 
 export async function redeem(request: Request, env: Env) {
@@ -249,20 +250,20 @@ export async function redeem(request: Request, env: Env) {
   let qty = 1, amount: number;
   if (spec.unit) {
     qty = quantity(form.q);
-    if (!(qty > 0)) return withCookie(itemPage(member, spec, randomToken(), { message: 'Enter how many units you are redeeming.', status: 400 }), identity.cookie);
+    if (!(qty > 0)) return withCookie(itemPage(member, spec, randomToken(), { message: 'Enter how many units you are redeeming.', status: 400, dev: devAuth(env) }), identity.cookie);
     if ((spec.min !== undefined && qty < spec.min) || (spec.max !== undefined && qty > spec.max)) {
       const range = spec.min !== undefined && spec.max !== undefined ? `between ${spec.min} and ${spec.max}`
         : spec.min !== undefined ? `at least ${spec.min}` : `at most ${spec.max}`;
-      return withCookie(itemPage(member, spec, randomToken(), { message: `Enter a quantity ${range} ${spec.unit}.`, status: 400 }), identity.cookie);
+      return withCookie(itemPage(member, spec, randomToken(), { message: `Enter a quantity ${range} ${spec.unit}.`, status: 400, dev: devAuth(env) }), identity.cookie);
     }
     amount = Math.round(spec.price * qty * 100);
     if (!form.confirm) {
       if (amount > member.balance) {
         return withCookie(itemPage(member, spec, randomToken(), {
-          message: `Your balance is ${formatMoney(member.balance)}; add credits in your wallet and try again.`, status: 409,
+          message: `Your balance is ${formatMoney(member.balance)}; add credits in your wallet and try again.`, status: 409, dev: devAuth(env),
         }), identity.cookie);
       }
-      return withCookie(reviewPage(member, spec, qty, amount, key), identity.cookie);
+      return withCookie(reviewPage(member, spec, qty, amount, key, '', devAuth(env)), identity.cookie);
     }
   } else {
     amount = Math.round(spec.price * 100);
@@ -287,7 +288,7 @@ export async function redeem(request: Request, env: Env) {
   const current = await loadMember(env, identity.sub);
   if (!current) throw new HttpError(403, 'Your account isn’t registered with TheLab yet. Please contact leadership.');
   return withCookie(itemPage(current, spec, randomToken(), {
-    message: `Your balance is ${formatMoney(current.balance)}; add credits and try again.`, status: 409,
+    message: `Your balance is ${formatMoney(current.balance)}; add credits and try again.`, status: 409, dev: devAuth(env),
   }), identity.cookie);
 }
 
@@ -316,7 +317,7 @@ export async function walletReceipt(request: Request, env: Env) {
     <div class="wallet-links">
       <a href="/wallet">Wallet</a>
     </div>
-  </div>);
+  </div>, { dev: devAuth(env) });
   return withCookie(response, identity.cookie);
 }
 

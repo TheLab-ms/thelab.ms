@@ -2,6 +2,7 @@
 import { renderSVG } from 'uqr';
 import { h, Fragment } from './html.ts';
 import { page } from './page.tsx';
+import { devAuth } from './dev.tsx';
 import {
   HttpError, base64url, encodeJSON, hex, isRecord, json, logError, loginRedirect,
   memberAccessSQL, memberQuery, fobEnabledSQL, now, origin, readSession, readToken, redirect, signToken,
@@ -211,7 +212,7 @@ export async function bindFob(request: Request, env: Env) {
   const linkedPage = () => page('Fob linked', <>
     <p role="status">Fob {fob} is now linked to your membership.</p>
     <p>You can close this page.</p>
-  </>);
+  </>, { dev: devAuth(env) });
   if (request.method === 'GET') {
     if (member.fob_id === fob) return linkedPage();
     return page('Link your fob', <>
@@ -220,7 +221,7 @@ export async function bindFob(request: Request, env: Env) {
       {member.fob_id ? <p>This replaces fob <strong>{member.fob_id}</strong>, which will lose door access.</p> : null}
       <p>Door access follows your membership and waiver status.</p>
       <form method="post" action={`/keyfob/bind?token=${token}`}><button class="btn btn-primary" type="submit">Link fob</button></form>
-    </>);
+    </>, { dev: devAuth(env) });
   }
   let changed;
   try {

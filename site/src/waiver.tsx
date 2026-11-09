@@ -5,6 +5,7 @@ import {
   HttpError, currentMember, grantsMembership, origin, provider, readForm, redirect, validEmail,
 } from './lib.ts';
 import { pushFobs } from './edge.tsx';
+import { devAuth } from './dev.tsx';
 
 async function verifyHuman(request: Request, env: Env, token: string | undefined) {
   if (!env.TURNSTILE_SECRET_KEY) return;
@@ -49,5 +50,5 @@ export async function signWaiver(request: Request, env: Env) {
     <p role="status">Thanks, {name}. Your waiver has been recorded.</p>
     <p>Signature #{signed.id} · {email} · {new Date().toISOString()}</p>
     <div class="membership-actions"><a class="btn btn-primary" href="/">Done</a></div>
-  </>);
+  </>, { dev: devAuth(env) });
 }

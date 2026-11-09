@@ -10,6 +10,8 @@ export default defineConfig(async () => ({
       compatibilityDate: '2026-08-15',
       bindings: {
         SITE_URL: 'https://thelab.example',
+        // Development sign-in is opted into per test.
+        DEV_AUTH: '',
         // Edge tests supply their own URL and signing key; other tests stay offline.
         EDGE_URL: '',
         EDGE_LAN_URL: '',

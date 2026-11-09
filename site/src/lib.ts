@@ -114,6 +114,10 @@ export const redirect = (location: string) => new Response(null, { status: 303, 
 
 export const loginRedirect = (next: string) => redirect(`/login?next=${encodeURIComponent(next)}`);
 
+// Only same-site paths survive an OAuth round trip. Browsers drop tabs and
+// newlines from redirect URLs, so "/\t/evil.example" would become "//evil.example".
+export const safeNext = (value: unknown) => typeof value === 'string' && /^\/(?![/\\])[^\x00-\x1f\x7f]*$/.test(value) ? value : '/';
+
 export function getCookie(request: Request, name: string) {
   return (request.headers.get('Cookie') || '').split(';').map(s => s.trim()).find(s => s.startsWith(`${name}=`))?.slice(name.length + 1);
 }
