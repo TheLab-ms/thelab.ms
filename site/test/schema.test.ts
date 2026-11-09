@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:workers';
 import { beforeAll, describe, expect, it } from 'vitest';
-import type { Member, MemberEvent } from '../src/lib.ts';
+import type { Member, MemberEvent, WalletEntry } from '../src/lib.ts';
 import { resetDB } from './helpers.ts';
 
 // The compiler derives each expected column from the row type, so these maps
@@ -22,6 +22,10 @@ const tables = {
     id: 'NOT NULL INTEGER', created: 'NOT NULL INTEGER', member_id: 'NULL TEXT', event_type: 'NOT NULL TEXT',
     details: 'NOT NULL TEXT', source_event_id: 'NULL TEXT',
   } satisfies Columns<MemberEvent>,
+  wallet_entries: {
+    entry_id: 'NOT NULL INTEGER', member_id: 'NULL TEXT', created: 'NOT NULL INTEGER', amount: 'NOT NULL INTEGER',
+    item: 'NOT NULL TEXT', key: 'NOT NULL TEXT', details: 'NOT NULL TEXT',
+  } satisfies Columns<WalletEntry>,
 };
 
 describe('Row types', () => {

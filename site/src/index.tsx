@@ -8,6 +8,7 @@ import { callback, login, logout } from './auth.ts';
 import { checkout, stripeWebhook } from './billing.ts';
 import { bindFob, edgeJWKS, edgeSyncRequest, kioskClaim, kioskPage, machinesData, swipeWebhook } from './edge.tsx';
 import { signWaiver } from './waiver.tsx';
+import { redeem, redeemPage, walletPage, walletReceipt, walletTopup } from './wallet.tsx';
 
 const routes = new Map<string, Handler>(Object.entries({
   'GET /.well-known/edge-jwks.json': edgeJWKS,
@@ -15,6 +16,10 @@ const routes = new Map<string, Handler>(Object.entries({
   'GET /login/callback': callback,
   'POST /logout': logout,
   'GET /checkout': checkout,
+  'GET /wallet': walletPage,
+  'GET /wallet/topup': walletTopup,
+  'GET /wallet/redeem': redeemPage,
+  'POST /wallet/redeem': redeem,
   'POST /waiver/sign': signWaiver,
   'GET /machines/data': machinesData,
   'GET /keyfob/bind': bindFob,
@@ -40,7 +45,9 @@ export default {
       if (request.method === 'POST' && !crossOriginPaths.some(p => path.startsWith(p)) && request.headers.get('Origin') !== origin(env)) {
         throw new HttpError(403, 'We couldn’t verify where this form came from. Reload the page and try again.');
       }
-      const handler = routes.get(`${request.method} ${path}`) ?? (path === '/admin' || path.startsWith('/admin/') ? adminRequest : null);
+      const handler = routes.get(`${request.method} ${path}`)
+        ?? (request.method === 'GET' && path.startsWith('/wallet/receipt/') ? walletReceipt : null)
+        ?? (path === '/admin' || path.startsWith('/admin/') ? adminRequest : null);
       if (!handler) throw new HttpError(404, 'Page not found.');
       return await handler(request, env, ctx);
     } catch (error) {

@@ -2,12 +2,13 @@
 import { h, Fragment } from './html.ts';
 import { page } from './page.tsx';
 import {
-  HttpError, discordID, discounts, fobEnabledSQL, grantsMembership, isDiscount, logError, loginRedirect, memberName,
+  HttpError, discordID, discounts, fobEnabledSQL, formatMoney, grantsMembership, isDiscount, logError, loginRedirect, memberName,
   memberPath, readForm, readSession, redirect, stripe, guildUsername, validEmail,
   type Discount, type Form, type Member, type MemberEvent,
 } from './lib.ts';
 import { checkoutLink, setDiscordRole, syncDiscordRole, syncMember } from './billing.ts';
 import { pushFobs } from './edge.tsx';
+import { adjustWallet } from './wallet.tsx';
 
 const PAGE_SIZE = 25;
 const labelDiscount = (value: Discount) => value === '' ? 'Standard rate' : value === 'firstResponder' ? 'First responder' : value.charAt(0).toUpperCase() + value.slice(1);
@@ -215,6 +216,8 @@ const eventTypes = {
   StripeCustomerChanged: 'Stripe customer changed',
   StripeSubscriptionChanged: 'Stripe subscription changed',
   SubscriptionStatusChanged: 'Subscription status changed',
+  WalletTopUp: 'Wallet top-up',
+  WalletCharge: 'Wallet charge',
 } as const;
 type EventType = keyof typeof eventTypes;
 
@@ -229,6 +232,11 @@ function eventDetails(event: MemberEvent) {
   if (type === 'ConwayEvent') return `${details.event}: ${details.details}`;
   if (type === 'FobSwipe') return `Fob ${details.fob} · ${details.allowed ? 'Allowed' : 'Denied'} · Controller ${details.controller} · ${details.time}`;
   if (type === 'WaiverSigned') return `Signature #${details.waiver_id}.`;
+  if (type === 'WalletTopUp' || type === 'WalletCharge') {
+    const item = typeof details.item === 'string' && details.item ? `${details.item} · ` : '';
+    const note = typeof details.note === 'string' && details.note ? ` · ${details.note}` : '';
+    return `${item}${formatMoney(Number(details.amount) || 0)}${note}`;
+  }
   const value = (item: unknown) => {
     if (item === null) return 'Not set';
     if (type === 'BillingCycleChanged') return item ? 'Yearly' : 'Monthly';
@@ -404,18 +412,24 @@ async function updateMember(env: Env, member: Member, value: ReturnType<typeof v
 
 const notices = {
   saved: 'Member saved.', created: 'Member created. Open Billing info to generate a checkout link.', synced: 'Stripe and Discord synchronized.',
-  sync_failed: 'Saved, but Stripe or Discord synchronization failed. Use Sync with Stripe to retry.',
+  sync_failed: 'Saved, but Stripe or Discord synchronization failed. Use Sync with Stripe to retry.', wallet: 'Wallet adjusted.',
 } as const;
 
 interface EditorOptions { fields?: Fields | undefined; message?: string | undefined; status?: number | undefined; checkout?: string | undefined }
 
 async function editor(env: Env, member: AdminMember, { fields, message = '', status = 200, checkout = '' }: EditorOptions = {}) {
   const f: Fields = fields || { ...member, billing: member.bill_annually ? 'yearly' : 'monthly' };
-  const { results: events } = await env.DB.prepare('SELECT * FROM member_events WHERE member_id = ? ORDER BY created DESC, id DESC LIMIT 10').bind(member.member_id).all<MemberEvent>();
+  const [history, wallet] = await env.DB.batch([
+    env.DB.prepare('SELECT * FROM member_events WHERE member_id = ? ORDER BY created DESC, id DESC LIMIT 10').bind(member.member_id),
+    env.DB.prepare('SELECT COALESCE(SUM(amount), 0) AS balance FROM wallet_entries WHERE member_id = ?').bind(member.member_id),
+  ]);
+  const events = (history?.results ?? []) as MemberEvent[];
+  const balance = (wallet?.results[0] as { balance: number } | undefined)?.balance ?? 0;
   const account = [
     ['Member email', member.email], ['Waiver name', member.waiver_name],
     ['Discord username', member.discord_username], ['Discord email', member.discord_email],
     ['Billing name (Stripe)', member.billing_name], ['Billing email (Stripe)', member.billing_email],
+    ['Wallet balance', formatMoney(balance)],
   ] as const;
   const path = memberPath(member);
   return page(`Edit ${memberName(member)}`, <>
@@ -470,6 +484,20 @@ async function editor(env: Env, member: AdminMember, { fields, message = '', sta
     <form id="sync-member" method="post" action={`${path}/sync`} />
     <form id="delete-member" method="post" action={`${path}/delete`} data-confirm={`Delete ${memberName(member)}? This cannot be undone. Cancel any Stripe subscription separately.`} />
     <noscript><p class="admin-help">Enable JavaScript to delete a member with confirmation.</p></noscript>
+    <section class="card admin-section" aria-labelledby="wallet-admin">
+      <h2 id="wallet-admin">Wallet</h2>
+      <p>Balance: <strong>{formatMoney(balance)}</strong></p>
+      <form method="post" action={`${path}/wallet`} class="admin-form">
+        <div class="admin-field-grid">
+          <div class="admin-field"><label for="wallet-adjust-amount">Adjustment (dollars)</label>
+            <input id="wallet-adjust-amount" name="amount" type="text" maxlength="10" placeholder="10 or -2.50" /></div>
+          <div class="admin-field"><label for="wallet-adjust-note">Reason (required)</label>
+            <input id="wallet-adjust-note" name="note" type="text" maxlength="500" /></div>
+        </div>
+        <div class="admin-actions"><button class="btn btn-outline" type="submit">Apply adjustment</button></div>
+        <p class="admin-help">Use this for cash top-ups, refunds, and corrections. Every adjustment is recorded in member history with your note.</p>
+      </form>
+    </section>
     <section class="card admin-section">
       <h2>Recent member history</h2>
       {eventTable(events, false)}
@@ -503,7 +531,7 @@ export async function adminRequest(request: Request, env: Env) {
       return newMemberForm(form, error.message, error.status);
     }
   }
-  const match = path.match(/^\/admin\/members\/([a-f0-9]{32})(\/events|\/checkout|\/sync|\/delete)?$/);
+  const match = path.match(/^\/admin\/members\/([a-f0-9]{32})(\/events|\/checkout|\/sync|\/delete|\/wallet)?$/);
   if (!match) throw new HttpError(404, 'Admin page not found.');
   const member = await env.DB.prepare(`SELECT *, COALESCE(${fobEnabledSQL}, 0) AS fob_enabled FROM members WHERE member_id = ?`).bind(match[1]).first<AdminMember>();
   if (!member) throw new HttpError(404, 'Member not found.');
@@ -558,6 +586,15 @@ export async function adminRequest(request: Request, env: Env) {
       if (!(error instanceof HttpError)) throw error;
       return redisplay({ message: error.message, status: error.status });
     }
+  }
+  if (action === 'POST /wallet') {
+    const form = await readForm(request);
+    try { await adjustWallet(env, member.member_id, session.sub, form); }
+    catch (error) {
+      if (!(error instanceof HttpError)) throw error;
+      return editor(env, member, { message: error.message, status: error.status });
+    }
+    return redirect(`${memberPath(member)}?notice=wallet`);
   }
   if (action === 'POST /delete') {
     await setDiscordRole(env, member.discord_user_id, false);

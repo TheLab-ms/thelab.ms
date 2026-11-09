@@ -82,11 +82,31 @@ function webhookCustomer(env: Env, event: unknown): { customer?: string; link?: 
   return typeof customer === 'string' ? { customer } : {};
 }
 
+// A completed wallet top-up is credited once per Checkout session. Stripe
+// reuses the session id on retries, so it is the ledger key.
+function walletCredit(env: Env, event: unknown): D1PreparedStatement | null {
+  if (!isRecord(event) || (event.type !== 'checkout.session.completed' && event.type !== 'checkout.session.async_payment_succeeded')) return null;
+  const object = isRecord(event.data) && isRecord(event.data.object) ? event.data.object : {};
+  const metadata = isRecord(object.metadata) ? object.metadata : {};
+  const amount = typeof metadata.thelab_wallet_amount === 'string' && /^[1-9]\d{0,5}$/.test(metadata.thelab_wallet_amount)
+    ? Number(metadata.thelab_wallet_amount) : 0;
+  const memberID = typeof metadata.thelab_member_id === 'string' ? metadata.thelab_member_id : object.client_reference_id;
+  if (object.mode !== 'payment' || object.payment_status !== 'paid' || !amount) return null;
+  if (typeof object.id !== 'string' || !/^cs_[A-Za-z0-9_]+$/.test(object.id)) return null;
+  if (typeof memberID !== 'string' || !/^[a-f0-9]{32}$/.test(memberID)) return null;
+  return env.DB.prepare(`INSERT INTO wallet_entries (member_id, amount, item, key, details)
+    SELECT ?1, ?2, '', ?3, ?4 WHERE EXISTS (SELECT 1 FROM members WHERE member_id = ?1)
+    AND NOT EXISTS (SELECT 1 FROM wallet_entries WHERE member_id = ?1 AND key = ?3)`)
+    .bind(memberID, amount, `stripe:${object.id}`, JSON.stringify({ source: 'stripe', session_id: object.id }));
+}
+
 export async function stripeWebhook(request: Request, env: Env) {
   const text = await request.text();
   await verifyStripe(request, env, text);
   let event: unknown;
   try { event = JSON.parse(text); } catch { throw new HttpError(400, 'Invalid Stripe event.'); }
+  const credit = walletCredit(env, event);
+  if (credit) await credit.run();
   const { customer, link } = webhookCustomer(env, event);
   if (!customer) return new Response(null, { status: 204 });
   // Unmapped customers (e.g. donors) are outside this app. Failures return an
@@ -124,6 +144,28 @@ async function resolvePricing(env: Env, member: Member): Promise<{ price: Price;
   return { price, coupon };
 }
 
+// Returns the member's Stripe customer, creating one up front when needed so
+// checkouts can be reused and linked before payment completes. `known` is a
+// customer recovered from a recent Checkout session.
+export async function ensureCustomer<M extends Member>(env: Env, member: M, known?: string | undefined): Promise<{ customer: string; member: M }> {
+  if (!known && member.stripe_customer_id) return { customer: member.stripe_customer_id, member };
+  let customerID = known;
+  if (!customerID) {
+    const email = member.discord_email || member.email;
+    customerID = (await stripe<Customer>(env, '/customers', {
+      ...(email ? { email } : {}), 'metadata[thelab_member_id]': member.member_id,
+    }, `member-customer:${member.member_id}:${member.metadata_version}`)).id;
+  }
+  const updated = await env.DB.prepare(`UPDATE members SET stripe_customer_id = ?, metadata_version = metadata_version + 1
+    WHERE member_id = ? AND stripe_customer_id IS NULL AND metadata_version = ? RETURNING *`)
+    .bind(customerID, member.member_id, member.metadata_version).first<Member>()
+    // A simultaneous request may have saved the same idempotent customer.
+    ?? await env.DB.prepare('SELECT * FROM members WHERE member_id = ? AND stripe_customer_id = ? AND metadata_version = ?')
+      .bind(member.member_id, customerID, member.metadata_version + 1).first<Member>();
+  if (!updated) throw new HttpError(409, 'Your membership changed while checkout was opening. Please reload and try again.');
+  return { customer: customerID, member: { ...member, ...updated } };
+}
+
 // Returns the URL and any customer link saved to the member. Admin links can
 // precede onboarding; all checkouts for a member share one Stripe customer.
 export async function checkoutLink<M extends Member>(env: Env, member: M, { shared = false } = {}): Promise<{ url: string; member: M }> {
@@ -157,21 +199,9 @@ export async function checkoutLink<M extends Member>(env: Env, member: M, { shar
     for (const session of recent) {
       if (session.status === 'open' && !session.customer) await stripe(env, `/checkout/sessions/${session.id}/expire`, {}, `member-checkout-expire:${session.id}`);
     }
-    if (!customerID) {
-      const email = member.discord_email || member.email;
-      customerID = (await stripe<Customer>(env, '/customers', {
-        ...(email ? { email } : {}), 'metadata[thelab_member_id]': member.member_id,
-      }, `member-customer:${member.member_id}:${member.metadata_version}`)).id;
-    }
-    const updated = await env.DB.prepare(`UPDATE members SET stripe_customer_id = ?, metadata_version = metadata_version + 1
-      WHERE member_id = ? AND stripe_customer_id IS NULL AND metadata_version = ? RETURNING *`)
-      .bind(customerID, member.member_id, member.metadata_version).first<Member>()
-      // A simultaneous request may have saved the same idempotent customer.
-      ?? await env.DB.prepare('SELECT * FROM members WHERE member_id = ? AND stripe_customer_id = ? AND metadata_version = ?')
-        .bind(member.member_id, customerID, member.metadata_version + 1).first<Member>();
-    if (!updated) throw new HttpError(409, 'Your membership changed while checkout was opening. Please reload and try again.');
-    member = { ...member, ...updated };
-    customer = customerID;
+    const ensured = await ensureCustomer(env, member, customerID);
+    member = ensured.member;
+    customer = ensured.customer;
     const portal = await existingCheckout(customer);
     if (portal) return { url: portal, member };
   }

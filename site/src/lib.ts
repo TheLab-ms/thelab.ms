@@ -89,6 +89,19 @@ export interface MemberEvent {
   source_event_id: string | null;
 }
 
+export interface WalletEntry {
+  entry_id: number;
+  member_id: string | null;
+  created: number;
+  amount: number;
+  item: string;
+  key: string;
+  details: string;
+}
+
+// Cents in, "$12.50" out; negative amounts keep their sign.
+export const formatMoney = (cents: number) => `${cents < 0 ? '-' : ''}$${(Math.abs(cents) / 100).toFixed(2)}`;
+
 // ────────────────────────────────────────────────────────────────────────
 // Responses and cookies
 // ────────────────────────────────────────────────────────────────────────
@@ -158,8 +171,41 @@ export async function sessionCookie(env: Env, discordUserID: string, admin: bool
 export async function readSession(request: Request, env: Env): Promise<Session | null> {
   const session = await readToken(env, getCookie(request, 'thelab_session'));
   const sub = session?.sub;
-  return typeof sub === 'string' && discordID.test(sub) ? { sub, admin: session?.admin === true } : null;
+  // The admin field distinguishes sessions from wallet tokens, which share the key.
+  return typeof sub === 'string' && discordID.test(sub) && typeof session?.admin === 'boolean'
+    ? { sub, admin: session.admin } : null;
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Wallet sessions: a separate year-long cookie for phones at the shelf
+// ────────────────────────────────────────────────────────────────────────
+
+const WALLET_AGE = 31536000; // One year.
+export interface WalletSession { sub: string }
+
+export async function readWalletSession(request: Request, env: Env): Promise<WalletSession | null> {
+  const token = await readToken(env, getCookie(request, 'thelab_wallet'));
+  return typeof token?.sub === 'string' && token.wal === 1 && discordID.test(token.sub) ? { sub: token.sub } : null;
+}
+
+export async function walletCookie(env: Env, discordUserID: string) {
+  const token = await signToken(env, { sub: discordUserID, wal: 1, exp: now() + WALLET_AGE });
+  return setCookie(env, 'thelab_wallet', token, WALLET_AGE);
+}
+
+// Accepts the year-long wallet cookie or, on a fresh device, a normal session
+// and mints the wallet cookie so scanning a code later needs no sign-in.
+export async function walletIdentity(request: Request, env: Env): Promise<{ sub: string; cookie: string | null } | null> {
+  const wallet = await readWalletSession(request, env);
+  if (wallet) return { sub: wallet.sub, cookie: null };
+  const session = await readSession(request, env);
+  return session ? { sub: session.sub, cookie: await walletCookie(env, session.sub) } : null;
+}
+
+export const withCookie = (response: Response, cookie: string | null) => {
+  if (cookie) response.headers.append('Set-Cookie', cookie);
+  return response;
+};
 
 // Matches no member without a session, so callers can batch it with other reads.
 export const memberQuery = (env: Env, session: Session | null, columns = '*') =>

@@ -59,8 +59,9 @@ interface Elements {
   html: { lang: string };
   img: { src: string; alt: string; width?: Numeric; height?: Numeric };
   input: {
-    type?: 'checkbox' | 'email' | 'hidden' | 'search' | 'text' | 'url'; name?: string; value?: Optional<string | number>;
-    maxlength?: Optional<Numeric>; placeholder?: string; checked?: boolean; readonly?: boolean; disabled?: boolean;
+    type?: 'checkbox' | 'email' | 'hidden' | 'number' | 'search' | 'text' | 'url'; name?: string; value?: Optional<string | number>;
+    maxlength?: Optional<Numeric>; min?: Optional<Numeric>; max?: Optional<Numeric>; step?: Optional<Numeric>; inputmode?: 'decimal' | 'numeric';
+    placeholder?: string; checked?: boolean; readonly?: boolean; disabled?: boolean; required?: boolean;
   };
   label: { for: string };
   link: { rel: 'icon' | 'stylesheet'; href: string };

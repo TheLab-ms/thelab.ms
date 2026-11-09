@@ -94,5 +94,6 @@ export async function callback(request: Request, env: Env) {
 export function logout(_request: Request, env: Env) {
   const response = redirect('/');
   response.headers.append('Set-Cookie', setCookie(env, 'thelab_session', '', 0));
+  response.headers.append('Set-Cookie', setCookie(env, 'thelab_wallet', '', 0));
   return response;
 }
