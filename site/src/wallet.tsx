@@ -139,7 +139,7 @@ export async function walletPage(request: Request, env: Env) {
 				</table>
 			</div> : <p class="card-desc">No activity yet.</p>}
 		</section>
-	</div>, { dev: devAuth(env) });
+	</div>, { dev: devAuth(env), checkout: true });
 	return withCookie(response, identity.cookie);
 }
 
@@ -262,7 +262,7 @@ function insufficientPage(member: WalletMember, spec: ItemSpec, qty: number, amo
 				<input type="hidden" name="next" value={next} />
 				<button class="btn btn-primary" type="submit">Add {formatMoney(topup)} with Stripe</button>
 			</form>}
-	</div>, { status: pending ? 200 : 409, dev });
+	</div>, { status: pending ? 200 : 409, dev, checkout: !pending });
 }
 
 export async function redeemPage(request: Request, env: Env) {
@@ -362,7 +362,14 @@ export async function walletReceipt(request: Request, env: Env) {
 	const quantity = typeof details.quantity === 'number' && typeof details.unit === 'string' && details.unit
 		? `${details.quantity} ${details.unit} · ` : '';
 	const response = page('Purchased', <div class="wallet">
+		<p role="status">Thanks! Your wallet was charged.</p>
+		<p class="wallet-item">{entry.item}</p>
+		<p class="wallet-price">{formatMoney(-entry.amount)}</p>
+		<p class="card-desc">{quantity}{date(entry.created)}</p>
 		<p class="wallet-balance"><span>Remaining Balance</span><strong>{formatMoney(member.balance)}</strong></p>
+		<div class="wallet-links">
+			<a href="/wallet">Wallet</a>
+		</div>
 	</div>, { dev: devAuth(env) });
 	return withCookie(response, identity.cookie);
 }

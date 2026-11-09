@@ -37,6 +37,8 @@ describe('Wallet', () => {
     const html = await response.text();
     expect(html).toContain('Balance');
     expect(html).toContain('$0.00');
+    // Top-up forms redirect to Stripe Checkout, which form-action must allow.
+    expect(response.headers.get('Content-Security-Policy')).toContain("form-action 'self' https://checkout.stripe.com;");
     // The wallet cookie alone works on a later visit.
     expect((await call('/wallet', { headers: { Cookie: cookieFrom(response) } })).status).toBe(200);
   });
@@ -100,6 +102,7 @@ describe('Wallet', () => {
     let response = await call('/wallet/redeem?n=Soda&p=10', { headers: { Cookie: cookie } });
     expect(response.status).toBe(409);
     let html = await response.text();
+    expect(response.headers.get('Content-Security-Policy')).toContain("form-action 'self' https://checkout.stripe.com;");
     expect(html).toContain('Your balance is $3.50; add $6.50');
     expect(html).toContain('Add $6.50 with Stripe');
     expect(html).toContain('name="amount" value="6.5"');
@@ -196,6 +199,8 @@ describe('Wallet', () => {
     expect(await balance(member.member_id)).toBe(350);
     const receiptHtml = await (await call(receipt, { headers: { Cookie: cookie } })).text();
     expect(receiptHtml).toContain('<h1>Purchased</h1>');
+    expect(receiptHtml).toContain('<p class="wallet-item">Soda</p>');
+    expect(receiptHtml).toContain('<p class="wallet-price">$1.50</p>');
     expect(receiptHtml).toContain('Remaining Balance');
 
     const replay = await call('/wallet/redeem', post({ n: 'Soda', p: '1.50', key: purchaseKey }, { Cookie: cookie }));
@@ -217,6 +222,8 @@ describe('Wallet', () => {
     const confirm = await call('/wallet/redeem', post({ n: 'Filament', p: '0.1', u: 'gram', min: '5', max: '2000', q: '250', key, confirm: '1' }, { Cookie: cookie }));
     expect(confirm.status).toBe(303);
     expect(await balance(member.member_id)).toBe(2500);
+    const receiptHtml = await (await call(confirm.headers.get('Location') || '', { headers: { Cookie: cookie } })).text();
+    expect(receiptHtml).toContain('250 gram · ');
   });
 
   it('rejects quantities outside the link range and charges the zero floor', async () => {

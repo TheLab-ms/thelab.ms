@@ -12,7 +12,8 @@ esp-radio = { version = "0.17", default-features = false, features = ["esp32", "
 esp-rtos = { version = "0.2", features = ["esp32", "esp-radio", "embassy", "log-04"] }
 esp-alloc = { version = "0.9", features = ["internal-heap-stats"] }
 esp-println = { version = "0.13", default-features = false, features = ["esp32", "log", "uart"] }
-esp-bootloader-esp-idf = "0.1"
+esp-bootloader-esp-idf = { version = "0.4", features = ["esp32"] }
+esp-rom-sys = { version = "0.1", features = ["esp32"] }
 esp-storage = { version = "0.6", features = ["esp32", "bytewise-read"] }
 embedded-storage = "0.3"
 

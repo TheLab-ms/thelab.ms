@@ -1,16 +1,18 @@
 import { h, Fragment, render, type Child } from './html.ts';
 
-const htmlHeaders = {
+// Browsers apply form-action to redirects after a submission, so pages whose
+// forms end at Stripe Checkout must allow it.
+const htmlHeaders = (checkout: boolean) => ({
 	'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store',
 	// no-referrer can turn the Origin of a native form POST into "null".
 	'Referrer-Policy': 'same-origin', 'X-Content-Type-Options': 'nosniff',
-	'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
-};
+	'Content-Security-Policy': `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'${checkout ? ' https://checkout.stripe.com' : ''}; base-uri 'none'; frame-ancestors 'none'`,
+});
 
-interface PageOptions { status?: number; admin?: boolean; dev?: boolean }
+interface PageOptions { status?: number; admin?: boolean; dev?: boolean; checkout?: boolean }
 
 export function page(title: string, body: Child, options: PageOptions = {}) {
-	const { status = 200, admin = false } = options;
+	const { status = 200, admin = false, checkout = false } = options;
 	const content = admin ? <>
 		<header class="admin-header">
 			<a class="membership-brand" href="/">TheLab</a>
@@ -41,5 +43,5 @@ export function page(title: string, body: Child, options: PageOptions = {}) {
 			<main class={`container membership-main${admin ? ' admin-main' : ''}`}>{content}</main>
 		</body>
 	</html>;
-	return new Response(`<!doctype html>${render(document)}`, { status, headers: htmlHeaders });
+	return new Response(`<!doctype html>${render(document)}`, { status, headers: htmlHeaders(checkout) });
 }
