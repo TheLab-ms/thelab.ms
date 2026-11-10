@@ -81,7 +81,9 @@ describe('Calendar and event registration', () => {
 		expect((await call('/events/new', post(fields, { Cookie: guestCookie }))).status).toBe(303);
 		expect((await feed()).events).toHaveLength(4);
 		expect((await call('/events/data?month=2027-03')).headers.get('Cache-Control')).toBe('public, max-age=60');
-		expect((await call('/events')).status).toBe(200);
+		const oldPage = await call('/events');
+		expect(oldPage.status).toBe(303);
+		expect(oldPage.headers.get('Location')).toBe('/#events');
 		expect((await call('/events/data?month=garbage')).status).toBe(400);
 	});
 
@@ -341,7 +343,7 @@ describe('Calendar and event registration', () => {
 		expect((await feed('2027-04')).events.some(e => e.url === `/events/${id}/1`)).toBe(true);
 		const response = await cancel(id, 2);
 		expect(response.status).toBe(303);
-		expect(response.headers.get('Location')).toBe('/events');
+		expect(response.headers.get('Location')).toBe('/#events');
 		for (const table of ['calendar_events', 'calendar_schedules', 'calendar_overrides', 'calendar_rsvps']) {
 			const row = await env.DB.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE event_id = ?`)
 				.bind(id)
@@ -358,9 +360,6 @@ describe('Calendar and event registration', () => {
 		for (const month of ['2027-03', '2027-04']) {
 			expect((await feed(month)).events.every(e => !e.url.includes(id))).toBe(true);
 		}
-		expect(await (await call('/events?month=2027-03', { headers: { Cookie: guestCookie } })).text()).not.toContain(
-			path,
-		);
 		expect((await call(other.path)).status).toBe(200);
 	});
 
@@ -387,7 +386,7 @@ describe('Calendar and event registration', () => {
 		expect((await call(path)).status).toBe(200);
 	});
 
-	it('shows the full calendar without a personal-events view', async () => {
+	it('publishes one calendar feed without a personal-events view', async () => {
 		const own = await create();
 		await env.DB.prepare('UPDATE members SET non_billable = 1 WHERE member_id = ?').bind(guest.member_id).run();
 		const otherResponse = await call(
@@ -396,17 +395,10 @@ describe('Calendar and event registration', () => {
 		);
 		expect(otherResponse.status).toBe(303);
 		const otherPath = otherResponse.headers.get('Location')!;
-		for (const headers of [
-			{},
-			{ Cookie: cookie },
-			{ Cookie: guestCookie },
-			{ Cookie: await session(otherID, true) },
-		]) {
-			const html = await (await call('/events?month=2027-03', { headers })).text();
-			expect(html).toContain(own.path);
-			expect(html).toContain(otherPath);
-			expect(html).not.toContain('My events');
-			expect(html).not.toContain('/events/mine');
+		const urls = (await feed()).events.map(e => e.url);
+		expect(urls).toContain(own.path);
+		expect(urls).toContain(otherPath);
+		for (const headers of [{}, { Cookie: cookie }, { Cookie: await session(otherID, true) }]) {
 			expect((await call('/events/mine', { headers })).status).toBe(404);
 		}
 	});

@@ -115,7 +115,7 @@ describe('Page layout', () => {
 			'<body class="membership-page admin-page"><main class="container membership-main admin-main">',
 		);
 		expect(html).toContain(
-			'<nav aria-label="Admin navigation"><a href="/admin">Members</a><a href="/admin/events">Events</a><a href="/events">Calendar</a></nav>',
+			'<nav aria-label="Admin navigation"><a href="/admin">Members</a><a href="/admin/events">Events</a><a href="/#events">Calendar</a></nav>',
 		);
 		expect(html).toContain('<form method="post" action="/logout">');
 		expect(html).toContain('<h1>Members</h1><p>&lt;Maker&gt;</p>');

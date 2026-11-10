@@ -31,7 +31,7 @@ export function page(title: string, body: Child, options: PageOptions = {}) {
 				<nav aria-label="Admin navigation">
 					<a href="/admin">Members</a>
 					<a href="/admin/events">Events</a>
-					<a href="/events">Calendar</a>
+					<a href="/#events">Calendar</a>
 				</nav>
 				<div class="admin-toolbar-actions">
 					<form method="post" action="/logout">

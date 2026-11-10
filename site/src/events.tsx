@@ -181,74 +181,35 @@ function summary(item: Occurrence) {
 				: `${Math.max(0, schedule.capacity - total)} of ${schedule.capacity} spots left`;
 }
 
-async function calendar(request: Request, env: Env, data: boolean, ctx: ExecutionContext) {
+async function calendarFeed(request: Request, env: Env, ctx: ExecutionContext) {
 	const { month, from, to } = monthWindow(new URL(request.url).searchParams.get('month'));
-	if (data) {
-		const monthKey = month.toString().slice(0, 7);
-		// This feed is identical for every visitor; key only by canonical month and
-		// keep it briefly fresh so calendar edits and RSVP counts propagate quickly.
-		const cacheKey = new Request(new URL(`/events/data?month=${monthKey}`, request.url));
-		const cache = caches.default;
-		const cached = await cache.match(cacheKey);
-		if (cached) return cached;
+	const monthKey = month.toString().slice(0, 7);
+	// This feed is identical for every visitor; key only by canonical month and
+	// keep it briefly fresh so calendar edits and RSVP counts propagate quickly.
+	const cacheKey = new Request(new URL(`/events/data?month=${monthKey}`, request.url));
+	const cache = caches.default;
+	const cached = await cache.match(cacheKey);
+	if (cached) return cached;
 
-		const occurrences = inWindow(await load(env), from, to);
-		const response = Response.json(
-			{
-				month: monthKey,
-				timezone: EVENT_ZONE,
-				events: occurrences.map(item => ({
-					url: eventPath(item.event.event_id, item.number),
-					title: item.schedule.title,
-					start: new Date(startSeconds(item.schedule) * 1000).toISOString(),
-					end: new Date((startSeconds(item.schedule) + item.schedule.minutes * 60) * 1000).toISOString(),
-					date: instant(item.schedule.start).toPlainDate().toString(),
-					summary: summary(item),
-					cancelled: item.schedule.cancelled,
-				})),
-			},
-			{ headers: { 'Cache-Control': 'public, max-age=60' } },
-		);
-		ctx.waitUntil(cache.put(cacheKey, response.clone()));
-		return response;
-	}
 	const occurrences = inWindow(await load(env), from, to);
-	const { member } = await viewer(request, env);
-	const monthLink = (amount: number) => `/events?month=${month.add({ months: amount }).toString().slice(0, 7)}`;
-	return page(
-		'Events at TheLab',
-		<div class="events-page">
-			<div class="membership-actions">
-				<a class="btn btn-primary" href="/events/new">
-					Create an event
-				</a>
-			</div>
-			{member && !member.eligible && (
-				<p class="card-desc">
-					An active membership is required to create events and RSVP to events with a capacity limit.
-				</p>
-			)}
-			<nav class="calendar-toolbar" aria-label="Calendar months">
-				<a href={monthLink(-1)}>Previous month</a>
-				<h2>{month.toLocaleString('en-US', { month: 'long', year: 'numeric' })}</h2>
-				<a href={monthLink(1)}>Next month</a>
-			</nav>
-			{occurrences.length ? (
-				occurrences.map(item => (
-					<div class="event-list-item">
-						<h3>
-							<a href={eventPath(item.event.event_id, item.number)}>{item.schedule.title}</a>
-						</h3>
-						<p>{time(startSeconds(item.schedule))}</p>
-						<p>{summary(item)}</p>
-					</div>
-				))
-			) : (
-				<p>No events scheduled this month.</p>
-			)}
-		</div>,
-		{ wide: true },
+	const response = Response.json(
+		{
+			month: monthKey,
+			timezone: EVENT_ZONE,
+			events: occurrences.map(item => ({
+				url: eventPath(item.event.event_id, item.number),
+				title: item.schedule.title,
+				start: new Date(startSeconds(item.schedule) * 1000).toISOString(),
+				end: new Date((startSeconds(item.schedule) + item.schedule.minutes * 60) * 1000).toISOString(),
+				date: instant(item.schedule.start).toPlainDate().toString(),
+				summary: summary(item),
+				cancelled: item.schedule.cancelled,
+			})),
+		},
+		{ headers: { 'Cache-Control': 'public, max-age=60' } },
 	);
+	ctx.waitUntil(cache.put(cacheKey, response.clone()));
+	return response;
 }
 
 function cancelCard(path: string, revision: string) {
@@ -643,7 +604,7 @@ async function edit(request: Request, env: Env, bundle: Bundle, item: Occurrence
 				),
 			),
 		);
-		return redirect('/events');
+		return redirect('/#events');
 	}
 	if (form.scope !== 'one' && form.scope !== 'future')
 		throw new HttpError(400, 'Choose which occurrences to change.');
@@ -719,8 +680,8 @@ async function edit(request: Request, env: Env, bundle: Bundle, item: Occurrence
 
 export async function eventsRequest(request: Request, env: Env, ctx: ExecutionContext) {
 	const path = new URL(request.url).pathname;
-	if (request.method === 'GET' && (path === '/events' || path === '/events/data'))
-		return calendar(request, env, path.endsWith('/data'), ctx);
+	if (request.method === 'GET' && path === '/events/data') return calendarFeed(request, env, ctx);
+	if (request.method === 'GET' && path === '/events') return redirect('/#events');
 	if (['GET', 'POST'].includes(request.method) && path === '/events/new') return create(request, env);
 	const match = path.match(/^\/events\/([a-f0-9]{32})\/(0|[1-9]\d{0,4})(?:\/(edit|cancel|rsvp|leave))?$/);
 	if (!match) throw new HttpError(404, 'Page not found.');

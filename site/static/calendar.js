@@ -102,9 +102,7 @@
 			render(data.events);
 			status.textContent = data.events.length ? '' : 'No events scheduled this month.';
 		} catch {
-			if (ticket === generation)
-				status.textContent =
-					'Events couldn’t be loaded. Please try another month or open the event list below.';
+			if (ticket === generation) status.textContent = 'Events couldn’t be loaded. Please try another month.';
 		} finally {
 			if (ticket === generation) root.setAttribute('aria-busy', 'false');
 		}
