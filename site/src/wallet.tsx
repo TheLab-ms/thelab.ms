@@ -435,8 +435,11 @@ export async function redeemPage(request: Request, env: Env) {
 		return withCookie(response, identity.cookie);
 	}
 	const amount = Math.round(spec.price * 100);
+	// Defer the top-up until the member has actually attempted a purchase, so
+	// per-unit items can collect a quantity first. A return from Checkout still
+	// reports the payment state.
 	const response =
-		amount > member.balance
+		!spec.unit && topped && amount > member.balance
 			? insufficientPage(member, spec, 1, amount, { pending, sessionID, dev })
 			: itemPage(spec, randomToken(), { dev });
 	return withCookie(response, identity.cookie);

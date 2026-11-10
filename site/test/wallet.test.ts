@@ -125,9 +125,16 @@ describe('Wallet', () => {
 	it('offers the bounded shortfall and preserves the purchase through Checkout', async () => {
 		await credit(member.member_id, 350);
 		const cookie = await walletSession();
+		// Loading the item does not divert to Checkout before the purchase is submitted.
 		let response = await call('/wallet/redeem?n=Soda&p=10', { headers: { Cookie: cookie } });
-		expect(response.status).toBe(409);
+		expect(response.status).toBe(200);
 		let html = await response.text();
+		expect(html).toContain('Pay $10.00');
+		expect(html).not.toContain('with Stripe');
+
+		response = await call('/wallet/redeem', post({ n: 'Soda', p: '10', key }, { Cookie: cookie }));
+		expect(response.status).toBe(409);
+		html = await response.text();
 		expect(response.headers.get('Content-Security-Policy')).toContain(
 			"form-action 'self' https://checkout.stripe.com;",
 		);
@@ -136,9 +143,9 @@ describe('Wallet', () => {
 		expect(html).toContain('name="amount" value="6.5"');
 		expect(html).toContain('name="next" value="/wallet/redeem?n=Soda&amp;p=10"');
 
-		response = await call('/wallet/redeem?n=Snack&p=4', { headers: { Cookie: cookie } });
+		response = await call('/wallet/redeem', post({ n: 'Snack', p: '4', key }, { Cookie: cookie }));
 		expect(await response.text()).toContain('Add $5.00 with Stripe');
-		response = await call('/wallet/redeem?n=Machine&p=300', { headers: { Cookie: cookie } });
+		response = await call('/wallet/redeem', post({ n: 'Machine', p: '300', key }, { Cookie: cookie }));
 		expect(await response.text()).toContain('Add $200.00 with Stripe');
 
 		await env.DB.prepare("UPDATE members SET stripe_customer_id = 'cus_1' WHERE member_id = ?")
@@ -188,6 +195,18 @@ describe('Wallet', () => {
 		html = await response.text();
 		expect(html).toContain('250 gram');
 		expect(html).toContain('Charge $25.00');
+	});
+
+	it('asks for a quantity before offering a top-up', async () => {
+		const cookie = await walletSession();
+		const response = await call('/wallet/redeem?n=Filament&u=gram&p=0.1&min=5&max=2000', {
+			headers: { Cookie: cookie },
+		});
+		expect(response.status).toBe(200);
+		const html = await response.text();
+		expect(html).toContain('Quantity (gram)');
+		expect(html).toContain('Review charge');
+		expect(html).not.toContain('with Stripe');
 	});
 
 	it('rejects an external purchase return address', async () => {
