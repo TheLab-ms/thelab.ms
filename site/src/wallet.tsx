@@ -189,7 +189,7 @@ export async function walletPage(request: Request, env: Env) {
 								{entries.map(entry => (
 									<tr>
 										<td>{date(entry.created)}</td>
-										<td>{entry.item || (entry.amount > 0 ? 'Wallet credit' : 'Purchase')}</td>
+										<td>{entry.item || (entry.amount > 0 ? 'Wallet credit' : 'Donation')}</td>
 										<td class={entry.amount > 0 ? 'wallet-credit' : 'wallet-charge'}>
 											{entry.amount > 0 ? '+' : ''}
 											{formatMoney(entry.amount)}
@@ -220,7 +220,7 @@ export async function walletTopup(request: Request, env: Env) {
 	if (amount < TOPUP_MIN || amount > TOPUP_MAX)
 		throw new HttpError(400, `Choose an amount between ${formatMoney(TOPUP_MIN)} and ${formatMoney(TOPUP_MAX)}.`);
 	const rawNext = url.searchParams.get('next') || '';
-	if (rawNext && safeNext(rawNext) !== rawNext) throw new HttpError(400, 'The purchase return address is invalid.');
+	if (rawNext && safeNext(rawNext) !== rawNext) throw new HttpError(400, 'The donation return address is invalid.');
 	const returnPath = rawNext ? addParam(rawNext, 'notice', 'topped') : '/wallet?notice=topped';
 	const successPath = rawNext ? `${returnPath}&session_id={CHECKOUT_SESSION_ID}` : returnPath;
 	const successURL = `${origin(env)}${successPath}`;
@@ -275,14 +275,16 @@ export async function walletTopup(request: Request, env: Env) {
 function itemPage(spec: ItemSpec, key: string, { message = '', status = 200, dev = false } = {}) {
 	const amount = spec.unit ? 0 : Math.round(spec.price * 100);
 	return page(
-		`Purchase ${spec.name}`,
+		`Donation for ${spec.name}`,
 		<div class="wallet">
 			{message && (
 				<p role="alert" class="wallet-error">
 					{message}
 				</p>
 			)}
-			<p class="wallet-price">{spec.unit ? `${unitPrice(spec.price)} per ${spec.unit}` : formatMoney(amount)}</p>
+			<p class="wallet-price">
+				Suggested {spec.unit ? `${unitPrice(spec.price)} per ${spec.unit}` : formatMoney(amount)}
+			</p>
 			<form method="post" action="/wallet/redeem" class="wallet-form">
 				{specFields(spec)}
 				<input type="hidden" name="key" value={key} />
@@ -341,7 +343,7 @@ function reviewPage(spec: ItemSpec, qty: number, amount: number, key: string, me
 	);
 }
 
-function purchasePath(spec: ItemSpec, qty?: number) {
+function donationPath(spec: ItemSpec, qty?: number) {
 	const params = new URLSearchParams({ n: spec.name, p: String(spec.price) });
 	if (spec.unit) params.set('u', spec.unit);
 	if (spec.min !== undefined) params.set('min', String(spec.min));
@@ -369,7 +371,7 @@ function insufficientPage(
 	amount: number,
 	{ pending = false, sessionID = '', dev = false } = {},
 ) {
-	const next = purchasePath(spec, spec.unit ? qty : undefined);
+	const next = donationPath(spec, spec.unit ? qty : undefined);
 	const retry = addParam(addParam(next, 'notice', 'topped'), 'session_id', sessionID);
 	const shortfall = amount - member.balance;
 	const topup = Math.min(TOPUP_MAX, Math.max(TOPUP_MIN, shortfall));
@@ -378,8 +380,8 @@ function insufficientPage(
 		<div class="wallet">
 			<p role={pending ? 'status' : 'alert'} class={pending ? '' : 'wallet-error'}>
 				{pending
-					? 'Stripe is confirming your payment. Check again shortly to continue your purchase.'
-					: `Your balance is ${formatMoney(member.balance)}; add ${formatMoney(shortfall)} to complete this purchase.`}
+					? 'Stripe is confirming your payment. Check again shortly to continue your donation.'
+					: `Your balance is ${formatMoney(member.balance)}; add ${formatMoney(shortfall)} to complete this donation.`}
 			</p>
 			<p class="wallet-price">
 				{spec.name} · <strong>{formatMoney(amount)}</strong>
@@ -391,13 +393,22 @@ function insufficientPage(
 					</a>
 				</p>
 			) : (
-				<form method="get" action="/wallet/topup" class="wallet-form">
-					<input type="hidden" name="amount" value={topup / 100} />
-					<input type="hidden" name="next" value={next} />
-					<button class="btn btn-primary" type="submit">
-						Add {formatMoney(topup)} with Stripe
-					</button>
-				</form>
+				<>
+					<form method="get" action="/wallet/topup" class="wallet-form">
+						<input type="hidden" name="amount" value={topup / 100} />
+						<input type="hidden" name="next" value={next} />
+						<button class="btn btn-primary" type="submit">
+							Add {formatMoney(topup)} with Stripe
+						</button>
+					</form>
+					{topup > shortfall && (
+						<p class="card-desc">
+							We set a minimum of {formatMoney(TOPUP_MIN)} for credit card transactions to keep payment
+							processor fees down. Any extra balance stays in your wallet and can be used for future
+							donations.
+						</p>
+					)}
+				</>
 			)}
 		</div>,
 		{ status: pending ? 200 : 409, dev, checkout: !pending },
@@ -435,7 +446,7 @@ export async function redeemPage(request: Request, env: Env) {
 		return withCookie(response, identity.cookie);
 	}
 	const amount = Math.round(spec.price * 100);
-	// Defer the top-up until the member has actually attempted a purchase, so
+	// Defer the top-up until the member has actually attempted a donation, so
 	// per-unit items can collect a quantity first. A return from Checkout still
 	// reports the payment state.
 	const response =
@@ -538,7 +549,7 @@ export async function walletReceipt(request: Request, env: Env) {
 			? `${details.quantity} ${details.unit} · `
 			: '';
 	const response = page(
-		'Purchased',
+		entry.item ? `Donation for ${entry.item}` : 'Donation',
 		<div class="wallet">
 			<p role="status">Thanks! Your wallet was charged.</p>
 			<p class="wallet-item">{entry.item}</p>

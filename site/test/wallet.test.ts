@@ -122,10 +122,10 @@ describe('Wallet', () => {
 		expect(calls).toHaveLength(0);
 	});
 
-	it('offers the bounded shortfall and preserves the purchase through Checkout', async () => {
+	it('offers the bounded shortfall and preserves the donation through Checkout', async () => {
 		await credit(member.member_id, 350);
 		const cookie = await walletSession();
-		// Loading the item does not divert to Checkout before the purchase is submitted.
+		// Loading the item does not divert to Checkout before the donation is submitted.
 		let response = await call('/wallet/redeem?n=Soda&p=10', { headers: { Cookie: cookie } });
 		expect(response.status).toBe(200);
 		let html = await response.text();
@@ -142,11 +142,17 @@ describe('Wallet', () => {
 		expect(html).toContain('Add $6.50 with Stripe');
 		expect(html).toContain('name="amount" value="6.5"');
 		expect(html).toContain('name="next" value="/wallet/redeem?n=Soda&amp;p=10"');
+		expect(html).not.toContain('payment processor fees');
 
 		response = await call('/wallet/redeem', post({ n: 'Snack', p: '4', key }, { Cookie: cookie }));
-		expect(await response.text()).toContain('Add $5.00 with Stripe');
+		html = await response.text();
+		expect(html).toContain('Add $5.00 with Stripe');
+		expect(html).toContain('We set a minimum of $5.00 for credit card transactions');
+		expect(html).toContain('payment processor fees');
 		response = await call('/wallet/redeem', post({ n: 'Machine', p: '300', key }, { Cookie: cookie }));
-		expect(await response.text()).toContain('Add $200.00 with Stripe');
+		html = await response.text();
+		expect(html).toContain('Add $200.00 with Stripe');
+		expect(html).not.toContain('payment processor fees');
 
 		await env.DB.prepare("UPDATE members SET stripe_customer_id = 'cus_1' WHERE member_id = ?")
 			.bind(member.member_id)
@@ -209,7 +215,7 @@ describe('Wallet', () => {
 		expect(html).not.toContain('with Stripe');
 	});
 
-	it('rejects an external purchase return address', async () => {
+	it('rejects an external donation return address', async () => {
 		mockFetch();
 		const response = await call('/wallet/topup?amount=10&next=https%3A%2F%2Fevil.example', {
 			headers: { Cookie: await walletSession() },
@@ -252,27 +258,27 @@ describe('Wallet', () => {
 		await credit(member.member_id, 500);
 		const cookie = await walletSession();
 		const html = await (await call('/wallet/redeem?n=Soda&p=1.50', { headers: { Cookie: cookie } })).text();
-		expect(html).toContain('<h1>Purchase Soda</h1>');
-		expect(html).toContain('<p class="wallet-price">$1.50</p>');
+		expect(html).toContain('<h1>Donation for Soda</h1>');
+		expect(html).toContain('<p class="wallet-price">Suggested $1.50</p>');
 		expect(html).toContain('Pay $1.50');
-		const purchaseKey = hiddenKey(html);
+		const donationKey = hiddenKey(html);
 		const confirm = await call(
 			'/wallet/redeem',
-			post({ n: 'Soda', p: '1.50', key: purchaseKey }, { Cookie: cookie }),
+			post({ n: 'Soda', p: '1.50', key: donationKey }, { Cookie: cookie }),
 		);
 		expect(confirm.status).toBe(303);
 		const receipt = confirm.headers.get('Location') || '';
-		expect(receipt).toMatch(new RegExp(`^/wallet/receipt/\\d+\\?k=${purchaseKey}$`));
+		expect(receipt).toMatch(new RegExp(`^/wallet/receipt/\\d+\\?k=${donationKey}$`));
 		expect(await balance(member.member_id)).toBe(350);
 		const receiptHtml = await (await call(receipt, { headers: { Cookie: cookie } })).text();
-		expect(receiptHtml).toContain('<h1>Purchased</h1>');
+		expect(receiptHtml).toContain('<h1>Donation for Soda</h1>');
 		expect(receiptHtml).toContain('<p class="wallet-item">Soda</p>');
 		expect(receiptHtml).toContain('<p class="wallet-price">$1.50</p>');
 		expect(receiptHtml).toContain('Remaining Balance');
 
 		const replay = await call(
 			'/wallet/redeem',
-			post({ n: 'Soda', p: '1.50', key: purchaseKey }, { Cookie: cookie }),
+			post({ n: 'Soda', p: '1.50', key: donationKey }, { Cookie: cookie }),
 		);
 		expect(replay.headers.get('Location')).toBe(receipt);
 		expect(await balance(member.member_id)).toBe(350);
