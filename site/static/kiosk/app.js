@@ -6,6 +6,7 @@ function startKiosk() {
 	const status = /** @type {HTMLElement} */ (document.getElementById('status'));
 	const panel = /** @type {HTMLElement} */ (document.getElementById('claim'));
 	const qr = /** @type {HTMLImageElement} */ (document.getElementById('qr'));
+	const close = /** @type {HTMLButtonElement} */ (document.getElementById('close'));
 	let buffer = '';
 	let generation = 0;
 	/** @type {ReturnType<typeof setTimeout> | undefined} */
@@ -16,12 +17,14 @@ function startKiosk() {
 	let controller;
 
 	function reset(message = 'Tap your fob', error = false) {
+		const wasOpen = !panel.hidden;
 		generation++;
 		controller?.abort();
 		clearTimeout(idleTimer);
 		clearTimeout(expiryTimer);
 		buffer = '';
 		panel.hidden = true;
+		if (wasOpen) kiosk.focus();
 		kiosk.dataset.state = error ? 'error' : 'ready';
 		qr.removeAttribute('src');
 		status.setAttribute('role', error ? 'alert' : 'status');
@@ -68,6 +71,7 @@ function startKiosk() {
 			if (current !== generation) return;
 			qr.src = claim.qr;
 			panel.hidden = false;
+			close.focus();
 			kiosk.dataset.state = 'claim';
 			expiryTimer = setTimeout(
 				() => reset('Code expired. Scan again.'),
@@ -77,7 +81,7 @@ function startKiosk() {
 			if (current === generation) reset(error instanceof Error ? error.message : 'Failed. Scan again.', true);
 		}
 	}
-	/** @type {HTMLElement} */ (document.getElementById('close')).addEventListener('click', () => reset());
+	close.addEventListener('click', () => reset());
 	document.addEventListener('keydown', event => {
 		if (
 			event.defaultPrevented ||
@@ -88,6 +92,14 @@ function startKiosk() {
 			event.altKey
 		)
 			return;
+		if (!buffer && !panel.hidden) {
+			if (event.key === 'Tab') {
+				event.preventDefault();
+				close.focus();
+				return;
+			}
+			if (event.key === ' ' && event.target === close) return;
+		}
 		// Capture the HID reader globally, even after someone clicks a kiosk control.
 		// Enter/Tab suffixes are part of the burst; only silence submits the scan.
 		if (event.key.length === 1) {

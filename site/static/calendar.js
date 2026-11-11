@@ -100,7 +100,7 @@
 			const data = /** @type {{month: string, events: CalendarEvent[]}} */ (await response.json());
 			if (ticket !== generation) return;
 			render(data.events);
-			status.textContent = '';
+			status.textContent = data.events.length ? '' : 'No events scheduled this month. Check another month.';
 		} catch {
 			if (ticket === generation) status.textContent = 'Events couldn’t be loaded. Please try another month.';
 		} finally {

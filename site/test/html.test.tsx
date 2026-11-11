@@ -96,7 +96,7 @@ describe('Page layout', () => {
 		expect(response.headers.get('Referrer-Policy')).toBe('same-origin');
 		expect(response.headers.get('X-Content-Type-Options')).toBe('nosniff');
 		expect(response.headers.get('Content-Security-Policy')).toBe(
-			"default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+			"default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
 		);
 		const html = await response.text();
 		expect(html).toMatch(/^<!doctype html><html lang="en">/);
@@ -112,12 +112,18 @@ describe('Page layout', () => {
 		const html = await page('Members', <p>{'<Maker>'}</p>, { admin: true }).text();
 		expect(html).toContain('<script src="/admin.js" defer></script>');
 		expect(html).toContain(
-			'<body class="membership-page admin-page"><main class="container membership-main admin-main">',
+			'<body class="membership-page admin-page"><a class="skip-link" href="#main">Skip to content</a><main id="main" class="container membership-main admin-main">',
 		);
 		expect(html).toContain(
-			'<nav aria-label="Admin navigation"><a href="/admin">Members</a><a href="/admin/events">Events</a></nav>',
+			'<nav aria-label="Admin navigation"><a href="/admin" aria-current="page">Members</a><a href="/admin/events">Logs</a><a href="/events/new">Add event</a><a href="http://edge.thelab.ms/">Edge proxy</a></nav>',
 		);
 		expect(html).toContain('<form method="post" action="/logout">');
 		expect(html).toContain('<h1>Members</h1><p>&lt;Maker&gt;</p>');
+	});
+
+	it('marks logs as the current admin destination without marking members', async () => {
+		const html = await page('Member activity', <p>History</p>, { admin: true, adminSection: 'logs' }).text();
+		expect(html).toContain('<a href="/admin">Members</a>');
+		expect(html).toContain('<a href="/admin/events" aria-current="page">Logs</a>');
 	});
 });

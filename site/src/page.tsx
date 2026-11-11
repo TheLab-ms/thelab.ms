@@ -8,7 +8,7 @@ const htmlHeaders = (checkout: boolean) => ({
 	// no-referrer can turn the Origin of a native form POST into "null".
 	'Referrer-Policy': 'same-origin',
 	'X-Content-Type-Options': 'nosniff',
-	'Content-Security-Policy': `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'${checkout ? ' https://checkout.stripe.com' : ''}; base-uri 'none'; frame-ancestors 'none'`,
+	'Content-Security-Policy': `default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self'; form-action 'self'${checkout ? ' https://checkout.stripe.com' : ''}; base-uri 'none'; frame-ancestors 'none'`,
 });
 
 interface PageOptions {
@@ -17,6 +17,7 @@ interface PageOptions {
 	dev?: boolean;
 	checkout?: boolean;
 	wide?: boolean;
+	adminSection?: 'members' | 'logs';
 	afterCard?: Child;
 }
 
@@ -29,13 +30,19 @@ export function page(title: string, body: Child, options: PageOptions = {}) {
 					TheLab
 				</a>
 				<nav aria-label="Admin navigation">
-					<a href="/admin">Members</a>
-					<a href="/admin/events">Events</a>
+					<a href="/admin" aria-current={options.adminSection !== 'logs' ? 'page' : undefined}>
+						Members
+					</a>
+					<a href="/admin/events" aria-current={options.adminSection === 'logs' ? 'page' : undefined}>
+						Logs
+					</a>
+					<a href="/events/new">Add event</a>
+					<a href="http://edge.thelab.ms/">Edge proxy</a>
 				</nav>
 				<div class="admin-toolbar-actions">
 					<form method="post" action="/logout">
 						<button class="btn btn-outline" type="submit">
-							Log Out
+							Log out
 						</button>
 					</form>
 				</div>
@@ -68,7 +75,11 @@ export function page(title: string, body: Child, options: PageOptions = {}) {
 				{admin && <script src="/admin.js" defer />}
 			</head>
 			<body class={`membership-page${admin ? ' admin-page' : ''}`}>
+				<a class="skip-link" href="#main">
+					Skip to content
+				</a>
 				<main
+					id="main"
 					class={`container membership-main${admin ? ' admin-main' : ''}${options.wide ? ' event-main' : ''}`}
 				>
 					{content}

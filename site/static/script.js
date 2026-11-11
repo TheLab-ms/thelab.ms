@@ -1,4 +1,4 @@
-// Home page: sticky navbar, mobile navigation, active section links, and hero fade-in.
+// Home page navigation. The menu remains a normal link list without JavaScript.
 (() => {
 	const navbar = document.getElementById('navbar');
 	if (!navbar) return;
@@ -6,9 +6,15 @@
 	const navMenu = /** @type {HTMLElement} */ (document.getElementById('nav-menu'));
 	const sections = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.section'));
 	const sectionLinks = document.querySelectorAll('.nav-link:not(.nav-cta)');
+	const heroContent = document.querySelector('.hero-content');
+	const mobile = window.matchMedia('(max-width: 767px)');
+	navbar.classList.add('nav-ready');
 
 	const handleScroll = () => {
-		navbar.classList.toggle('scrolled', window.scrollY > 50);
+		const pastHeroContent = heroContent
+			? heroContent.getBoundingClientRect().bottom <= navbar.getBoundingClientRect().bottom
+			: window.scrollY > 50;
+		navbar.classList.toggle('scrolled', pastHeroContent);
 		const scrollPos = window.scrollY + 120;
 		sections.forEach(section => {
 			if (scrollPos >= section.offsetTop && scrollPos < section.offsetTop + section.offsetHeight) {
@@ -19,6 +25,7 @@
 		});
 	};
 	window.addEventListener('scroll', handleScroll, { passive: true });
+	window.addEventListener('resize', handleScroll);
 	handleScroll();
 
 	/** @param {boolean} open */
@@ -43,21 +50,22 @@
 			setNav(false);
 			navToggle.focus();
 		}
+		if (e.key === 'Tab' && isOpen() && mobile.matches) {
+			const links = navMenu.querySelectorAll('a');
+			const last = links[links.length - 1];
+			if (e.shiftKey && document.activeElement === navToggle && last) {
+				e.preventDefault();
+				last.focus();
+			} else if (!e.shiftKey && document.activeElement === last) {
+				e.preventDefault();
+				navToggle.focus();
+			}
+		}
 	});
 	document.addEventListener('click', e => {
 		const target = /** @type {Node | null} */ (e.target);
 		if (isOpen() && !navMenu.contains(target) && !navToggle.contains(target)) setNav(false);
 	});
 
-	// Reveal the browser-selected responsive hero image, including cached loads.
-	const heroBg = document.querySelector('.hero-bg');
-	const heroImage = heroBg?.querySelector('img');
-	if (heroBg && heroImage) {
-		const revealHero = () => {
-			heroBg.classList.add('loaded');
-		};
-		heroImage.addEventListener('load', revealHero, { once: true });
-		heroImage.addEventListener('error', revealHero, { once: true });
-		if (heroImage.complete) revealHero();
-	}
+	mobile.addEventListener('change', () => setNav(false));
 })();

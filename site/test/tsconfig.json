@@ -3,7 +3,9 @@
 	"compilerOptions": {
 		"types": ["@cloudflare/vitest-pool-workers/types"],
 		// Fixtures index into arrays the test itself just built.
-		"noUncheckedIndexedAccess": false
+		"noUncheckedIndexedAccess": false,
+		// The wallet tests import the sign generator's link builder.
+		"allowJs": true
 	},
 	"include": ["../worker-configuration.d.ts", "../src", ".", "../vitest.config.ts"],
 	"exclude": ["browser"]

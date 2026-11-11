@@ -478,6 +478,167 @@ describe('Admin', () => {
 		expect(await count('SELECT COUNT(*) AS n FROM waivers')).toBe(1);
 	});
 
+	it('links family primaries by email or Discord username and records the change', async () => {
+		mockFetch();
+		const primary = await insertMember({
+			email: 'parent@example.com',
+			discord_username: 'Parent.User',
+			stripe_subscription_state: 'active',
+		});
+		let created = await call(
+			'/admin/members/new',
+			post(
+				{
+					email: 'kid@example.com',
+					billing: 'monthly',
+					discount_type: 'family',
+					family_primary: ' @parent.user ',
+				},
+				{ Cookie: cookie },
+			),
+		);
+		expect(created.status).toBe(303);
+		let dependent = (await env.DB.prepare(
+			"SELECT * FROM members WHERE email = 'kid@example.com'",
+		).first<Member>())!;
+		expect(dependent.family_primary_id).toBe(primary.member_id);
+
+		let html = await (await get(`/admin/members/${dependent.member_id}`)).text();
+		expect(html).toContain('name="family_primary" type="text" value="parent@example.com"');
+		expect(html).toContain(
+			`<dt>Family primary</dt><dd><a href="/admin/members/${primary.member_id}">Parent.User</a></dd>`,
+		);
+		html = await (await get(`/admin/members/${primary.member_id}`)).text();
+		expect(html).toContain(
+			`<dt>Family members</dt><dd><a href="/admin/members/${dependent.member_id}">kid@example.com</a></dd>`,
+		);
+		expect(html).toContain('1 family member will be unlinked.');
+
+		// Resaving the displayed value keeps the link; another discount drops it.
+		expect((await save(dependent, { discount_type: 'family', family_primary: 'parent@example.com' })).status).toBe(
+			303,
+		);
+		dependent = (await readMember(dependent.member_id))!;
+		expect(dependent.family_primary_id).toBe(primary.member_id);
+		await save(dependent, { discount_type: 'student', family_primary: 'parent@example.com' });
+		expect((await readMember(dependent.member_id))?.family_primary_id).toBeNull();
+
+		html = await (await get(`/admin/members/${dependent.member_id}/events?event_type=FamilyPrimaryChanged`)).text();
+		expect(html).toContain('2 events.');
+		expect(html).toContain(`<td>Not set → <a href="/admin/members/${primary.member_id}">Parent.User</a></td>`);
+		expect(html).toContain(`<td><a href="/admin/members/${primary.member_id}">Parent.User</a> → Not set</td>`);
+
+		// The primary isn't required, and a deleted primary leaves the discount unlinked.
+		created = await call(
+			'/admin/members/new',
+			post({ email: 'other@example.com', billing: 'monthly', discount_type: 'family' }, { Cookie: cookie }),
+		);
+		expect(created.status).toBe(303);
+		await env.DB.prepare('UPDATE members SET discount_type = ?, family_primary_id = ? WHERE member_id = ?')
+			.bind('family', primary.member_id, dependent.member_id)
+			.run();
+		await env.DB.prepare('DELETE FROM members WHERE member_id = ?').bind(primary.member_id).run();
+		expect((await readMember(dependent.member_id))?.family_primary_id).toBeNull();
+		html = await (await get(`/admin/members/${dependent.member_id}/events?event_type=FamilyPrimaryChanged`)).text();
+		expect(html).toContain('<td>Deleted member → Not set</td>');
+	});
+
+	it('rejects family primaries that are unknown, ambiguous, or would chain families', async () => {
+		quiet();
+		mockFetch();
+		const member = await insertMember({ email: 'me@example.com' });
+		const owner = await insertMember({ email: 'shared@example.com' });
+		await insertMember({ email: 'a@example.com', discord_email: 'shared@example.com', discord_username: 'twin' });
+		await insertMember({ email: 'b@example.com', discord_username: 'Twin' });
+		const familyMember = await insertMember({ email: 'family@example.com', discount_type: 'family' });
+		const cases: [string, string][] = [
+			['me@example.com', 'No other member has that email or Discord username.'],
+			['nobody@example.com', 'No other member has that email or Discord username.'],
+			['twin', 'More than one member matches'],
+			['family@example.com', 'That member has a Family discount too.'],
+		];
+		for (const [family_primary, message] of cases) {
+			const response = await save(member, { discount_type: 'family', family_primary, notes: 'Keep <me>' });
+			expect(response.status).toBe(400);
+			const html = await response.text();
+			expect(html).toContain(message);
+			expect(html).toContain(`value="${family_primary}"`);
+			expect(html).toContain('Keep &lt;me&gt;');
+		}
+		// A member email match wins over a Discord email shared with another member.
+		expect((await save(member, { discount_type: 'family', family_primary: 'shared@example.com' })).status).toBe(
+			303,
+		);
+		expect((await readMember(member.member_id))?.family_primary_id).toBe(owner.member_id);
+
+		await env.DB.prepare("UPDATE members SET discount_type = '' WHERE member_id = ?")
+			.bind(familyMember.member_id)
+			.run();
+		const response = await save((await readMember(owner.member_id))!, {
+			discount_type: 'family',
+			family_primary: 'family@example.com',
+		});
+		expect(response.status).toBe(400);
+		expect(await response.text()).toContain('This member is a family primary');
+	});
+
+	it('counts and lists members who need leadership attention', async () => {
+		mockFetch();
+		const linked = (name_override: string, primary: Member, fields: Partial<Member> = {}) =>
+			insertMember({
+				name_override,
+				discount_type: 'family',
+				family_primary_id: primary.member_id,
+				stripe_subscription_state: 'active',
+				...fields,
+			});
+		for (const state of ['past_due', 'unpaid', 'incomplete'])
+			await insertMember({ name_override: `Failing ${state}`, stripe_subscription_state: state });
+		await insertMember({ name_override: 'Paused maker', stripe_subscription_state: 'paused' });
+		const canceled = await insertMember({
+			name_override: 'Canceled primary',
+			stripe_subscription_state: 'canceled',
+		});
+		const active = await insertMember({ name_override: 'Active primary', stripe_subscription_state: 'active' });
+		const legacy = await insertMember({ name_override: 'Legacy primary', legacy_billing: 1 });
+		const orphan = await linked('Orphaned dependent', canceled);
+		await linked('Canceled dependent', canceled, { stripe_subscription_state: 'canceled' });
+		await linked('Supported dependent', active);
+		await linked('Legacy dependent', legacy, { stripe_subscription_state: null, legacy_billing: 1 });
+		await insertMember({ name_override: 'Unlinked dependent', discount_type: 'family', legacy_billing: 1 });
+		await insertMember({ name_override: 'Non-billable dependent', discount_type: 'family', non_billable: 1 });
+
+		let html = await (await get('/admin')).text();
+		expect(html).toContain('<span class="admin-count">5<span class="sr-only"> members</span></span>');
+		html = await (await get('/admin?view=attention&waiver=unsigned&q=ignored')).text();
+		expect(html).toContain('<title>Members needing attention | TheLab</title>');
+		expect(html).toContain('5 members need attention</strong>');
+		expect(html).toContain('aria-current="page"');
+		expect(html).toMatch(/<select id="waiver" name="waiver" disabled/);
+		for (const name of ['Failing past_due', 'Failing unpaid', 'Failing incomplete', 'Orphaned', 'Unlinked'])
+			expect(html).toContain(name);
+		for (const name of ['Paused', 'Canceled dependent', 'Supported', 'Legacy dependent', 'Non-billable dependent'])
+			expect(html).not.toContain(name);
+		expect(html).toContain('<small class="admin-attention-reason">Payment failing</small>');
+		expect(html).toContain('<small class="admin-attention-reason">Family primary inactive</small>');
+		expect(html).toContain('<small class="admin-attention-reason">No family primary linked</small>');
+
+		html = await (await get(`/admin/members/${orphan.member_id}`)).text();
+		expect(html).toContain('<span class="admin-status admin-status--alert">Family primary inactive</span>');
+		expect(html).toContain('Canceled primary</a> (inactive)');
+		expect(html).toContain('<details class="admin-billing admin-linked-accounts" open>');
+
+		await env.DB.prepare(
+			"UPDATE members SET stripe_subscription_state = 'canceled' WHERE name_override LIKE 'Failing%'",
+		).run();
+		await env.DB.prepare(
+			"UPDATE members SET discount_type = '', family_primary_id = NULL WHERE discount_type = 'family'",
+		).run();
+		html = await (await get('/admin?view=attention')).text();
+		expect(html).not.toContain('class="admin-count"');
+		expect(html).toContain('No members need attention.');
+	});
+
 	it('renders member and global history with event filters', async () => {
 		const member = await insertMember({ name_override: 'Maker' });
 		await env.DB.prepare('UPDATE members SET notes = ? WHERE member_id = ?').bind('x', member.member_id).run();

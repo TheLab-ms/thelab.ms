@@ -40,14 +40,40 @@ const pageNumber = (params: URLSearchParams) => Math.max(1, Math.min(1e7, parseI
 const hasKey = <T extends object>(object: T, key: unknown): key is keyof T =>
 	typeof key === 'string' && Object.hasOwn(object, key);
 
-// An admin-viewed member, with whether its fob currently opens doors.
-type AdminMember = Member & { fob_enabled: number };
+// Leadership attention: failing payments, and Family discounts still in use
+// without a linked primary whose own membership qualifies them.
+const qualifiesSQL = (table: string) =>
+	`(${table}.non_billable = 1 OR ${table}.legacy_billing = 1 OR ${table}.stripe_subscription_state IN ('active', 'trialing'))`;
+const paymentFailingSQL = `members.stripe_subscription_state IN ('past_due', 'unpaid', 'incomplete')`;
+const familyProblemSQL = `CASE WHEN members.discount_type = 'family' AND members.non_billable = 0
+    AND (members.legacy_billing = 1 OR members.stripe_subscription_state IN ('active', 'trialing'))
+  THEN CASE WHEN members.family_primary_id IS NULL THEN 'unlinked'
+    WHEN NOT EXISTS (SELECT 1 FROM members AS p WHERE p.member_id = members.family_primary_id AND ${qualifiesSQL('p')})
+    THEN 'inactive' END END`;
+const attentionSQL = `(${paymentFailingSQL} OR (${familyProblemSQL}) IS NOT NULL)`;
+const attentionColumns = `(${paymentFailingSQL}) AS payment_failing, (${familyProblemSQL}) AS family_problem`;
+
+interface Attention {
+	payment_failing: number;
+	family_problem: 'unlinked' | 'inactive' | null;
+}
+const attentionReasons = (member: Attention) =>
+	[
+		member.payment_failing ? 'Payment failing' : '',
+		member.family_problem === 'unlinked' ? 'No family primary linked' : '',
+		member.family_problem === 'inactive' ? 'Family primary inactive' : '',
+	].filter(Boolean);
+
+// An admin-viewed member, with whether its fob currently opens doors, why it
+// needs attention, and its family primary as entered in the form.
+type AdminMember = Member & Attention & { fob_enabled: number; family_primary: string };
 
 // Form values to display: a saved member, or a resubmitted draft.
 interface Fields {
 	name_override?: string | undefined;
 	email?: string | null | undefined;
 	notes?: string | undefined;
+	family_primary?: string | undefined;
 	discord_user_id?: string | null | undefined;
 	stripe_customer_id?: string | null | undefined;
 	fob_id?: string | number | null | undefined;
@@ -63,7 +89,7 @@ interface Fields {
 // ────────────────────────────────────────────────────────────────────────
 
 const date = (value: number) =>
-	value ? new Date(value * 1000).toISOString().replace('T', ' ').replace('.000Z', ' UTC') : '—';
+	value ? new Date(value * 1000).toISOString().replace('T', ' ').replace('.000Z', ' UTC') : 'Not recorded';
 
 function statusBadge(member: Member) {
 	const state = member.stripe_subscription_state;
@@ -71,7 +97,7 @@ function statusBadge(member: Member) {
 	const text = state
 		? state.charAt(0).toUpperCase() + state.slice(1).replaceAll('_', ' ')
 		: member.stripe_subscription_id
-			? 'Unknown — not yet synced'
+			? 'Unknown (not yet synced)'
 			: 'No subscription';
 	return <span class={`admin-status admin-status--${tone}`}>{text}</span>;
 }
@@ -156,18 +182,27 @@ const notice = (message: string, error: boolean) =>
 		</p>
 	) : null;
 const billingSelects = (f: Fields) => (
-	<div class="admin-field-grid">
-		{select('billing', 'Billing cycle', f.billing, [
-			['monthly', 'Monthly'],
-			['yearly', 'Yearly'],
-		])}
-		{select(
-			'discount_type',
-			'Discount category',
-			f.discount_type,
-			discounts.map(key => [key, labelDiscount(key)] as const),
+	<>
+		<div class="admin-field-grid">
+			{select('billing', 'Billing cycle', f.billing, [
+				['monthly', 'Monthly'],
+				['yearly', 'Yearly'],
+			])}
+			{select(
+				'discount_type',
+				'Discount category',
+				f.discount_type,
+				discounts.map(key => [key, labelDiscount(key)] as const),
+			)}
+		</div>
+		{input(
+			'family_primary',
+			'Family primary member',
+			f.family_primary,
+			254,
+			'For the Family discount: the email or Discord username of the member whose membership qualifies them.',
 		)}
-	</div>
+	</>
 );
 
 function pagination(label: string, current: number, pages: number, url: (page: number) => string) {
@@ -244,29 +279,32 @@ const chosen = <Key extends string>(
 	params: URLSearchParams,
 ) => filter.choices.find(([key]) => key === params.get(filter.name))?.[0] ?? filter.defaultValue;
 
-// Filter selects have visually hidden labels and apply on change (see static/admin.js).
+// Filters apply on change (see static/admin.js).
 const filterSelect = ({ name, label, choices }: Filter, value: string, disabled = false) => (
-	<>
-		<label class="sr-only" for={name}>
-			{label}
-		</label>
+	<div class="admin-filter">
+		<label for={name}>{label}</label>
 		<select id={name} name={name} disabled={disabled} data-autosubmit>
 			{options(choices, value)}
 		</select>
-	</>
+	</div>
 );
 
-function listURL(current: number, query: string, values: FilterValues) {
+function listURL(current: number, query: string, values: FilterValues, attention = false) {
 	const params = new URLSearchParams({ page: String(current) });
-	if (query) params.set('q', query);
-	for (const { name, defaultValue } of filters) if (values[name] !== defaultValue) params.set(name, values[name]);
+	if (attention) params.set('view', 'attention');
+	else {
+		if (query) params.set('q', query);
+		for (const { name, defaultValue } of filters) if (values[name] !== defaultValue) params.set(name, values[name]);
+	}
 	return `/admin?${params}`;
 }
 
-// Searches cover all members; filters apply only when not searching.
+// Searches cover all members; filters apply only when not searching. The
+// attention view ignores both.
 async function memberList(url: URL, env: Env) {
 	const params = url.searchParams;
-	const query = (params.get('q') || '').trim().slice(0, 254);
+	const attention = params.get('view') === 'attention';
+	const query = attention ? '' : (params.get('q') || '').trim().slice(0, 254);
 	const [waiver, discord, payment] = filters;
 	const values: FilterValues = {
 		waiver: chosen(waiver, params),
@@ -286,7 +324,9 @@ async function memberList(url: URL, env: Env) {
 	] satisfies (keyof Member)[];
 	const conditions: string[] = [],
 		bindings: string[] = [];
-	if (query) {
+	if (attention) {
+		conditions.push(attentionSQL);
+	} else if (query) {
 		conditions.push(`(${columns.map(column => `${column} LIKE ? ESCAPE '\\'`).join(' OR ')})`);
 		bindings.push(...columns.map(() => `%${query.replace(/[\\%_]/g, '\\$&')}%`));
 	} else {
@@ -301,21 +341,23 @@ async function memberList(url: URL, env: Env) {
 	}
 	const where = conditions.length ? ` WHERE ${conditions.join(' AND ')}` : '';
 	const current = pageNumber(params);
-	const [count, rows] = await env.DB.batch([
+	const [count, rows, attentionCount] = await env.DB.batch([
 		env.DB.prepare(`SELECT COUNT(*) AS total FROM members${where}`).bind(...bindings),
-		env.DB.prepare(`SELECT * FROM members${where}
+		env.DB.prepare(`SELECT members.*, ${attentionColumns} FROM members${where}
       ORDER BY created DESC, discord_user_id DESC, member_id DESC LIMIT ? OFFSET ?`).bind(
 			...bindings,
 			PAGE_SIZE,
 			(current - 1) * PAGE_SIZE,
 		),
+		env.DB.prepare(`SELECT COUNT(*) AS total FROM members WHERE ${attentionSQL}`),
 	]);
 	const total = (count?.results[0] as { total: number } | undefined)?.total ?? 0,
 		pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-	if (current > pages) return redirect(listURL(pages, query, values));
+	const needed = (attentionCount?.results[0] as { total: number } | undefined)?.total ?? 0;
+	if (current > pages) return redirect(listURL(pages, query, values, attention));
 	const filtered = query || filters.some(({ name }) => values[name] !== 'all');
-	const changed = query || filters.some(({ name, defaultValue }) => values[name] !== defaultValue);
-	const tableRows = ((rows?.results ?? []) as Member[]).map(m => (
+	const changed = attention || query || filters.some(({ name, defaultValue }) => values[name] !== defaultValue);
+	const tableRows = ((rows?.results ?? []) as (Member & Attention)[]).map(m => (
 		<tr>
 			<th scope="row">
 				<a class="admin-member-name" href={memberPath(m)}>
@@ -324,6 +366,9 @@ async function memberList(url: URL, env: Env) {
 				<small>{m.discord_email || m.email || 'No email'}</small>
 				{m.non_billable ? <small>Non-billable</small> : null}
 				{m.legacy_billing ? <small>Legacy billing</small> : null}
+				{attentionReasons(m).map(reason => (
+					<small class="admin-attention-reason">{reason}</small>
+				))}
 			</th>
 			<td>
 				{statusBadge(m)}
@@ -331,15 +376,22 @@ async function memberList(url: URL, env: Env) {
 			</td>
 		</tr>
 	));
+	const summary = attention ? (
+		<strong>
+			{total} member{total === 1 ? ' needs' : 's need'} attention
+		</strong>
+	) : (
+		<strong>
+			{total} {filtered ? 'matching' : 'registered'} member{total === 1 ? '' : 's'}
+		</strong>
+	);
 	return page(
-		'Registered members',
+		attention ? 'Members needing attention' : 'Registered members',
 		<>
 			<search>
 				<form method="get" action="/admin" class="admin-form admin-search-panel">
 					<div class="admin-search-row">
-						<label class="sr-only" for="member-search">
-							Search members
-						</label>
+						<label for="member-search">Search members</label>
 						<input
 							id="member-search"
 							type="search"
@@ -355,24 +407,38 @@ async function memberList(url: URL, env: Env) {
 						<a class="btn btn-accent-outline" href="/admin/members/new">
 							New member
 						</a>
+						<a
+							class="btn btn-outline admin-attention"
+							href="/admin?view=attention"
+							aria-current={attention ? 'page' : undefined}
+						>
+							Needs attention
+							{needed > 0 && (
+								<span class="admin-count">
+									{needed}
+									<span class="sr-only"> member{needed === 1 ? '' : 's'}</span>
+								</span>
+							)}
+						</a>
 					</div>
 					<div class="admin-filter-row">
-						<span class="admin-filter-label" aria-hidden="true">
-							Filter
-						</span>
-						{filters.map(filter => filterSelect(filter, values[filter.name], !!query))}
+						{filters.map(filter => filterSelect(filter, values[filter.name], !!query || attention))}
 						{changed && <a href="/admin">Clear</a>}
 					</div>
 				</form>
 			</search>
 			<div class="admin-list-summary">
 				<p>
-					<strong>
-						{total} {filtered ? 'matching' : 'registered'} member{total === 1 ? '' : 's'}
-					</strong>
+					{summary}
 					{query ? ` for “${query}”` : ''}
 				</p>
-				<p class="admin-help">{query ? 'Searching all members; filters are ignored' : 'Newest first'}</p>
+				<p class="admin-help">
+					{attention
+						? 'Failing payments, and Family discounts without an active primary member'
+						: query
+							? 'Searching all members; filters are ignored'
+							: 'Newest first'}
+				</p>
 			</div>
 			<section class="admin-table" aria-label="Registered members" tabindex="0">
 				<table class="admin-member-table">
@@ -388,16 +454,18 @@ async function memberList(url: URL, env: Env) {
 						) : (
 							<tr>
 								<td colspan="2" class="admin-empty">
-									{filtered
-										? 'No members match your search and filters.'
-										: 'No members have registered yet.'}
+									{attention
+										? 'No members need attention.'
+										: filtered
+											? 'No members match your search and filters.'
+											: 'No members have registered yet.'}
 								</td>
 							</tr>
 						)}
 					</tbody>
 				</table>
 			</section>
-			{pagination('Member pages', current, pages, n => listURL(n, query, values))}
+			{pagination('Member pages', current, pages, n => listURL(n, query, values, attention))}
 		</>,
 		{ admin: true, dev: devAuth(env) },
 	);
@@ -424,6 +492,7 @@ const eventTypes = {
 	NotesUpdated: 'Notes updated',
 	BillingCycleChanged: 'Billing cycle changed',
 	DiscountTypeModified: 'Discount changed',
+	FamilyPrimaryChanged: 'Family primary changed',
 	StripeCustomerChanged: 'Stripe customer changed',
 	StripeSubscriptionChanged: 'Stripe subscription changed',
 	SubscriptionStatusChanged: 'Subscription status changed',
@@ -445,6 +514,22 @@ function eventDetails(event: MemberEvent) {
 	if (type === 'FobSwipe')
 		return `Fob ${details.fob} · ${details.allowed ? 'Allowed' : 'Denied'} · Controller ${details.controller} · ${details.time}`;
 	if (type === 'WaiverSigned') return `Signature #${details.waiver_id}.`;
+	if (type === 'FamilyPrimaryChanged') {
+		// Names are captured by the trigger; a primary deleted before the change has none.
+		const side = (id: unknown, name: unknown) =>
+			typeof id !== 'string' ? (
+				'Not set'
+			) : typeof name === 'string' && name ? (
+				<a href={memberPath({ member_id: id })}>{name}</a>
+			) : (
+				'Deleted member'
+			);
+		return (
+			<>
+				{side(details.from, details.from_name)} → {side(details.to, details.to_name)}
+			</>
+		);
+	}
 	if (type === 'WalletTopUp' || type === 'WalletCharge') {
 		const item = typeof details.item === 'string' && details.item ? `${details.item} · ` : '';
 		const note = typeof details.note === 'string' && details.note ? ` · ${details.note}` : '';
@@ -528,7 +613,7 @@ async function history(url: URL, env: Env, member?: Member) {
 		`${url.pathname}?${new URLSearchParams({ page: String(n), ...(type ? { event_type: type } : {}) })}`;
 	if (current > pages) return redirect(pageURL(pages));
 	return page(
-		member ? `History for ${memberName(member)}` : 'Events',
+		member ? `History for ${memberName(member)}` : 'Member activity',
 		<>
 			{member && (
 				<p>
@@ -537,9 +622,7 @@ async function history(url: URL, env: Env, member?: Member) {
 			)}
 			<p>Member changes are retained indefinitely. Timestamps are UTC.</p>
 			<form method="get" action={url.pathname} class="admin-form admin-toolbar">
-				<label class="sr-only" for="event-type">
-					Event type
-				</label>
+				<label for="event-type">Event type</label>
 				<select id="event-type" name="event_type" data-autosubmit>
 					{options([['', 'All event types'], ...Object.entries(eventTypes)], type)}
 				</select>
@@ -554,7 +637,7 @@ async function history(url: URL, env: Env, member?: Member) {
 			{eventTable((rows?.results ?? []) as HistoryEvent[], !member)}
 			{pagination('History pages', current, pages, pageURL)}
 		</>,
-		{ admin: true, dev: devAuth(env) },
+		{ admin: true, adminSection: member ? 'members' : 'logs', dev: devAuth(env) },
 	);
 }
 
@@ -572,6 +655,36 @@ function text(form: Form, key: string, label: string, max: number) {
 	const value = (form[key] ?? '').trim();
 	if (value.length > max) throw new HttpError(400, `${label} must be at most ${max} characters.`);
 	return value;
+}
+
+// Finds the member whose membership qualifies a Family discount, by member
+// email, Discord email, or Discord username. A member email match wins, since
+// it is unique. An unchanged entry keeps the saved link. Other discounts have none.
+async function familyPrimary(env: Env, form: Form, discount: Discount, member?: AdminMember) {
+	const value = text(form, 'family_primary', 'Family primary member', 254);
+	if (discount !== 'family' || !value) return null;
+	if (member?.family_primary_id && value === member.family_primary) return member.family_primary_id;
+	const { results } =
+		await env.DB.prepare(`SELECT member_id, discount_type, COALESCE(email = ?1, 0) AS exact FROM members
+    WHERE member_id IS NOT ?2 AND (member_id = ?1 OR email = ?1 OR lower(discord_email) = ?1 OR lower(discord_username) = ?1)
+    ORDER BY exact DESC LIMIT 2`)
+			.bind(value.replace(/^@/, '').toLowerCase(), member?.member_id ?? null)
+			.all<{ member_id: string; discount_type: Discount; exact: number }>();
+	const [match, other] = results;
+	if (!match) throw new HttpError(400, 'No other member has that email or Discord username.');
+	if (other && !match.exact)
+		throw new HttpError(400, 'More than one member matches that family primary. Enter their member email instead.');
+	if (match.discount_type === 'family')
+		throw new HttpError(
+			400,
+			'That member has a Family discount too. Link the member whose membership qualifies it.',
+		);
+	if (
+		member &&
+		(await env.DB.prepare('SELECT 1 FROM members WHERE family_primary_id = ?').bind(member.member_id).first())
+	)
+		throw new HttpError(400, 'This member is a family primary, so it can’t be linked to another primary.');
+	return match.member_id;
 }
 
 // Fields shared by the create and edit forms, in the order they are reported.
@@ -619,6 +732,9 @@ const conflict = (error: unknown) => {
 	] as const) {
 		if (String(error).includes(`members.${column}`)) return new HttpError(409, message);
 	}
+	// The only foreign key these writes set is the family primary.
+	if (String(error).includes('FOREIGN KEY constraint failed'))
+		return new HttpError(409, 'That family primary member was just deleted. Choose another.');
 	return error;
 };
 
@@ -669,12 +785,13 @@ function newMemberForm(env: Env, fields?: Fields, message = '', status = 200) {
 
 async function createMember(env: Env, form: Form) {
 	const value = validateNew(form);
+	const family_primary_id = await familyPrimary(env, form, value.discount_type);
 	const username = value.discord_user_id ? await guildUsername(env, value.discord_user_id) : '';
 	let member: Member | null;
 	try {
 		member =
-			await env.DB.prepare(`INSERT INTO members (email, name_override, notes, discord_user_id, discord_username, bill_annually, discount_type)
-      SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7 WHERE NOT EXISTS (SELECT 1 FROM members WHERE discord_email = ?1) RETURNING *`)
+			await env.DB.prepare(`INSERT INTO members (email, name_override, notes, discord_user_id, discord_username, bill_annually, discount_type, family_primary_id)
+      SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8 WHERE NOT EXISTS (SELECT 1 FROM members WHERE discord_email = ?1) RETURNING *`)
 				.bind(
 					value.email,
 					value.name_override,
@@ -683,6 +800,7 @@ async function createMember(env: Env, form: Form) {
 					username,
 					value.bill_annually,
 					value.discount_type,
+					family_primary_id,
 				)
 				.first<Member>();
 	} catch (error) {
@@ -695,10 +813,12 @@ async function createMember(env: Env, form: Form) {
 const staleForm = () =>
 	new HttpError(409, 'This member was changed after you opened the form. Reload the member and reapply your edits.');
 
-async function updateMember(env: Env, member: Member, value: ReturnType<typeof validateEdit>) {
+async function updateMember(env: Env, member: AdminMember, form: Form) {
+	const value = validateEdit(form);
 	if (member.metadata_version !== value.metadata_version) throw staleForm();
 	if (member.discord_user_id && !value.discord_user_id)
 		throw new HttpError(400, 'A linked Discord account can be transferred to another account, but not removed.');
+	const family_primary_id = await familyPrimary(env, form, value.discount_type, member);
 	const discordChanged = member.discord_user_id !== value.discord_user_id;
 	const customerChanged = member.stripe_customer_id !== value.stripe_customer_id;
 	const username =
@@ -716,7 +836,7 @@ async function updateMember(env: Env, member: Member, value: ReturnType<typeof v
 	try {
 		updated =
 			await env.DB.prepare(`UPDATE members SET discord_user_id = ?, ${discordChanged ? "discord_username = ?, discord_email = ''," : ''}
-      name_override = ?, notes = ?, bill_annually = ?, discount_type = ?, fob_id = ?, non_billable = ?, legacy_billing = ?,
+      name_override = ?, notes = ?, bill_annually = ?, discount_type = ?, family_primary_id = ?, fob_id = ?, non_billable = ?, legacy_billing = ?,
       stripe_customer_id = ?, ${customerChanged ? "stripe_subscription_id = NULL, stripe_subscription_state = NULL, billing_name = '', billing_email = ''," : ''}
       metadata_version = metadata_version + 1 WHERE member_id = ? AND metadata_version = ? RETURNING *`)
 				.bind(
@@ -726,6 +846,7 @@ async function updateMember(env: Env, member: Member, value: ReturnType<typeof v
 					value.notes,
 					value.bill_annually,
 					value.discount_type,
+					family_primary_id,
 					value.fob_id,
 					value.non_billable,
 					value.legacy_billing,
@@ -767,16 +888,24 @@ async function editor(
 	{ fields, message = '', status = 200, checkout = '' }: EditorOptions = {},
 ) {
 	const f: Fields = fields || { ...member, billing: member.bill_annually ? 'yearly' : 'monthly' };
-	const [history, wallet] = await env.DB.batch([
+	const [history, wallet, family] = await env.DB.batch([
 		env.DB.prepare('SELECT * FROM member_events WHERE member_id = ? ORDER BY created DESC, id DESC LIMIT 10').bind(
 			member.member_id,
 		),
 		env.DB.prepare('SELECT COALESCE(SUM(amount), 0) AS balance FROM wallet_entries WHERE member_id = ?').bind(
 			member.member_id,
 		),
+		env.DB.prepare(`SELECT *, ${qualifiesSQL('members')} AS qualifies FROM members
+      WHERE member_id = ? OR family_primary_id = ? ORDER BY created, member_id`).bind(
+			member.family_primary_id,
+			member.member_id,
+		),
 	]);
 	const events = (history?.results ?? []) as MemberEvent[];
 	const balance = (wallet?.results[0] as { balance: number } | undefined)?.balance ?? 0;
+	const relatives = (family?.results ?? []) as (Member & { qualifies: number })[];
+	const primary = relatives.find(relative => relative.member_id === member.family_primary_id);
+	const dependents = relatives.filter(relative => relative.family_primary_id === member.member_id);
 	const account = [
 		['Member email', member.email],
 		['Waiver name', member.waiver_name],
@@ -797,6 +926,9 @@ async function editor(
 			<section class="admin-member-summary" aria-label="Subscription summary">
 				<div class="admin-summary-line">
 					{statusBadge(member)}
+					{attentionReasons(member).map(reason => (
+						<span class="admin-status admin-status--alert">{reason}</span>
+					))}
 					{subscriptionLink(member, env)}
 				</div>
 			</section>
@@ -817,7 +949,10 @@ async function editor(
 						{input('fob_id', 'Fob ID', f.fob_id, 10)}
 						{checkbox('non_billable', 'Non-billable', f.non_billable)}
 						{checkbox('legacy_billing', 'Legacy billing', f.legacy_billing)}
-						<details class="admin-billing admin-linked-accounts" open={!!checkout || status >= 400}>
+						<details
+							class="admin-billing admin-linked-accounts"
+							open={!!checkout || status >= 400 || !!member.family_problem}
+						>
 							<summary>Billing info</summary>
 							<p class="admin-help">
 								Used for new checkouts only. Generating a link saves these choices. Manage existing
@@ -887,13 +1022,41 @@ async function editor(
 						{account.map(([label, value]) => (
 							<div>
 								<dt>{label}</dt>
-								<dd>{value || '—'}</dd>
+								<dd>{value || 'Not set'}</dd>
 							</div>
 						))}
 						<div>
 							<dt>Registered</dt>
 							<dd>{date(member.created)}</dd>
 						</div>
+						{(primary || member.discount_type === 'family') && (
+							<div>
+								<dt>Family primary</dt>
+								<dd>
+									{primary ? (
+										<>
+											<a href={memberPath(primary)}>{memberName(primary)}</a>
+											{primary.qualifies ? '' : ' (inactive)'}
+										</>
+									) : (
+										'Not linked'
+									)}
+								</dd>
+							</div>
+						)}
+						{dependents.length > 0 && (
+							<div>
+								<dt>Family members</dt>
+								<dd>
+									{dependents.map((dependent, i) => (
+										<>
+											{i ? ', ' : ''}
+											<a href={memberPath(dependent)}>{memberName(dependent)}</a>
+										</>
+									))}
+								</dd>
+							</div>
+						)}
 					</dl>
 				</aside>
 			</div>
@@ -902,7 +1065,11 @@ async function editor(
 				id="delete-member"
 				method="post"
 				action={`${path}/delete`}
-				data-confirm={`Delete ${memberName(member)}? This cannot be undone. Cancel any Stripe subscription separately.`}
+				data-confirm={`Delete ${memberName(member)}? This cannot be undone. Cancel any Stripe subscription separately.${
+					dependents.length
+						? ` ${dependents.length} family member${dependents.length === 1 ? '' : 's'} will be unlinked.`
+						: ''
+				}`}
 			/>
 			<noscript>
 				<p class="admin-help">Enable JavaScript to delete a member with confirmation.</p>
@@ -980,8 +1147,12 @@ export async function adminRequest(request: Request, env: Env) {
 	}
 	const match = path.match(/^\/admin\/members\/([a-f0-9]{32})(\/events|\/checkout|\/sync|\/delete|\/wallet)?$/);
 	if (!match) throw new HttpError(404, 'Admin page not found.');
+	// The family primary is shown by an identifier familyPrimary() resolves, preferring the unique member email.
 	const member = await env.DB.prepare(
-		`SELECT *, COALESCE(${fobEnabledSQL}, 0) AS fob_enabled FROM members WHERE member_id = ?`,
+		`SELECT members.*, COALESCE(${fobEnabledSQL}, 0) AS fob_enabled, ${attentionColumns},
+      COALESCE((SELECT COALESCE(p.email, NULLIF(p.discord_email, ''), p.member_id) FROM members AS p
+        WHERE p.member_id = members.family_primary_id), '') AS family_primary
+    FROM members WHERE member_id = ?`,
 	)
 		.bind(match[1])
 		.first<AdminMember>();
@@ -996,7 +1167,7 @@ export async function adminRequest(request: Request, env: Env) {
 		const form = await readForm(request);
 		let sideEffects: Awaited<ReturnType<typeof updateMember>>;
 		try {
-			sideEffects = await updateMember(env, member, validateEdit(form));
+			sideEffects = await updateMember(env, member, form);
 		} catch (error) {
 			if (!(error instanceof HttpError)) throw error;
 			return editor(env, member, { fields: form, message: error.message, status: error.status });
@@ -1023,17 +1194,28 @@ export async function adminRequest(request: Request, env: Env) {
 		try {
 			if (Number(form.metadata_version) !== member.metadata_version) throw staleForm();
 			const billing = billingFields(form);
-			if (billing.bill_annually !== member.bill_annually || billing.discount_type !== member.discount_type) {
-				const updated =
-					await env.DB.prepare(`UPDATE members SET bill_annually = ?, discount_type = ?, metadata_version = metadata_version + 1
-          WHERE member_id = ? AND metadata_version = ? RETURNING *`)
-						.bind(
-							billing.bill_annually,
-							billing.discount_type,
-							member.member_id,
-							Number(form.metadata_version),
-						)
-						.first<Member>();
+			const family_primary_id = await familyPrimary(env, form, billing.discount_type, member);
+			if (
+				billing.bill_annually !== member.bill_annually ||
+				billing.discount_type !== member.discount_type ||
+				family_primary_id !== member.family_primary_id
+			) {
+				let updated: Member | null;
+				try {
+					updated =
+						await env.DB.prepare(`UPDATE members SET bill_annually = ?, discount_type = ?, family_primary_id = ?,
+            metadata_version = metadata_version + 1 WHERE member_id = ? AND metadata_version = ? RETURNING *`)
+							.bind(
+								billing.bill_annually,
+								billing.discount_type,
+								family_primary_id,
+								member.member_id,
+								Number(form.metadata_version),
+							)
+							.first<Member>();
+				} catch (error) {
+					throw conflict(error);
+				}
 				if (!updated) throw staleForm();
 				current = { ...member, ...updated };
 				fields = { ...form, metadata_version: updated.metadata_version };

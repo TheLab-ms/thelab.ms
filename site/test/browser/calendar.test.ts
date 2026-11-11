@@ -130,7 +130,7 @@ test('shows empty and failed states and can recover', async () => {
 	assert.match(b.get('status').textContent, /couldn’t be loaded/);
 	b.click('next');
 	await b.reply([]);
-	assert.equal(b.get('status').textContent, '');
+	assert.match(b.get('status').textContent, /No events scheduled this month/);
 	b.click('next');
 	await b.reply();
 	assert.equal(b.get('status').textContent, '');

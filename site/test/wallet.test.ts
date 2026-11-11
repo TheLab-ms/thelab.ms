@@ -1,6 +1,7 @@
 import { env } from 'cloudflare:workers';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { walletCookie, type Member } from '../src/lib.ts';
+import { donationLink } from '../static/sign/lib.js';
 import { call, insertMember, mockFetch, post, quiet, readMember, resetDB, session, stripeEvent } from './helpers.ts';
 
 const discordID = '333333333333333333';
@@ -339,6 +340,23 @@ describe('Wallet', () => {
 			'/wallet/redeem?n=Filament&u=gram&p=0.10&min=9&max=2',
 		]) {
 			expect((await call(path, { headers: { Cookie: cookie } })).status).toBe(400);
+		}
+	});
+
+	it('accepts the donation links the sign generator builds', async () => {
+		const cookie = await walletSession();
+		const fixed = { perUnit: false, unit: '', min: '', max: '' };
+		for (const donation of [
+			{ ...fixed, name: 'Soda & Snacks', price: '$1.50' },
+			{ ...fixed, name: 'Gum', price: '.01' },
+			{ ...fixed, name: '🧃 Juice/box?', price: '999.99' },
+			{ name: 'Filament', price: '0.0025', perUnit: true, unit: 'gram', min: '', max: '' },
+			{ name: 'Resin', price: '999.9999', perUnit: true, unit: 'mL', min: '0.5', max: '99999.99' },
+		]) {
+			const { href, errors } = donationLink(donation);
+			expect(errors).toEqual({});
+			const response = await call(href.replace('https://thelab.ms', ''), { headers: { Cookie: cookie } });
+			expect(response.status, href).toBe(200);
 		}
 	});
 

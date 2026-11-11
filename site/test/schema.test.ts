@@ -1,4 +1,5 @@
 import { env } from 'cloudflare:workers';
+import { applyD1Migrations, reset } from 'cloudflare:test';
 import { beforeAll, describe, expect, it } from 'vitest';
 import type {
 	CalendarEvent,
@@ -41,6 +42,7 @@ const tables = {
 		legacy_waiver_signed: 'NOT NULL INTEGER',
 		stripe_sync_version: 'NOT NULL INTEGER',
 		waiver_signed: 'NOT NULL INTEGER',
+		family_primary_id: 'NULL TEXT',
 	} satisfies Columns<Member>,
 	member_events: {
 		id: 'NOT NULL INTEGER',
@@ -99,5 +101,89 @@ describe('Row types', () => {
 			results.map(column => [column.name, `${column.notnull || column.pk ? 'NOT NULL' : 'NULL'} ${column.type}`]),
 		);
 		expect(actual).toEqual(expected);
+	});
+});
+
+describe('Conway notes migration', () => {
+	beforeAll(async () => {
+		await reset();
+		await applyD1Migrations(
+			env.DB,
+			env.TEST_MIGRATIONS.filter(migration => migration.name < '0016'),
+		);
+	});
+
+	it('keeps only PayPal, Lifetime, and Conway discount details and changes nothing else', async () => {
+		const conway = (fields: Record<string, string>) =>
+			`Conway source metadata: ${JSON.stringify({ confirmed: '1', leadership: '0', id: '7', ...fields })}`;
+		const cases = [
+			[conway({ waiver: '1', fob_last_seen: '1700000000' }), ''],
+			[
+				`Paid {cash}\r\n\n${conway({ discount_type: 'Lifetime', paypal_subscription_id: 'I-1', paypal_price: '40' })}`,
+				'Paid {cash}\n\nFrom Conway: Lifetime member; PayPal subscription I-1; PayPal price 40',
+			],
+			[
+				conway({ discount_type: 'educator', discount_status: 'approved', heard_about: 'Reddit' }),
+				'From Conway: educator discount (approved)',
+			],
+			[conway({ discount_type: 'student', discount_status: '' }), 'From Conway: student discount'],
+			[conway({ discount_type: 'none', discount_status: '' }), ''],
+			[`Fob returned\n\n${conway({ pronouns: 'they/them' })}`, 'Fob returned'],
+			['Conway source metadata: {"broken"', 'Conway source metadata: {"broken"'],
+			['Hand-written note', 'Hand-written note'],
+		] as const;
+		for (const [i, [notes]] of cases.entries())
+			await env.DB.prepare('INSERT INTO members (email, notes, created) VALUES (?, ?, ?)')
+				.bind(`member${i}@example.com`, notes, i)
+				.run();
+		const select = 'SELECT * FROM members ORDER BY created';
+		const before = (await env.DB.prepare(select).all<Member>()).results;
+		await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
+		const after = (await env.DB.prepare(select).all<Member>()).results;
+		expect(after.map(member => member.notes)).toEqual(cases.map(([, notes]) => notes));
+		expect(after.map(({ notes: _, ...rest }) => rest)).toEqual(before.map(({ notes: _, ...rest }) => rest));
+	});
+});
+
+describe('Family primary migration', () => {
+	beforeAll(async () => {
+		await reset();
+		await applyD1Migrations(
+			env.DB,
+			env.TEST_MIGRATIONS.filter(migration => migration.name < '0015'),
+		);
+	});
+
+	it('links Family discounts to their Conway root family member', async () => {
+		const conway = (fields: Record<string, string>, before = '') =>
+			`${before}Conway source metadata: ${JSON.stringify({ confirmed: '1', ...fields })}`;
+		const rows = [
+			['parent', '', conway({ id: '10' })],
+			['child', 'family', conway({ id: '11', root_family_member: '10' }, 'Paid {by} parent\n\n')],
+			['former', '', conway({ id: '12', root_family_member: '10' })],
+			['unknown', 'family', conway({ id: '13', root_family_member: '99' })],
+			['broken', 'family', 'Conway source metadata: {"id": "14", "root_family_member": "10"'],
+			['family-root', 'family', conway({ id: '15' })],
+			['chained', 'family', conway({ id: '16', root_family_member: '15' })],
+		];
+		for (const [name, discount, notes] of rows)
+			await env.DB.prepare('INSERT INTO members (member_id, email, discount_type, notes) VALUES (?, ?, ?, ?)')
+				.bind(name.padEnd(32, '0'), `${name}@example.com`, discount, notes)
+				.run();
+		await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
+		const { results } = await env.DB.prepare(
+			'SELECT email, family_primary_id FROM members WHERE family_primary_id IS NOT NULL',
+		).all();
+		expect(results).toEqual([{ email: 'child@example.com', family_primary_id: 'parent'.padEnd(32, '0') }]);
+		const event = await env.DB.prepare(
+			"SELECT member_id, details FROM member_events WHERE event_type = 'FamilyPrimaryChanged'",
+		).first<{ member_id: string; details: string }>();
+		expect(event?.member_id).toBe('child'.padEnd(32, '0'));
+		expect(JSON.parse(event?.details ?? '')).toEqual({
+			from: null,
+			from_name: null,
+			to: 'parent'.padEnd(32, '0'),
+			to_name: 'parent@example.com',
+		});
 	});
 });

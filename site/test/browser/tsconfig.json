@@ -4,7 +4,8 @@
 	"compilerOptions": {
 		"lib": ["es2024"],
 		"types": ["node"],
-		"noUncheckedIndexedAccess": false
+		"noUncheckedIndexedAccess": false,
+		"allowJs": true
 	},
 	"include": ["."]
 }

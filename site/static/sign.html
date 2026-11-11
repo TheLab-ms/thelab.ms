@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Make a printable TheLab sign with a header, message, and optional QR code.">
+  <meta name="theme-color" content="#00C853">
+  <title>Sign generator | TheLab</title>
+  <link rel="canonical" href="https://thelab.ms/sign">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/sign/app.js"></script>
+</head>
+<body class="membership-page sign-page">
+  <main class="container membership-main sign-main">
+    <a class="membership-brand" href="/" aria-label="TheLab home"><img src="/assets/favicon.svg" alt="" width="48" height="48">TheLab</a>
+    <div class="sign-layout">
+      <section class="card sign-editor">
+        <h1>Sign generator</h1>
+        <p>Make a letter-sized TheLab sign. Blank fields use the suggested text shown in the preview. Print it, or save it as a PDF from the print dialog.</p>
+        <form id="sign-form" class="event-form">
+          <label for="sign-header-input">Header</label>
+          <textarea id="sign-header-input" name="header" rows="2" maxlength="200"></textarea>
+          <label for="sign-body-input">Body</label>
+          <textarea id="sign-body-input" name="body" rows="5" maxlength="2000"></textarea>
+          <fieldset class="sign-fields">
+            <legend>QR code</legend>
+            <div class="sign-choices">
+              <label><input type="radio" name="qr-mode" value="none">None</label>
+              <label><input type="radio" name="qr-mode" value="link">Link</label>
+              <label><input type="radio" name="qr-mode" value="donation">Wallet donation</label>
+            </div>
+          </fieldset>
+          <fieldset id="sign-link-fields" class="sign-fields" hidden disabled>
+            <label for="sign-qr-input">Link</label>
+            <input id="sign-qr-input" name="qr" type="text" inputmode="url" autocomplete="off" spellcheck="false" maxlength="500">
+            <small class="sign-hint">Must be on thelab.ms or one of its subdomains.</small>
+          </fieldset>
+          <fieldset id="sign-donation-fields" class="sign-fields" hidden disabled>
+            <label for="sign-item-input">Item</label>
+            <input id="sign-item-input" name="item" type="text" autocomplete="off" maxlength="80">
+            <div class="sign-choices" role="radiogroup" aria-label="Pricing">
+              <label><input type="radio" name="pricing" value="fixed" checked>Fixed price</label>
+              <label><input type="radio" name="pricing" value="unit">Price per unit</label>
+            </div>
+            <label for="sign-price-input">Price (USD)</label>
+            <input id="sign-price-input" name="price" type="text" inputmode="decimal" autocomplete="off" maxlength="12">
+            <fieldset id="sign-unit-fields" class="sign-fields" hidden disabled>
+              <label for="sign-unit-input">Unit</label>
+              <input id="sign-unit-input" name="unit" type="text" autocomplete="off" maxlength="20">
+              <div class="sign-range">
+                <div>
+                  <label for="sign-min-input">Minimum (optional)</label>
+                  <input id="sign-min-input" name="min" type="text" inputmode="decimal" autocomplete="off" maxlength="8">
+                </div>
+                <div>
+                  <label for="sign-max-input">Maximum (optional)</label>
+                  <input id="sign-max-input" name="max" type="text" inputmode="decimal" autocomplete="off" maxlength="8">
+                </div>
+              </div>
+            </fieldset>
+            <p id="sign-donation-status" class="sign-hint sign-donation-status" aria-live="polite"></p>
+          </fieldset>
+          <p id="sign-overflow" class="sign-overflow" role="status" hidden>The text runs off the bottom of the page. Shorten it to fit.</p>
+          <button class="btn btn-primary" type="submit">Print sign</button>
+        </form>
+        <noscript><p>Enable JavaScript to use the sign generator.</p></noscript>
+      </section>
+      <section id="sign-preview" class="sign-preview" aria-label="Sign preview">
+        <article id="sign" class="sign">
+          <img class="sign-logo" src="/assets/sign-logo.svg" alt="TheLab" width="104" height="96">
+          <h2 id="sign-header" class="sign-header">Your heading</h2>
+          <p id="sign-body" class="sign-body"></p>
+          <div id="sign-qr" class="sign-qr" hidden><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 25 25" shape-rendering="crispEdges" aria-hidden="true"><path></path></svg></div>
+        </article>
+      </section>
+    </div>
+  </main>
+</body>
+</html>

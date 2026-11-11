@@ -91,6 +91,7 @@ export interface Member {
 	legacy_waiver_signed: Flag;
 	stripe_sync_version: number;
 	waiver_signed: Flag;
+	family_primary_id: string | null;
 }
 
 export interface MemberEvent {

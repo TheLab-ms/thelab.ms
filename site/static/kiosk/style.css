@@ -6,8 +6,8 @@
 	box-sizing: border-box;
 }
 body {
-	font-family: system-ui, -apple-system, sans-serif;
-	color: #999;
+	font-family: "Space Grotesk", system-ui, sans-serif;
+	color: #b5b5b5;
 	background: #0d0d0d;
 }
 #kiosk {
@@ -25,15 +25,17 @@ body {
 		min-height: 100svh;
 	}
 }
-[data-state="reading"] > svg {
-	animation: kiosk-pulse 1s ease-in-out infinite;
-}
 #kiosk > svg {
 	width: clamp(120px, 18vh, 200px);
 	color: #00c853;
 }
 #status {
 	font-size: clamp(1.25rem, 2vw, 1.75rem);
+}
+#kiosk h1 {
+	font-size: clamp(1.75rem, 4vw, 2.5rem);
+	line-height: 1.2;
+	color: #fff;
 }
 #status[role="alert"] {
 	color: #ffb86b;
@@ -54,7 +56,7 @@ body {
 	width: min(460px, 100%);
 	padding: clamp(1rem, 2vw, 2rem);
 	background: #fff;
-	border-radius: 24px;
+	border-radius: 6px;
 }
 #qr {
 	display: block;
@@ -76,13 +78,20 @@ body {
 	line-height: 1;
 	cursor: pointer;
 }
-@keyframes kiosk-pulse {
-	50% {
-		opacity: 0.3;
-	}
+#close:hover {
+	background: #555;
 }
-@media (prefers-reduced-motion: reduce) {
-	[data-state="reading"] > svg {
-		animation: none;
-	}
+#close:active {
+	background: #111;
+}
+#close:focus-visible {
+	outline: 3px solid #00c853;
+	outline-offset: 4px;
+}
+@font-face {
+	font-family: "Space Grotesk";
+	font-style: normal;
+	font-weight: 400 700;
+	font-display: swap;
+	src: url("/assets/space-grotesk-latin.woff2") format("woff2");
 }

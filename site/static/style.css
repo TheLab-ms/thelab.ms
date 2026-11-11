@@ -1,7 +1,18 @@
-/* ============================================
-   TheLab - Everyone's Makerspace
-   Dark Industrial Theme with Green Accents
-   ============================================ */
+/* Brand fonts are local so public, member, admin, and LAN pages agree. */
+@font-face {
+	font-family: "Space Grotesk";
+	font-style: normal;
+	font-weight: 400 700;
+	font-display: swap;
+	src: url("/assets/space-grotesk-latin.woff2") format("woff2");
+}
+@font-face {
+	font-family: "Source Code Pro";
+	font-style: normal;
+	font-weight: 300 700;
+	font-display: swap;
+	src: url("/assets/source-code-pro-latin.woff2") format("woff2");
+}
 
 /* ---------- CSS Custom Properties ---------- */
 :root {
@@ -17,12 +28,11 @@
 	--color-accent: #00c853;
 	--color-accent-hover: #00e676;
 	--color-accent-dark: #009624;
-	--color-accent-glow: rgba(0, 200, 83, 0.15);
 	--color-accent-subtle: rgba(0, 200, 83, 0.08);
 
 	--color-text: #e0e0e0;
-	--color-text-muted: #999999;
-	--color-text-dim: #666666;
+	--color-text-muted: #ababab;
+	--color-text-dim: #999999;
 	--color-heading: #ffffff;
 	--color-link: #00c853;
 
@@ -33,7 +43,7 @@
 	--font-body: "Source Code Pro", monospace, system-ui, -apple-system, sans-serif;
 
 	/* Spacing */
-	--section-padding: 6rem;
+	--section-padding: clamp(3rem, 6vw, 5rem);
 	--container-max: 1200px;
 	--container-pad: 1.5rem;
 
@@ -44,14 +54,28 @@
 
 	/* Border radius */
 	--radius-sm: 4px;
-	--radius-md: 8px;
-	--radius-lg: 12px;
-	--radius-xl: 16px;
+	--radius-md: 4px;
+	--radius-lg: 6px;
+	--radius-xl: 6px;
+	color-scheme: dark;
+}
+
+h1,
+h2,
+h3,
+h4 {
+	font-family: var(--font-heading);
+	color: var(--color-heading);
+	line-height: 1.2;
+}
+h1 {
+	font-size: clamp(1.8rem, 4vw, 2.6rem);
 }
 
 /* ---------- Calendar and event forms ---------- */
 .calendar-toolbar {
-	display: flex;
+	display: grid;
+	grid-template-columns: 44px minmax(0, 1fr) 44px;
 	align-items: center;
 	justify-content: space-between;
 	gap: 1rem;
@@ -98,8 +122,8 @@
 	display: block;
 	padding: 0.5rem;
 	margin: 0.3rem 0;
-	border-left: 2px solid var(--color-accent);
-	background: var(--color-accent-subtle);
+	border: 1px solid var(--color-border-light);
+	background: var(--color-surface);
 	overflow-wrap: anywhere;
 	font-size: 0.8rem;
 }
@@ -110,7 +134,6 @@
 }
 .calendar-event--cancelled {
 	border-color: var(--color-text-dim);
-	opacity: 0.7;
 }
 .calendar-event--cancelled strong {
 	text-decoration: line-through;
@@ -268,7 +291,31 @@ body {
 	background-color: var(--color-bg);
 	-webkit-font-smoothing: antialiased;
 	-moz-osx-font-smoothing: grayscale;
-	overflow-x: hidden;
+	overflow-wrap: anywhere;
+}
+
+:is(a[href], button, summary, select, label[for], label:has(input), input[type="checkbox"], input[type="radio"]) {
+	cursor: pointer;
+}
+:is(button, input, select, textarea):disabled {
+	cursor: not-allowed;
+	opacity: 0.55;
+}
+a:active {
+	text-decoration: underline;
+}
+.skip-link {
+	position: fixed;
+	top: 0.5rem;
+	left: 0.5rem;
+	z-index: 1100;
+	padding: 0.75rem 1rem;
+	color: var(--color-bg);
+	background: var(--color-accent);
+	transform: translateY(-160%);
+}
+.skip-link:focus {
+	transform: none;
 }
 
 img {
@@ -285,6 +332,15 @@ a {
 
 a:hover {
 	color: var(--color-accent-hover);
+}
+:where(p, td, dd, .card-desc) a {
+	text-decoration: underline;
+	text-underline-offset: 0.2em;
+}
+:where(.membership-page .footer, .footer-brand > p, .footer-contact-email, .wallet-links) > a {
+	display: inline-flex;
+	align-items: center;
+	min-height: 44px;
 }
 
 address {
@@ -323,7 +379,7 @@ address {
 	position: relative;
 }
 
-/* Horizontal gradient divider — reusable via .section-divider-top */
+/* Rules separate content, without giving every section an accent. */
 .section-divider-top::before {
 	content: "";
 	position: absolute;
@@ -333,18 +389,18 @@ address {
 	width: 80%;
 	max-width: 800px;
 	height: 1px;
-	background: linear-gradient(90deg, transparent, var(--color-border-light), transparent);
+	background: var(--color-border);
 }
 
-/* Full-width accent gradient bar */
+/* Full-width section rule */
 .section-accent-top::before {
 	content: "";
 	position: absolute;
 	top: 0;
 	left: 0;
 	right: 0;
-	height: 2px;
-	background: linear-gradient(90deg, transparent, var(--color-accent), transparent);
+	height: 1px;
+	background: var(--color-border);
 }
 
 /* ---------- Buttons ---------- */
@@ -353,17 +409,21 @@ address {
 	align-items: center;
 	justify-content: center;
 	gap: 0.5rem;
-	padding: 0.875rem 2rem;
+	min-height: 44px;
+	padding: 0.75rem 1.25rem;
 	font-family: var(--font-heading);
 	font-size: 0.95rem;
 	font-weight: 600;
-	letter-spacing: 0.02em;
-	border: 2px solid transparent;
+	border: 1px solid transparent;
 	border-radius: var(--radius-md);
 	cursor: pointer;
-	transition: all var(--transition-base);
+	transition:
+		background-color var(--transition-fast),
+		border-color var(--transition-fast),
+		color var(--transition-fast);
 	text-decoration: none;
-	white-space: nowrap;
+	white-space: normal;
+	text-align: center;
 }
 
 .btn-primary {
@@ -376,10 +436,9 @@ address {
 	background: var(--color-accent-hover);
 	border-color: var(--color-accent-hover);
 	color: var(--color-bg);
-	box-shadow:
-		0 0 30px var(--color-accent-glow),
-		0 0 60px rgba(0, 200, 83, 0.08);
-	transform: translateY(-1px);
+}
+.btn:active:not(:disabled) {
+	box-shadow: inset 0 0 0 2px currentColor;
 }
 
 .btn-outline {
@@ -396,6 +455,7 @@ address {
 
 .btn-discord {
 	border-color: var(--color-border-light);
+	color: var(--color-heading);
 }
 
 .btn-discord:hover {
@@ -408,20 +468,20 @@ address {
 	padding: 1rem 2.5rem;
 	font-size: 1.05rem;
 }
+.calendar-toolbar .btn {
+	padding: 0.5rem;
+}
 
 /* ---------- Cards (shared base) ---------- */
 .card {
 	background: var(--color-card);
 	border: 1px solid var(--color-border);
 	border-radius: var(--radius-xl);
-	transition:
-		border-color var(--transition-base),
-		box-shadow var(--transition-base);
 }
 
-.card:hover {
-	border-color: var(--color-accent);
-	box-shadow: 0 4px 24px var(--color-accent-glow);
+a.card:hover {
+	border-color: var(--color-text-muted);
+	background: var(--color-surface-alt);
 }
 
 .card-icon {
@@ -458,8 +518,8 @@ address {
 
 /* ---------- Section Header ---------- */
 .section-header {
-	text-align: center;
-	margin-bottom: 3.5rem;
+	text-align: left;
+	margin-bottom: 2rem;
 }
 
 .section-title {
@@ -472,18 +532,14 @@ address {
 }
 
 .section-line {
-	width: 60px;
-	height: 3px;
-	background: var(--color-accent);
-	margin: 0 auto 1.5rem;
-	border-radius: 2px;
+	display: none;
 }
 
 .section-subtitle {
 	font-size: 1.15rem;
 	color: var(--color-text-muted);
 	max-width: 600px;
-	margin: 0 auto;
+	margin: 0;
 }
 
 /* ============================================
@@ -540,22 +596,18 @@ address {
    NAVIGATION
    ============================================ */
 .navbar {
-	position: fixed;
+	position: sticky;
 	top: 0;
 	left: 0;
 	right: 0;
 	z-index: 1000;
-	padding: 1rem 0;
-	transition: all var(--transition-base);
-	background: transparent;
+	padding: 0.6rem 0;
+	background: var(--color-bg);
+	border-bottom: 1px solid var(--color-border);
 }
 
 .navbar.scrolled {
-	background: rgba(13, 13, 13, 0.95);
-	backdrop-filter: blur(12px);
-	-webkit-backdrop-filter: blur(12px);
-	padding: 0.6rem 0;
-	border-bottom: 1px solid var(--color-border);
+	background: var(--color-bg);
 }
 
 .nav-container {
@@ -575,21 +627,23 @@ address {
 	color: var(--color-heading);
 }
 
-/* At the top of the page the bar is transparent and the hero logo is
-   already on screen — hide the nav wordmark so it isn't duplicated.
-   visibility (not display) keeps the layout stable and pulls the link
-   out of the tab order while it's invisible. */
 .navbar .nav-logo {
+	min-height: 44px;
+	min-width: 0;
+	max-width: 50%;
+}
+.navbar .wordmark {
+	max-width: 100%;
+}
+.navbar.nav-ready .nav-logo {
 	opacity: 0;
 	visibility: hidden;
-	transform: translateY(-0.35rem);
+	transform: translateY(-0.25rem);
 	transition:
-		opacity var(--transition-base),
-		transform var(--transition-base),
-		visibility var(--transition-base);
+		opacity var(--transition-fast),
+		transform var(--transition-fast);
 }
-
-.navbar.scrolled .nav-logo {
+.navbar.nav-ready.scrolled .nav-logo {
 	opacity: 1;
 	visibility: visible;
 	transform: none;
@@ -597,7 +651,7 @@ address {
 
 /* Logo shrinks with the navbar once the page scrolls */
 .navbar.scrolled .nav-logo .wordmark {
-	height: 1.45rem;
+	height: 1.7rem;
 }
 
 .nav-menu {
@@ -609,6 +663,7 @@ address {
 
 .nav-link {
 	display: block;
+	min-height: 44px;
 	padding: 0.5rem 1rem;
 	font-family: var(--font-heading);
 	font-size: 0.9rem;
@@ -622,6 +677,11 @@ address {
 
 .nav-link:hover {
 	color: var(--color-heading);
+}
+.nav-link.active {
+	color: var(--color-heading);
+	text-decoration: underline;
+	text-underline-offset: 0.4rem;
 }
 
 .nav-cta {
@@ -645,6 +705,11 @@ address {
 	border: none;
 	cursor: pointer;
 	padding: 0.5rem;
+	min-height: 44px;
+	gap: 0.75rem;
+	align-items: center;
+	color: var(--color-heading);
+	font: 500 0.95rem var(--font-heading);
 	z-index: 1001;
 }
 
@@ -691,21 +756,34 @@ address {
 /* ============================================
    HERO
    ============================================ */
+.landing-intro {
+	display: grid;
+	grid-template-rows: 1fr auto;
+	/* Reserve the navbar's 44px controls, vertical padding, and border. */
+	min-height: calc(100svh - 44px - 1.2rem - 1px);
+}
 .hero {
 	position: relative;
-	min-height: calc(100vh - 3.5rem);
-	display: flex;
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
 	align-items: center;
-	justify-content: center;
-	overflow: hidden;
+	padding: clamp(3.5rem, 7vw, 6rem) 0;
 }
 
 .hero-bg {
 	position: absolute;
 	inset: 0;
 	z-index: 0;
-	opacity: 0;
-	transition: opacity 2s ease;
+}
+.hero-bg::after {
+	content: "";
+	position: absolute;
+	inset: 0;
+	background: rgba(13, 13, 13, 0.76);
+}
+.hero-bg picture {
+	display: block;
+	height: 100%;
 }
 
 .hero-bg img {
@@ -715,40 +793,10 @@ address {
 	object-fit: cover;
 }
 
-.hero-bg.loaded {
-	opacity: 1;
-}
-
-.hero-overlay {
-	position: absolute;
-	inset: 0;
-	background: linear-gradient(
-		180deg,
-		rgba(13, 13, 13, 0.6) 0%,
-		rgba(13, 13, 13, 0.75) 50%,
-		rgba(13, 13, 13, 0.95) 100%
-	);
-	z-index: 1;
-}
-
-/* Subtle grid pattern overlay for industrial feel */
-.hero::before {
-	content: "";
-	position: absolute;
-	inset: 0;
-	background-image:
-		linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
-		linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
-	background-size: 40px 40px;
-	z-index: 2;
-	pointer-events: none;
-}
-
 .hero-content {
 	position: relative;
-	z-index: 3;
+	z-index: 1;
 	text-align: center;
-	padding: 2rem 0;
 }
 
 /* The h1 is the logo itself; the accessible name lives in .sr-only */
@@ -759,125 +807,37 @@ address {
 
 .hero-logo {
 	display: block;
-	width: clamp(190px, 22vw, 280px);
+	width: clamp(180px, 20vw, 240px);
 	height: auto;
 	margin: 0 auto;
 	overflow: visible;
-	filter: drop-shadow(0 12px 32px rgba(0, 0, 0, 0.55));
 }
 
 .hero-logo-word {
 	fill: var(--color-heading);
-	animation: logoWordIn 800ms 200ms ease-out both;
-}
-
-.hero-logo-word--2 {
-	animation-delay: 340ms;
 }
 
 .hero-logo-bracket {
-	fill: var(--color-accent);
-	filter: drop-shadow(0 0 28px var(--color-accent-glow));
-}
-
-.hero-logo-bracket--l {
-	animation: logoBracketInL 900ms cubic-bezier(0.2, 0.85, 0.3, 1) both;
-}
-
-.hero-logo-bracket--r {
-	animation: logoBracketInR 900ms cubic-bezier(0.2, 0.85, 0.3, 1) both;
-}
-
-@keyframes logoBracketInL {
-	from {
-		opacity: 0;
-		transform: translateX(-500px);
-	}
-	to {
-		opacity: 1;
-		transform: translateX(0);
-	}
-}
-
-@keyframes logoBracketInR {
-	from {
-		opacity: 0;
-		transform: translateX(500px);
-	}
-	to {
-		opacity: 1;
-		transform: translateX(0);
-	}
-}
-
-@keyframes logoWordIn {
-	from {
-		opacity: 0;
-		transform: translateY(220px);
-	}
-	to {
-		opacity: 1;
-		transform: translateY(0);
-	}
+	fill: var(--color-heading);
 }
 
 .hero-tagline {
 	font-family: var(--font-heading);
-	font-size: clamp(1.25rem, 3vw, 1.75rem);
+	font-size: clamp(1.125rem, 2vw, 1.5rem);
 	font-weight: 500;
 	color: var(--color-heading);
 	letter-spacing: 0.1em;
 	text-transform: uppercase;
+	line-height: 1.1;
 	margin-bottom: 1.25rem;
 }
 
 .hero-subtitle {
 	font-size: clamp(1rem, 2vw, 1.2rem);
-	color: var(--color-text-muted);
 	max-width: 560px;
-	margin: 0 auto 2.5rem;
+	margin: 0 auto 1.75rem;
+	color: #e0e0e0;
 	line-height: 1.6;
-}
-
-.hero-ctas {
-	display: flex;
-	gap: 1rem;
-	justify-content: center;
-	flex-wrap: wrap;
-}
-
-/* Scroll indicator */
-.hero-scroll-indicator {
-	position: absolute;
-	bottom: 2rem;
-	left: 50%;
-	transform: translateX(-50%);
-	z-index: 3;
-}
-
-.scroll-arrow {
-	width: 24px;
-	height: 24px;
-	border-right: 2px solid var(--color-text-dim);
-	border-bottom: 2px solid var(--color-text-dim);
-	transform: rotate(45deg);
-	animation: scrollBounce 2s ease infinite;
-}
-
-@keyframes scrollBounce {
-	0%,
-	20%,
-	50%,
-	80%,
-	100% {
-		transform: translateY(0) rotate(45deg);
-	}
-	40% {
-		transform: translateY(8px) rotate(45deg);
-	}
-	60% {
-		transform: translateY(4px) rotate(45deg);
-	}
 }
 
 /* ============================================
@@ -885,28 +845,16 @@ address {
    ============================================ */
 .address-banner {
 	background: var(--color-surface);
-	border-top: 1px solid var(--color-accent);
+	border-top: 1px solid var(--color-border);
 	border-bottom: 1px solid var(--color-border);
 	padding: 1rem 0;
 	position: relative;
 }
 
-/* Subtle accent glow along top edge */
-.address-banner::before {
-	content: "";
-	position: absolute;
-	top: 0;
-	left: 0;
-	right: 0;
-	height: 1px;
-	background: linear-gradient(90deg, transparent 0%, var(--color-accent) 50%, transparent 100%);
-	box-shadow: 0 0 12px var(--color-accent-glow);
-}
-
 .address-banner-inner {
 	display: flex;
 	flex-direction: column;
-	align-items: center;
+	align-items: flex-start;
 	justify-content: center;
 	gap: 0.75rem;
 }
@@ -947,7 +895,7 @@ address {
 
 .about-grid {
 	display: grid;
-	grid-template-columns: 1fr;
+	grid-template-columns: minmax(0, 1fr);
 	gap: 3rem;
 	align-items: start;
 }
@@ -976,9 +924,7 @@ address {
 }
 
 .about-text p:last-child {
-	font-weight: 500;
-	color: var(--color-heading);
-	font-style: italic;
+	color: var(--color-text);
 }
 
 .about-highlights {
@@ -993,15 +939,8 @@ address {
 	display: flex;
 	align-items: flex-start;
 	gap: 1rem;
-	padding: 1rem 1.25rem;
-	background: var(--color-surface);
-	border: 1px solid var(--color-border);
-	border-radius: var(--radius-md);
-	transition: border-color var(--transition-base);
-}
-
-.about-highlight:hover {
-	border-color: var(--color-accent);
+	padding: 1rem 0;
+	border-top: 1px solid var(--color-border);
 }
 
 .about-highlight-icon {
@@ -1036,12 +975,16 @@ address {
 
 .shops-grid {
 	display: grid;
-	grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-	gap: 1.5rem;
+	grid-template-columns: minmax(0, 1fr);
+	gap: 0 2.5rem;
 }
 
 .shop-card {
-	padding: 2rem 1.75rem;
+	padding: 1.5rem 0;
+	background: none;
+	border: 0;
+	border-top: 1px solid var(--color-border-light);
+	border-radius: 0;
 }
 
 /* ============================================
@@ -1053,16 +996,10 @@ address {
 
 .membership-grid {
 	display: grid;
-	grid-template-columns: 1fr;
+	grid-template-columns: minmax(0, 1fr);
 	gap: 2rem;
-	max-width: 900px;
-	margin: 0 auto;
-}
-
-/* Discord Card */
-.discord-card {
-	padding: 3rem 2.5rem;
-	text-align: center;
+	max-width: none;
+	margin: 0;
 }
 
 .discord-card .card-desc {
@@ -1073,12 +1010,14 @@ address {
 	min-width: 200px;
 }
 
-/* Membership CTA Card */
+/* Membership cards */
+.discord-card,
 .membership-cta {
-	padding: 2.5rem 2rem;
-	text-align: center;
+	padding: clamp(1.25rem, 3vw, 2rem);
+	text-align: left;
 }
 
+.discord-card .card-title--lg,
 .membership-cta .card-title--lg {
 	margin-bottom: 1.25rem;
 }
@@ -1091,7 +1030,7 @@ address {
 .price {
 	display: flex;
 	align-items: baseline;
-	justify-content: center;
+	justify-content: flex-start;
 	gap: 0.15rem;
 	font-family: var(--font-heading);
 	line-height: 1;
@@ -1101,7 +1040,7 @@ address {
 .price-amount {
 	font-size: clamp(2.75rem, 9vw, 3.5rem);
 	font-weight: 700;
-	color: var(--color-accent);
+	color: var(--color-heading);
 	letter-spacing: -0.03em;
 }
 
@@ -1115,18 +1054,15 @@ address {
 	font-size: 0.85rem;
 	color: var(--color-text-muted);
 	line-height: 1.5;
-	max-width: 32ch;
-	margin: 0 auto 1.5rem;
+	margin: 0 0 1.5rem;
 }
 
 /* Discounted rate */
 .discount {
 	width: 100%;
-	padding: 1.1rem 1rem 0.9rem;
+	padding: 1rem 0;
 	margin-bottom: 1.5rem;
-	border: 1px solid var(--color-border-light);
-	border-radius: var(--radius-lg);
-	background: var(--color-accent-subtle);
+	border-top: 1px solid var(--color-border-light);
 }
 
 .discount-head {
@@ -1144,19 +1080,17 @@ address {
 	list-style: none;
 	display: flex;
 	flex-wrap: wrap;
-	justify-content: center;
+	justify-content: flex-start;
 	gap: 0.4rem;
 	margin-bottom: 0.75rem;
 }
 
 .discount-list li {
-	padding: 0.25rem 0.65rem;
-	font-size: 0.78rem;
+	font-size: 0.85rem;
 	color: var(--color-text);
-	background: var(--color-surface);
-	border: 1px solid var(--color-border);
-	border-radius: 999px;
-	white-space: nowrap;
+}
+.discount-list li:not(:last-child)::after {
+	content: ",";
 }
 
 /* ============================================
@@ -1169,17 +1103,21 @@ address {
 
 .give-grid {
 	display: grid;
-	grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-	gap: 1.5rem;
+	grid-template-columns: minmax(0, 1fr);
+	gap: 2rem;
 	margin-bottom: 3rem;
 }
 
 .give-card {
-	padding: 2.5rem 2rem;
-	text-align: center;
+	padding: 1.5rem 0 0;
+	text-align: left;
+	background: none;
+	border: 0;
+	border-top: 1px solid var(--color-border-light);
+	border-radius: 0;
 	display: flex;
 	flex-direction: column;
-	align-items: center;
+	align-items: flex-start;
 }
 
 .give-card .card-icon {
@@ -1203,11 +1141,11 @@ address {
 }
 
 .give-footnote {
-	text-align: center;
+	text-align: left;
 	font-size: 0.95rem;
 	color: var(--color-text-muted);
 	max-width: 700px;
-	margin: 0 auto;
+	margin: 0;
 	line-height: 1.7;
 }
 
@@ -1228,7 +1166,7 @@ address {
 
 .footer-grid {
 	display: grid;
-	grid-template-columns: 1fr;
+	grid-template-columns: minmax(0, 1fr);
 	gap: 2.5rem;
 	margin-bottom: 3rem;
 }
@@ -1256,13 +1194,11 @@ address {
 	line-height: 1.6;
 }
 
-.footer-links h4 {
+.footer-links h2 {
 	font-family: var(--font-heading);
 	font-size: 0.85rem;
 	font-weight: 600;
 	color: var(--color-heading);
-	text-transform: uppercase;
-	letter-spacing: 0.08em;
 	margin-bottom: 1rem;
 }
 
@@ -1289,8 +1225,6 @@ address {
 	display: block;
 	color: var(--color-text-dim);
 	font-size: 0.75rem;
-	text-transform: uppercase;
-	letter-spacing: 0.08em;
 }
 
 /* Consolidated footer link styles */
@@ -1329,7 +1263,7 @@ address {
    ============================================ */
 @media (min-width: 768px) {
 	:root {
-		--section-padding: 7rem;
+		--container-pad: 2rem;
 	}
 
 	.about-grid {
@@ -1357,15 +1291,15 @@ address {
 
 	.membership-grid {
 		grid-template-columns: 1fr 1fr;
-		align-items: stretch;
+		align-items: start;
+		gap: 4rem;
 	}
 
 	.membership-cta,
 	.discord-card {
 		display: flex;
 		flex-direction: column;
-		align-items: center;
-		justify-content: center;
+		align-items: flex-start;
 	}
 
 	.discord-card {
@@ -1378,8 +1312,14 @@ address {
 	}
 
 	.footer-grid {
-		grid-template-columns: 2fr 1fr 1fr 1fr;
-		gap: 3rem;
+		grid-template-columns: 1fr 1fr;
+		gap: 2rem;
+	}
+	.footer-brand {
+		grid-column: 1 / -1;
+	}
+	.give-grid {
+		grid-template-columns: repeat(3, minmax(0, 1fr));
 	}
 }
 
@@ -1387,17 +1327,14 @@ address {
    RESPONSIVE — DESKTOP (1024px+)
    ============================================ */
 @media (min-width: 1024px) {
-	:root {
-		--section-padding: 8rem;
-	}
-
 	.shops-grid {
-		grid-template-columns: repeat(3, 1fr);
+		grid-template-columns: repeat(2, minmax(0, 1fr));
 	}
-
-	/* Make the last card in the 7-card grid span the center */
-	.shops-grid .shop-card:last-child {
-		grid-column: 2 / 3;
+	.footer-grid {
+		grid-template-columns: 1.3fr 1fr 1fr;
+	}
+	.footer-brand {
+		grid-column: auto;
 	}
 }
 
@@ -1406,7 +1343,7 @@ address {
    ============================================ */
 @media (min-width: 1200px) {
 	.shops-grid {
-		grid-template-columns: repeat(4, 1fr);
+		grid-template-columns: repeat(4, minmax(0, 1fr));
 	}
 
 	/* Reset the centering for 4-col layout */
@@ -1419,29 +1356,39 @@ address {
    RESPONSIVE — MOBILE (<768px)
    ============================================ */
 @media (max-width: 767px) {
-	.nav-toggle {
-		display: block;
+	.navbar.nav-ready .nav-toggle {
+		display: inline-flex;
 	}
 
 	.nav-menu {
+		flex-wrap: wrap;
+		justify-content: flex-end;
+	}
+	.navbar.nav-ready .nav-menu {
 		position: fixed;
 		top: 0;
-		right: -100%;
+		right: 0;
+		visibility: hidden;
+		transform: translateX(100%);
 		width: 80%;
 		max-width: 320px;
-		height: 100vh;
+		height: 100dvh;
+		overflow-y: auto;
 		background: var(--color-surface);
 		flex-direction: column;
 		align-items: stretch;
+		justify-content: flex-start;
+		flex-wrap: nowrap;
 		padding: 5rem 2rem 2rem;
 		gap: 0;
 		border-left: 1px solid var(--color-border);
-		transition: right var(--transition-base);
+		transition: transform var(--transition-fast);
 		box-shadow: -10px 0 30px rgba(0, 0, 0, 0.5);
 	}
 
-	.nav-menu.active {
-		right: 0;
+	.navbar.nav-ready .nav-menu.active {
+		visibility: visible;
+		transform: none;
 	}
 
 	.nav-link {
@@ -1457,34 +1404,12 @@ address {
 		border-bottom: none;
 	}
 
-	/* Mobile overlay */
-	.nav-menu::before {
-		content: "";
-		position: fixed;
-		top: 0;
-		left: 0;
-		right: 0;
-		bottom: 0;
-		background: rgba(0, 0, 0, 0.5);
-		z-index: -1;
-		opacity: 0;
-		transition: opacity var(--transition-base);
-		pointer-events: none;
-	}
-
-	.nav-menu.active::before {
-		opacity: 1;
-	}
-
 	.hero-logo {
-		width: clamp(190px, 52vw, 240px);
+		width: 180px;
 	}
 
-	.hero-ctas {
-		flex-direction: column;
-		align-items: stretch;
-		max-width: 300px;
-		margin: 0 auto;
+	.hero {
+		padding: 3.5rem 0 4rem;
 	}
 
 	.shops-grid {
@@ -1493,14 +1418,10 @@ address {
 
 	.membership-cta,
 	.discord-card {
-		padding: 2rem 1.75rem;
+		padding: 1.5rem;
 	}
-
 	.give-grid {
 		grid-template-columns: 1fr;
-		max-width: 400px;
-		margin-left: auto;
-		margin-right: auto;
 	}
 }
 
@@ -1508,38 +1429,19 @@ address {
    ACCESSIBILITY
    ============================================ */
 @media (prefers-reduced-motion: reduce) {
+	:root {
+		--transition-fast: 0s;
+		--transition-base: 0s;
+		--transition-slow: 0s;
+	}
+	*,
+	*::before,
+	*::after {
+		transition-duration: 0s;
+		animation: none;
+	}
 	html {
 		scroll-behavior: auto;
-	}
-
-	.scroll-arrow {
-		animation: none;
-	}
-
-	.hero-bg {
-		opacity: 1;
-		transition: none;
-	}
-
-	.hero-logo-word,
-	.hero-logo-bracket--l,
-	.hero-logo-bracket--r {
-		animation: none;
-	}
-
-	.wordmark,
-	.wordmark-bracket {
-		transition: none;
-	}
-
-	.navbar .nav-logo {
-		transform: none;
-		transition: none;
-	}
-
-	.card,
-	.btn {
-		transition: none;
 	}
 }
 
@@ -1599,16 +1501,8 @@ a:focus:not(:focus-visible) {
 }
 
 .membership-page {
-	min-height: 100vh;
-	background:
-		radial-gradient(ellipse at top, var(--color-accent-subtle), transparent 65%),
-		linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
-		linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px), var(--color-bg);
-	background-size:
-		auto,
-		40px 40px,
-		40px 40px,
-		auto;
+	min-height: 100dvh;
+	background: var(--color-bg);
 }
 
 .membership-main {
@@ -1622,7 +1516,7 @@ a:focus:not(:focus-visible) {
 	width: fit-content;
 	align-items: center;
 	gap: 0.75rem;
-	margin: 0 auto 2.5rem;
+	margin: 0 0 2rem;
 	color: var(--color-heading);
 	font-family: var(--font-heading);
 	font-size: 1.75rem;
@@ -1636,8 +1530,10 @@ a:focus:not(:focus-visible) {
 
 .membership-message {
 	padding: clamp(1.5rem, 5vw, 3.5rem);
-	text-align: center;
-	border-top: 2px solid var(--color-accent);
+	text-align: left;
+}
+.membership-message > h1 {
+	margin-bottom: 1.5rem;
 }
 .event-main .membership-message {
 	text-align: left;
@@ -1648,16 +1544,14 @@ a:focus:not(:focus-visible) {
 }
 
 .membership-eyebrow {
-	color: var(--color-accent);
+	color: var(--color-text-muted);
 	font-size: 0.85rem;
-	letter-spacing: 0.12em;
-	text-transform: uppercase;
 }
 
 .membership-actions {
 	display: flex;
 	flex-wrap: wrap;
-	justify-content: center;
+	justify-content: flex-start;
 	gap: 1rem;
 	margin: 2rem 0;
 }
@@ -1671,10 +1565,8 @@ a:focus:not(:focus-visible) {
 }
 
 .welcome-steps li {
-	padding: 1.25rem;
-	background: var(--color-surface);
-	border: 1px solid var(--color-border);
-	border-radius: var(--radius-md);
+	padding: 1.25rem 0;
+	border-top: 1px solid var(--color-border);
 }
 
 .membership-page .footer {
@@ -1699,13 +1591,11 @@ a:focus:not(:focus-visible) {
 .wallet-balance {
 	display: grid;
 	gap: 0.25rem;
-	text-align: center;
+	text-align: left;
 }
 .wallet-balance span {
 	color: var(--color-text-muted);
 	font-size: 0.85rem;
-	letter-spacing: 0.08em;
-	text-transform: uppercase;
 }
 /* biome-ignore lint/style/noDescendingSpecificity: Wallet balances are outside give-card descriptions. */
 .wallet-balance strong {
@@ -1743,6 +1633,7 @@ a:focus:not(:focus-visible) {
 	align-items: center;
 }
 .wallet-topup-custom input {
+	min-width: 0;
 	flex: 1 1 10rem;
 	padding: 0.75rem;
 	font: inherit;
@@ -1816,7 +1707,7 @@ a:focus:not(:focus-visible) {
 
 .links-header {
 	margin-bottom: 2rem;
-	text-align: center;
+	text-align: left;
 }
 
 .links-header .membership-brand {
@@ -1838,7 +1729,7 @@ a:focus:not(:focus-visible) {
 
 .links-list {
 	display: grid;
-	gap: 0.875rem;
+	gap: 0;
 	list-style: none;
 }
 
@@ -1847,8 +1738,12 @@ a:focus:not(:focus-visible) {
 	align-items: center;
 	justify-content: space-between;
 	gap: 1rem;
-	padding: 1.125rem 1.25rem;
+	padding: 1.5rem 1.25rem;
 	color: var(--color-heading);
+	background: none;
+	border: 0;
+	border-top: 1px solid var(--color-border-light);
+	border-radius: 0;
 }
 
 /* biome-ignore lint/style/noDescendingSpecificity: Link cards are outside give-card descriptions. */
@@ -1867,14 +1762,179 @@ a:focus:not(:focus-visible) {
 }
 
 .links-card-featured {
-	border-color: var(--color-accent-dark);
-	background: var(--color-accent-subtle);
+	background: none;
 }
 
 .links-arrow {
 	flex-shrink: 0;
-	color: var(--color-accent);
+	color: var(--color-text-muted);
 	font-size: 1.5rem;
+}
+
+/* Sign generator. The sign mirrors the letter-sized print template in millimetres. */
+.sign-main {
+	max-width: var(--container-max);
+}
+.sign-page [hidden] {
+	/* biome-ignore lint/complexity/noImportantStyles: Hidden sign elements must stay hidden regardless of component display styles. */
+	display: none !important;
+}
+.sign-layout {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: 2rem;
+	align-items: start;
+}
+@media (min-width: 1000px) {
+	.sign-layout {
+		grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr);
+	}
+}
+.sign-editor {
+	padding: clamp(1.25rem, 4vw, 2rem);
+}
+.sign-editor h1 {
+	margin-bottom: 0.5rem;
+	color: var(--color-heading);
+	font-family: var(--font-heading);
+	font-size: 1.75rem;
+}
+.sign-editor .event-form {
+	margin-bottom: 0;
+}
+.sign-hint {
+	color: var(--color-text-muted);
+	font-size: 0.8rem;
+}
+.sign-editor input:user-invalid {
+	border-color: #ff8a80;
+}
+.sign-fields {
+	display: grid;
+	gap: 0.65rem;
+	min-width: 0;
+	border: 0;
+}
+.sign-fields legend {
+	margin-top: 0.75rem;
+	margin-bottom: 0.65rem;
+	font-weight: 600;
+}
+.sign-choices {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5rem 1.25rem;
+}
+.sign-choices label {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	margin-top: 0;
+	font-weight: 400;
+	cursor: pointer;
+	min-height: 44px;
+}
+.sign-editor input[type="radio"] {
+	width: 1.1rem;
+	min-height: 0;
+	height: 1.1rem;
+	padding: 0;
+	accent-color: var(--color-accent);
+}
+.sign-range {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 0.75rem;
+}
+.sign-range > div {
+	display: grid;
+	gap: 0.65rem;
+}
+.sign-donation-status {
+	overflow-wrap: anywhere;
+}
+.sign-overflow {
+	color: #ff8a80;
+	font-size: 0.9rem;
+}
+.sign-preview {
+	width: 100%;
+	max-width: 816px;
+	margin: 0 auto;
+}
+.sign {
+	zoom: var(--sign-scale, 1);
+	width: 215.9mm;
+	height: 279.4mm;
+	padding: 25.49mm 24.5mm 20mm;
+	overflow: hidden;
+	background: #fff;
+	color: #000;
+	box-shadow: 0 0.5rem 2rem rgba(0, 0, 0, 0.5);
+	print-color-adjust: exact;
+	-webkit-print-color-adjust: exact;
+}
+.sign-logo {
+	width: 27.42mm;
+	height: 25.4mm;
+	margin-left: 0.86mm;
+}
+.sign-header {
+	margin-top: 8.3mm;
+	color: var(--color-accent-dark);
+	font-family: "Space Grotesk", sans-serif;
+	font-size: 12.7mm;
+	font-weight: 400;
+	line-height: 15.875mm;
+	white-space: pre-line;
+	overflow-wrap: anywhere;
+}
+.sign-body {
+	margin-top: 6.75mm;
+	font-family: "Source Code Pro", monospace;
+	font-size: 7.056mm;
+	font-weight: 300;
+	line-height: 1.4;
+	white-space: pre-line;
+	overflow-wrap: anywhere;
+}
+.sign-qr {
+	width: 86.23mm;
+	height: 86.23mm;
+	margin: 20.2mm 0 0 0.74mm;
+}
+.sign-qr svg {
+	display: block;
+	width: 100%;
+	height: 100%;
+}
+@media print {
+	@page {
+		size: letter;
+		margin: 0;
+	}
+	.sign-page {
+		min-height: 0;
+		background: #fff;
+	}
+	.sign-page .membership-brand,
+	.sign-editor {
+		display: none;
+	}
+	.sign-main,
+	.sign-layout,
+	.sign-preview {
+		display: block;
+		max-width: none;
+		margin: 0;
+		padding: 0;
+	}
+	.sign {
+		zoom: 1;
+		/* Just under a full page so rounding never spills onto a second sheet. */
+		height: 279mm;
+		box-shadow: none;
+	}
 }
 
 /* Machines dashboard */
@@ -1936,7 +1996,7 @@ a:focus:not(:focus-visible) {
 	color: #7ee2a7;
 	background: var(--color-accent-subtle);
 	border: 1px solid #28563b;
-	border-radius: 999px;
+	border-radius: var(--radius-sm);
 }
 .machines-grid .status.unavailable {
 	color: #f0c589;
@@ -2007,6 +2067,7 @@ a:focus:not(:focus-visible) {
 	display: flex;
 	align-items: flex-start;
 	gap: 0.75rem;
+	min-height: 44px;
 }
 .waiver-agreement input {
 	margin-top: 0.35rem;
@@ -2097,11 +2158,17 @@ a:focus:not(:focus-visible) {
 	font-size: 1.4rem;
 }
 .admin-header nav {
-	gap: 1.25rem;
+	gap: 0.5rem 1.5rem;
 }
 .admin-header nav a {
 	color: var(--color-text);
 	padding: 0.5rem 0;
+	min-height: 44px;
+}
+.admin-header nav a[aria-current="page"] {
+	color: var(--color-heading);
+	text-decoration: underline;
+	text-underline-offset: 0.5rem;
 }
 .admin-toolbar-actions {
 	display: flex;
@@ -2146,20 +2213,24 @@ a:focus:not(:focus-visible) {
 }
 .admin-search-panel {
 	display: grid;
+	grid-template-columns: minmax(0, 1fr);
 	gap: 1.25rem;
 	margin: 1.75rem 0 2rem;
-	padding: 1.5rem;
-	background: var(--color-surface);
-	border: 1px solid var(--color-border);
-	border-radius: var(--radius-md);
+	padding: 1.25rem 0;
+	border-top: 1px solid var(--color-border);
+	border-bottom: 1px solid var(--color-border);
 	font-size: 0.9rem;
 }
 .admin-search-row,
 .admin-filter-row {
 	display: flex;
+	min-width: 0;
 	flex-wrap: wrap;
 	align-items: center;
 	gap: 0.75rem;
+}
+.admin-search-row > label {
+	flex-basis: 100%;
 }
 .admin-form .admin-search-row input[type="search"] {
 	flex: 1 1 18rem;
@@ -2169,10 +2240,14 @@ a:focus:not(:focus-visible) {
 .admin-filter-row {
 	padding-top: 1.25rem;
 	border-top: 1px solid var(--color-border);
+	align-items: end;
+}
+.admin-filter {
+	flex: 0 1 11rem;
+	min-width: 0;
 }
 .admin-form .admin-filter-row select {
-	flex: 0 1 auto;
-	width: auto;
+	width: 100%;
 	min-width: 0;
 }
 .admin-filter-row select:disabled {
@@ -2182,14 +2257,6 @@ a:focus:not(:focus-visible) {
 /* biome-ignore lint/style/noDescendingSpecificity: Filter links are outside the admin-header navigation. */
 .admin-filter-row > a {
 	margin-left: auto;
-}
-.admin-filter-label {
-	margin-right: 0.25rem;
-	color: var(--color-text-muted);
-	font-size: 0.75rem;
-	font-weight: 600;
-	letter-spacing: 0.08em;
-	text-transform: uppercase;
 }
 .admin-toolbar {
 	display: flex;
@@ -2273,7 +2340,6 @@ a:focus:not(:focus-visible) {
 }
 .admin-member-table {
 	table-layout: fixed;
-	min-width: 720px;
 }
 .admin-member-table:has(.admin-empty) {
 	min-width: 0;
@@ -2294,7 +2360,7 @@ a:focus:not(:focus-visible) {
 	display: inline-block;
 	font-weight: 600;
 	font-size: 1rem;
-	padding-bottom: 0.15rem;
+	padding: 0.5rem 0;
 }
 .admin-table .admin-empty {
 	padding: 3rem 1rem;
@@ -2312,12 +2378,14 @@ a:focus:not(:focus-visible) {
 }
 .admin-status {
 	display: inline-block;
+	max-width: 100%;
 	padding: 0.2rem 0.6rem;
 	border: 1px solid var(--color-border-light);
 	border-radius: var(--radius-sm);
 	font-size: 0.8rem;
 	font-weight: 600;
 	line-height: 1.5;
+	overflow-wrap: anywhere;
 }
 .admin-status--active {
 	color: #7ee2a7;
@@ -2332,6 +2400,28 @@ a:focus:not(:focus-visible) {
 .admin-status--unknown {
 	color: var(--color-text-muted);
 	background: var(--color-bg-alt);
+}
+.admin-status--alert {
+	color: #f28b82;
+	background: #2e1b1b;
+	border-color: #7a3b3b;
+}
+.admin-table .admin-attention-reason {
+	color: #f28b82;
+}
+.admin-main .admin-attention[aria-current="page"] {
+	border-color: var(--color-accent);
+}
+.admin-count {
+	min-width: 1.5rem;
+	padding: 0 0.4rem;
+	border-radius: 999px;
+	background: #d93025;
+	color: #ffffff;
+	font-size: 0.8rem;
+	font-weight: 700;
+	line-height: 1.5rem;
+	text-align: center;
 }
 
 /* Editor: common edits alongside a read-only account summary */
@@ -2356,9 +2446,9 @@ a:focus:not(:focus-visible) {
 	padding: 1.25rem;
 	margin: 1.5rem 0;
 	min-width: 0;
-	background: var(--color-surface);
+	background: var(--color-bg-alt);
 	border: 1px solid var(--color-border);
-	border-radius: var(--radius-md);
+	border-radius: var(--radius-sm);
 }
 .admin-section.card:hover {
 	border-color: var(--color-border);
@@ -2484,6 +2574,18 @@ a:focus:not(:focus-visible) {
 	}
 }
 @media (max-width: 480px) {
+	.admin-member-table th:first-child {
+		width: 55%;
+	}
+	.admin-member-table th:nth-child(2) {
+		width: 45%;
+	}
+	.admin-member-table :is(th, td) {
+		padding: 0.75rem;
+	}
+	.admin-filter {
+		flex: 1 1 8rem;
+	}
 	.admin-main {
 		padding-left: 1rem;
 		padding-right: 1rem;

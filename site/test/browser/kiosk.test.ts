@@ -12,6 +12,10 @@ class FakeElement extends EventTarget {
 	hidden = false;
 	src: string | undefined;
 	role: string | undefined;
+	focusCount = 0;
+	focus() {
+		this.focusCount++;
+	}
 	setAttribute(name: 'role' | 'src', value: string) {
 		this[name] = value;
 	}
@@ -80,8 +84,10 @@ describe('LAN kiosk browser behavior', () => {
 	test('closes the QR code with the close button or Escape', async () => {
 		scan('123');
 		await advance(300);
+		assert.equal(nodes.close.focusCount, 1);
 		nodes.close.dispatchEvent(new Event('click'));
 		assert.equal(nodes.claim.hidden, true);
+		assert.equal(nodes.kiosk.focusCount, 1);
 		assert.equal(nodes.qr.src, undefined);
 		assert.equal(nodes.status.textContent, 'Tap your fob');
 		scan('456');
@@ -91,6 +97,20 @@ describe('LAN kiosk browser behavior', () => {
 		assert.equal(nodes.claim.hidden, true);
 		await advance(300000);
 		assert.equal(nodes.status.textContent, 'Tap your fob');
+	});
+
+	test('keeps focus in the QR dialog without treating Space on Close as a scan', async () => {
+		scan('123');
+		await advance(300);
+		assert.equal(key('Tab').defaultPrevented, true);
+		assert.equal(nodes.close.focusCount, 2);
+		const space = Object.assign(new Event('keydown', { cancelable: true }), { key: ' ' });
+		Object.defineProperty(space, 'target', { value: nodes.close });
+		document.dispatchEvent(space);
+		assert.equal(space.defaultPrevented, false);
+		await advance(300);
+		assert.equal(fetch.mock.callCount(), 1);
+		assert.equal(nodes.claim.hidden, false);
 	});
 
 	test('continues capturing while a code is displayed without polling', async () => {
