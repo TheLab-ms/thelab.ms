@@ -1,11 +1,15 @@
 // Pre-paid wallet: Stripe top-ups, QR-code redemptions, and receipts.
-import { h, Fragment } from './html.ts';
-import { page } from './page.tsx';
+
+import { ensureCustomer } from './billing.ts';
+import { devAuth } from './dev.tsx';
+import { Fragment, h } from './html.ts';
 import {
-	HttpError,
+	type Form,
 	formatMoney,
+	HttpError,
 	hex,
 	loginRedirect,
+	type Member,
 	origin,
 	randomToken,
 	readForm,
@@ -14,14 +18,11 @@ import {
 	stripe,
 	stripeList,
 	WALLET_MAX_CENTS,
+	type WalletEntry,
 	walletIdentity,
 	withCookie,
-	type Form,
-	type Member,
-	type WalletEntry,
 } from './lib.ts';
-import { ensureCustomer } from './billing.ts';
-import { devAuth } from './dev.tsx';
+import { page } from './page.tsx';
 
 const TOPUP_MIN = 500,
 	TOPUP_MAX = 20000;
@@ -151,6 +152,8 @@ export async function walletPage(request: Request, env: Env) {
 		.bind(member.member_id)
 		.all<WalletEntry>();
 	const notice = new URL(request.url).searchParams.get('notice');
+	const available = Math.max(0, WALLET_MAX_CENTS - member.balance);
+	const maxTopup = Math.min(TOPUP_MAX, available);
 	const response = page(
 		'Wallet',
 		<div class="wallet">
@@ -163,19 +166,24 @@ export async function walletPage(request: Request, env: Env) {
 			</p>
 			<section aria-labelledby="wallet-add">
 				<h2 id="wallet-add">Add credits</h2>
-				{[500, 1000, 2500, 5000].some(cents => cents <= WALLET_MAX_CENTS - member.balance) ? (
-					<div class="wallet-topups">
-						{[500, 1000, 2500, 5000]
-							.filter(cents => cents <= WALLET_MAX_CENTS - member.balance)
-							.map(cents => (
-								<form method="get" action="/wallet/topup">
-									<input type="hidden" name="amount" value={cents / 100} />
-									<button class="btn btn-outline" type="submit">
-										{formatMoney(cents)}
-									</button>
-								</form>
-							))}
-					</div>
+				{maxTopup >= TOPUP_MIN ? (
+					<form method="get" action="/wallet/topup" class="wallet-form">
+						<label for="wallet-topup-amount">Amount to add (USD)</label>
+						<input
+							id="wallet-topup-amount"
+							name="amount"
+							type="number"
+							inputmode="decimal"
+							min={TOPUP_MIN / 100}
+							max={maxTopup / 100}
+							step="0.01"
+							value="5.00"
+							required
+						/>
+						<button class="btn btn-primary" type="submit">
+							Continue to payment
+						</button>
+					</form>
 				) : (
 					<p class="card-desc">
 						Wallets can hold up to {formatMoney(WALLET_MAX_CENTS)}. Spend some balance before adding more.
@@ -226,15 +234,23 @@ export async function walletTopup(request: Request, env: Env) {
 	if (!member) throw new HttpError(403, 'Your account isn’t registered with TheLab yet. Please contact leadership.');
 	const raw = url.searchParams.get('amount') || '';
 	const amount = dollars.test(raw) ? Math.round(Number(raw) * 100) : 0;
-	if (amount < TOPUP_MIN || amount > TOPUP_MAX)
+	const rawNext = url.searchParams.get('next') || '';
+	if (rawNext && safeNext(rawNext) !== rawNext) throw new HttpError(400, 'The donation return address is invalid.');
+	const minimum = topupMinimum(member, rawNext);
+	if (amount < minimum)
+		throw new HttpError(
+			400,
+			rawNext
+				? `Add at least ${formatMoney(minimum)} to complete this donation.`
+				: `Choose an amount between ${formatMoney(TOPUP_MIN)} and ${formatMoney(TOPUP_MAX)}.`,
+		);
+	if (amount > TOPUP_MAX)
 		throw new HttpError(400, `Choose an amount between ${formatMoney(TOPUP_MIN)} and ${formatMoney(TOPUP_MAX)}.`);
 	if (member.balance + amount > WALLET_MAX_CENTS)
 		throw new HttpError(
 			400,
 			`A top-up cannot raise your wallet above ${formatMoney(WALLET_MAX_CENTS)}. Your current balance is ${formatMoney(member.balance)}, so you can add at most ${formatMoney(Math.max(0, WALLET_MAX_CENTS - member.balance))}.`,
 		);
-	const rawNext = url.searchParams.get('next') || '';
-	if (rawNext && safeNext(rawNext) !== rawNext) throw new HttpError(400, 'The donation return address is invalid.');
 	const returnPath = rawNext ? addParam(rawNext, 'notice', 'topped') : '/wallet?notice=topped';
 	const successPath = rawNext ? `${returnPath}&session_id={CHECKOUT_SESSION_ID}` : returnPath;
 	const successURL = `${origin(env)}${successPath}`;
@@ -280,6 +296,21 @@ export async function walletTopup(request: Request, env: Env) {
 		`wallet-topup:${current.member_id}:${amount}:${await destinationKey(successPath)}:${matching.length}`,
 	);
 	return withCookie(redirect(session.url), identity.cookie);
+}
+
+function topupMinimum(member: WalletMember, next: string) {
+	if (!next) return TOPUP_MIN;
+	const url = new URL(next, 'https://wallet.invalid');
+	if (url.pathname !== '/wallet/redeem') return TOPUP_MIN;
+	const spec = readSpec(queryParam(url.searchParams));
+	let required = Math.round(spec.price * 100);
+	if (spec.unit) {
+		const qty = quantity(url.searchParams.get('q'));
+		if (!(qty > 0) || quantityRange(spec, qty)) throw new HttpError(400, 'The donation return address is invalid.');
+		required = Math.round(spec.price * qty * 100);
+	}
+	if (required < 1) throw new HttpError(400, 'The donation return address is invalid.');
+	return Math.max(TOPUP_MIN, required - member.balance);
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -415,10 +446,21 @@ function insufficientPage(
 			) : impossible ? null : (
 				<>
 					<form method="get" action="/wallet/topup" class="wallet-form">
-						<input type="hidden" name="amount" value={topup / 100} />
 						<input type="hidden" name="next" value={next} />
+						<label for="wallet-topup-amount">Amount to add (USD)</label>
+						<input
+							id="wallet-topup-amount"
+							name="amount"
+							type="number"
+							inputmode="decimal"
+							min={topup / 100}
+							max={Math.min(available, TOPUP_MAX) / 100}
+							step="0.01"
+							value={(topup / 100).toFixed(2)}
+							required
+						/>
 						<button class="btn btn-primary" type="submit">
-							Add {formatMoney(topup)} with Stripe
+							Continue to payment
 						</button>
 					</form>
 					{topup > shortfall && (

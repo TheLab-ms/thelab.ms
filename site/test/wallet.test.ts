@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:workers';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { walletCookie, type Member } from '../src/lib.ts';
+import { type Member, walletCookie } from '../src/lib.ts';
 import { donationLink } from '../static/sign/lib.js';
 import { call, insertMember, mockFetch, post, quiet, readMember, resetDB, session, stripeEvent } from './helpers.ts';
 
@@ -47,6 +47,11 @@ describe('Wallet', () => {
 		const html = await response.text();
 		expect(html).toContain('Balance');
 		expect(html).toContain('$0.00');
+		expect(html).toContain('name="amount"');
+		expect(html).toContain('type="number"');
+		expect(html).toContain('min="5"');
+		expect(html).toContain('value="5.00"');
+		expect(html).not.toContain('wallet-topups');
 		// Top-up forms redirect to Stripe Checkout, which form-action must allow.
 		expect(response.headers.get('Content-Security-Policy')).toContain(
 			"form-action 'self' https://checkout.stripe.com;",
@@ -75,7 +80,7 @@ describe('Wallet', () => {
 			['GET', /\/v1\/checkout\/sessions\?/, list([])],
 			['POST', `${stripeAPI}/checkout/sessions`, { url: 'https://checkout.stripe.com/c/pay/cs_wallet' }],
 		]);
-		const response = await call('/wallet/topup?amount=10', { headers: { Cookie: await walletSession() } });
+		const response = await call('/wallet/topup?amount=10.37', { headers: { Cookie: await walletSession() } });
 		expect(response.status).toBe(303);
 		expect(response.headers.get('Location')).toBe('https://checkout.stripe.com/c/pay/cs_wallet');
 		expect((await readMember(member.member_id))?.stripe_customer_id).toBe('cus_new');
@@ -84,9 +89,9 @@ describe('Wallet', () => {
 			mode: 'payment',
 			customer: 'cus_new',
 			client_reference_id: member.member_id,
-			'line_items[0][price_data][unit_amount]': '1000',
+			'line_items[0][price_data][unit_amount]': '1037',
 			'metadata[thelab_member_id]': member.member_id,
-			'metadata[thelab_wallet_amount]': '1000',
+			'metadata[thelab_wallet_amount]': '1037',
 			success_url: `${env.SITE_URL}/wallet?notice=topped`,
 		});
 	});
@@ -132,7 +137,7 @@ describe('Wallet', () => {
 		);
 		const cannotTopUpHTML = await cannotTopUp.text();
 		expect(cannotTopUpHTML).toContain('wallet limit leaves room for only $4.00');
-		expect(cannotTopUpHTML).not.toContain('with Stripe</button>');
+		expect(cannotTopUpHTML).not.toContain('Continue to payment');
 	});
 
 	it('offers the bounded shortfall and preserves the donation through Checkout', async () => {
@@ -152,21 +157,30 @@ describe('Wallet', () => {
 			"form-action 'self' https://checkout.stripe.com;",
 		);
 		expect(html).toContain('Your balance is $3.50; add $6.50');
-		expect(html).toContain('Add $6.50 with Stripe');
-		expect(html).toContain('name="amount" value="6.5"');
+		expect(html).toContain('name="amount"');
+		expect(html).toContain('min="6.5"');
+		expect(html).toContain('value="6.50"');
 		expect(html).toContain('name="next" value="/wallet/redeem?n=Soda&amp;p=10"');
 		expect(html).not.toContain('payment processor fees');
 
 		response = await call('/wallet/redeem', post({ n: 'Snack', p: '4', key }, { Cookie: cookie }));
 		html = await response.text();
-		expect(html).toContain('Add $5.00 with Stripe');
+		expect(html).toContain('value="5.00"');
+		expect(html).toContain('Continue to payment');
 		expect(html).toContain('We set a minimum of $5.00 for credit card transactions');
 		expect(html).toContain('payment processor fees');
 		response = await call('/wallet/redeem', post({ n: 'Machine', p: '300', key }, { Cookie: cookie }));
 		html = await response.text();
 		expect(html).toContain('exceeds the $100.00 wallet limit');
-		expect(html).not.toContain('with Stripe</button>');
+		expect(html).not.toContain('Continue to payment');
 		expect(html).not.toContain('payment processor fees');
+
+		const next = '/wallet/redeem?n=Soda&p=10';
+		const tooLittle = await call(`/wallet/topup?amount=6.49&next=${encodeURIComponent(next)}`, {
+			headers: { Cookie: cookie },
+		});
+		expect(tooLittle.status).toBe(400);
+		expect(await tooLittle.text()).toContain('Add at least $6.50 to complete this donation.');
 
 		await env.DB.prepare("UPDATE members SET stripe_customer_id = 'cus_1' WHERE member_id = ?")
 			.bind(member.member_id)
@@ -175,8 +189,7 @@ describe('Wallet', () => {
 			['GET', /\/v1\/checkout\/sessions\?/, list([])],
 			['POST', `${stripeAPI}/checkout/sessions`, { url: 'https://checkout.stripe.com/c/pay/cs_shortfall' }],
 		]);
-		const next = '/wallet/redeem?n=Soda&p=10';
-		response = await call(`/wallet/topup?amount=6.5&next=${encodeURIComponent(next)}`, {
+		response = await call(`/wallet/topup?amount=7.25&next=${encodeURIComponent(next)}`, {
 			headers: { Cookie: cookie },
 		});
 		expect(response.headers.get('Location')).toBe('https://checkout.stripe.com/c/pay/cs_shortfall');
@@ -184,7 +197,7 @@ describe('Wallet', () => {
 		expect(form).toMatchObject({
 			success_url: `${env.SITE_URL}${next}&notice=topped&session_id={CHECKOUT_SESSION_ID}`,
 			cancel_url: `${env.SITE_URL}${next}`,
-			'line_items[0][price_data][unit_amount]': '650',
+			'line_items[0][price_data][unit_amount]': '725',
 		});
 
 		await credit(member.member_id, 20000, 'stripe:cs_capped');
@@ -194,7 +207,7 @@ describe('Wallet', () => {
 		html = await response.text();
 		expect(html).not.toContain('Stripe is confirming your payment');
 		expect(html).toContain('exceeds the $100.00 wallet limit');
-		expect(html).not.toContain('with Stripe</button>');
+		expect(html).not.toContain('Continue to payment');
 	});
 
 	it('waits for a contextual credit, then resumes a quantity confirmation', async () => {
@@ -202,13 +215,13 @@ describe('Wallet', () => {
 		const path = '/wallet/redeem?n=Filament&u=gram&p=0.1&q=250';
 		let response = await call(path, { headers: { Cookie: cookie } });
 		expect(response.status).toBe(409);
-		expect(await response.text()).toContain('Add $25.00 with Stripe');
+		expect(await response.text()).toContain('value="25.00"');
 
 		response = await call(`${path}&notice=topped&session_id=cs_context`, { headers: { Cookie: cookie } });
 		expect(response.status).toBe(200);
 		let html = await response.text();
 		expect(html).toContain('Stripe is confirming your payment');
-		expect(html).not.toContain('with Stripe</button>');
+		expect(html).not.toContain('Continue to payment');
 		expect(html).toContain('session_id=cs_context');
 
 		await credit(member.member_id, 2500, 'stripe:cs_context');
