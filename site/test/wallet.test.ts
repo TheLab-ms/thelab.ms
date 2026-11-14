@@ -231,6 +231,67 @@ describe('Wallet', () => {
 		expect(html).toContain('Charge $25.00');
 	});
 
+	it('automatically charges the intended donation after a paid contextual top-up', async () => {
+		await credit(member.member_id, 350);
+		await env.DB.prepare("UPDATE members SET stripe_customer_id = 'cus_1' WHERE member_id = ?")
+			.bind(member.member_id)
+			.run();
+		const cookie = await walletSession();
+		const next = '/wallet/redeem?n=Soda&p=10';
+		const insufficient = await call('/wallet/redeem', post({ n: 'Soda', p: '10', key }, { Cookie: cookie }));
+		const html = await insufficient.text();
+		const intent = html.match(/name="intent" value="([^"]+)"/)?.[1];
+		expect(intent).toBeTruthy();
+
+		const calls = mockFetch([
+			['GET', /\/v1\/checkout\/sessions\?/, list([])],
+			['POST', `${stripeAPI}/checkout/sessions`, { url: 'https://checkout.stripe.com/c/pay/cs_auto' }],
+		]);
+		const checkout = await call(
+			`/wallet/topup?amount=7.25&next=${encodeURIComponent(next)}&intent=${encodeURIComponent(intent!)}`,
+			{ headers: { Cookie: cookie } },
+		);
+		expect(checkout.status).toBe(303);
+		const form = Object.fromEntries(new URLSearchParams(calls.at(-1)?.body));
+		expect(form['metadata[thelab_wallet_intent]']).toBeTruthy();
+		expect(form['line_items[0][price_data][unit_amount]']).toBe('725');
+		const successURL = form.success_url!;
+		const returnPath = `/wallet/redeem?auto=${encodeURIComponent(intent!)}&session_id=cs_auto`;
+		const session = {
+			id: 'cs_auto',
+			url: 'https://checkout.stripe.com/c/pay/cs_auto',
+			mode: 'payment',
+			status: 'complete',
+			payment_status: 'paid',
+			currency: 'usd',
+			amount_total: 725,
+			customer: 'cus_1',
+			client_reference_id: member.member_id,
+			success_url: successURL,
+			metadata: {
+				thelab_member_id: member.member_id,
+				thelab_wallet_amount: '725',
+				thelab_wallet_intent: form['metadata[thelab_wallet_intent]'],
+			},
+		};
+		vi.restoreAllMocks();
+		mockFetch([['GET', `${stripeAPI}/checkout/sessions/cs_auto`, session]]);
+
+		const returned = await call(returnPath, { headers: { Cookie: cookie } });
+		expect(returned.status).toBe(303);
+		const receipt = returned.headers.get('Location') || '';
+		expect(receipt).toMatch(/^\/wallet\/receipt\/\d+\?k=/);
+		expect(await balance(member.member_id)).toBe(75);
+		const receiptHTML = await (await call(receipt, { headers: { Cookie: cookie } })).text();
+		expect(receiptHTML).toContain('<p class="wallet-item">Soda</p>');
+		expect(receiptHTML).toContain('<p class="wallet-price">$10.00</p>');
+
+		// Returning again is safe: both the Stripe credit and donation debit replay.
+		const replay = await call(returnPath, { headers: { Cookie: cookie } });
+		expect(replay.headers.get('Location')).toBe(receipt);
+		expect(await balance(member.member_id)).toBe(75);
+	});
+
 	it('asks for a quantity before offering a top-up', async () => {
 		const cookie = await walletSession();
 		const response = await call('/wallet/redeem?n=Filament&u=gram&p=0.1&min=5&max=2000', {

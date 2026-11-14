@@ -1,6 +1,6 @@
 // Pre-paid wallet: Stripe top-ups, QR-code redemptions, and receipts.
 
-import { ensureCustomer } from './billing.ts';
+import { creditWalletSession, ensureCustomer } from './billing.ts';
 import { devAuth } from './dev.tsx';
 import { Fragment, h } from './html.ts';
 import {
@@ -10,11 +10,14 @@ import {
 	hex,
 	loginRedirect,
 	type Member,
+	now,
 	origin,
 	randomToken,
 	readForm,
+	readToken,
 	redirect,
 	safeNext,
+	signToken,
 	stripe,
 	stripeList,
 	WALLET_MAX_CENTS,
@@ -38,6 +41,23 @@ interface WalletCheckout {
 	client_reference_id: string | null;
 	success_url?: string | null;
 	metadata?: Record<string, string> | null;
+}
+
+interface DonationIntent {
+	member_id: string;
+	path: string;
+	topup_min: number;
+	topup_max: number;
+	key: string;
+}
+
+interface ReturnedCheckout extends WalletCheckout {
+	customer: string | null;
+	status: string;
+	success_url?: string | null;
+	payment_status?: string;
+	currency?: string;
+	amount_total?: number | null;
 }
 
 const date = (value: number) => new Date(value * 1000).toISOString().replace('T', ' ').replace('.000Z', ' UTC');
@@ -234,8 +254,12 @@ export async function walletTopup(request: Request, env: Env) {
 	if (!member) throw new HttpError(403, 'Your account isn’t registered with TheLab yet. Please contact leadership.');
 	const raw = url.searchParams.get('amount') || '';
 	const amount = dollars.test(raw) ? Math.round(Number(raw) * 100) : 0;
+	const rawIntent = url.searchParams.get('intent') || '';
 	const rawNext = url.searchParams.get('next') || '';
 	if (rawNext && safeNext(rawNext) !== rawNext) throw new HttpError(400, 'The donation return address is invalid.');
+	const intent = rawIntent ? await readDonationIntent(env, rawIntent, member.member_id) : null;
+	if (rawIntent && (!intent || intent.path !== rawNext))
+		throw new HttpError(400, 'The donation checkout has expired. Please try again.');
 	const minimum = topupMinimum(member, rawNext);
 	if (amount < minimum)
 		throw new HttpError(
@@ -244,6 +268,8 @@ export async function walletTopup(request: Request, env: Env) {
 				? `Add at least ${formatMoney(minimum)} to complete this donation.`
 				: `Choose an amount between ${formatMoney(TOPUP_MIN)} and ${formatMoney(TOPUP_MAX)}.`,
 		);
+	if (intent && (amount < intent.topup_min || amount > intent.topup_max))
+		throw new HttpError(400, 'Choose a top-up amount within the available wallet limit.');
 	if (amount > TOPUP_MAX)
 		throw new HttpError(400, `Choose an amount between ${formatMoney(TOPUP_MIN)} and ${formatMoney(TOPUP_MAX)}.`);
 	if (member.balance + amount > WALLET_MAX_CENTS)
@@ -251,7 +277,11 @@ export async function walletTopup(request: Request, env: Env) {
 			400,
 			`A top-up cannot raise your wallet above ${formatMoney(WALLET_MAX_CENTS)}. Your current balance is ${formatMoney(member.balance)}, so you can add at most ${formatMoney(Math.max(0, WALLET_MAX_CENTS - member.balance))}.`,
 		);
-	const returnPath = rawNext ? addParam(rawNext, 'notice', 'topped') : '/wallet?notice=topped';
+	const returnPath = intent
+		? `/wallet/redeem?auto=${encodeURIComponent(rawIntent)}`
+		: rawNext
+			? addParam(rawNext, 'notice', 'topped')
+			: '/wallet?notice=topped';
 	const successPath = rawNext ? `${returnPath}&session_id={CHECKOUT_SESSION_ID}` : returnPath;
 	const successURL = `${origin(env)}${successPath}`;
 	const cancelURL = `${origin(env)}${rawNext || '/wallet'}`;
@@ -269,6 +299,10 @@ export async function walletTopup(request: Request, env: Env) {
 	const matching = sessions.filter(session =>
 		rawNext ? session.success_url === successURL : !session.success_url || session.success_url === successURL,
 	);
+	const completed = intent && matching.find(session => session.status === 'complete');
+	if (completed) {
+		return withCookie(redirect(`${returnPath}&session_id=${encodeURIComponent(completed.id)}`), identity.cookie);
+	}
 	const reusable = matching.find(session => session.status === 'open');
 	for (const session of matching) {
 		if (session.status === 'open' && session !== reusable) {
@@ -292,6 +326,7 @@ export async function walletTopup(request: Request, env: Env) {
 			'payment_method_types[0]': 'card',
 			'metadata[thelab_member_id]': current.member_id,
 			'metadata[thelab_wallet_amount]': String(amount),
+			...(intent ? { 'metadata[thelab_wallet_intent]': await intentDigest(rawIntent) } : {}),
 		},
 		`wallet-topup:${current.member_id}:${amount}:${await destinationKey(successPath)}:${matching.length}`,
 	);
@@ -397,6 +432,79 @@ function donationPath(spec: ItemSpec, qty?: number) {
 	return `/wallet/redeem?${params}`;
 }
 
+async function createDonationIntent(
+	env: Env,
+	member: WalletMember,
+	spec: ItemSpec,
+	qty: number,
+	topupMin: number,
+	topupMax: number,
+	key: string,
+) {
+	return signToken(env, {
+		type: 'wallet-donation',
+		member_id: member.member_id,
+		path: donationPath(spec, spec.unit ? qty : undefined),
+		topup_min: topupMin,
+		topup_max: topupMax,
+		key,
+		exp: now() + 172800,
+	});
+}
+
+async function readDonationIntent(
+	env: Env,
+	token: string,
+	memberID: string,
+): Promise<(DonationIntent & { spec: ItemSpec; qty: number; amount: number }) | null> {
+	const value = await readToken(env, token);
+	if (!value) return null;
+	if (
+		value.type !== 'wallet-donation' ||
+		value.member_id !== memberID ||
+		typeof value.path !== 'string' ||
+		typeof value.topup_min !== 'number' ||
+		!Number.isInteger(value.topup_min) ||
+		typeof value.topup_max !== 'number' ||
+		!Number.isInteger(value.topup_max) ||
+		typeof value.key !== 'string' ||
+		!/^[a-f0-9]{64}$/.test(value.key)
+	)
+		return null;
+	if (safeNext(value.path) !== value.path) return null;
+	const path = new URL(value.path, 'https://wallet.invalid');
+	if (path.pathname !== '/wallet/redeem') return null;
+	let spec: ItemSpec;
+	try {
+		spec = readSpec(queryParam(path.searchParams));
+	} catch {
+		return null;
+	}
+	const qty = spec.unit ? quantity(path.searchParams.get('q')) : 1;
+	if (spec.unit && (!(qty > 0) || quantityRange(spec, qty) || donationPath(spec, qty) !== value.path)) return null;
+	if (!spec.unit && donationPath(spec) !== value.path) return null;
+	const amount = Math.round(spec.price * qty * 100);
+	if (
+		amount < 1 ||
+		value.topup_min < TOPUP_MIN ||
+		value.topup_max > Math.min(TOPUP_MAX, WALLET_MAX_CENTS) ||
+		value.topup_min > value.topup_max
+	)
+		return null;
+	return {
+		member_id: memberID,
+		path: value.path,
+		topup_min: value.topup_min,
+		topup_max: value.topup_max,
+		key: value.key,
+		spec,
+		qty,
+		amount,
+	};
+}
+
+const intentDigest = (token: string) => crypto.subtle.digest('SHA-256', new TextEncoder().encode(token)).then(hex);
+
 function quantityRange(spec: ItemSpec, qty: number) {
 	if (!spec.unit || ((spec.min === undefined || qty >= spec.min) && (spec.max === undefined || qty <= spec.max)))
 		return '';
@@ -409,19 +517,25 @@ function quantityRange(spec: ItemSpec, qty: number) {
 	return `Enter a quantity ${range} ${spec.unit}.`;
 }
 
-function insufficientPage(
+async function insufficientPage(
+	env: Env,
 	member: WalletMember,
 	spec: ItemSpec,
 	qty: number,
 	amount: number,
-	{ pending = false, sessionID = '', dev = false } = {},
+	key: string,
+	{ pending = false, sessionID = '', retryPath = '', dev = false } = {},
 ) {
 	const next = donationPath(spec, spec.unit ? qty : undefined);
-	const retry = addParam(addParam(next, 'notice', 'topped'), 'session_id', sessionID);
+	const retry = retryPath || addParam(addParam(next, 'notice', 'topped'), 'session_id', sessionID);
 	const shortfall = amount - member.balance;
 	const available = Math.max(0, WALLET_MAX_CENTS - member.balance);
-	const topup = Math.min(available, TOPUP_MAX, Math.max(TOPUP_MIN, shortfall));
+	const topupMin = Math.max(TOPUP_MIN, shortfall);
+	const topupMax = Math.min(available, TOPUP_MAX);
+	const topup = Math.min(topupMax, topupMin);
 	const impossible = amount > WALLET_MAX_CENTS || available < TOPUP_MIN;
+	const intent =
+		pending || impossible ? '' : await createDonationIntent(env, member, spec, qty, topupMin, topupMax, key);
 	return page(
 		'Add wallet credits',
 		<div class="wallet">
@@ -447,6 +561,7 @@ function insufficientPage(
 				<>
 					<form method="get" action="/wallet/topup" class="wallet-form">
 						<input type="hidden" name="next" value={next} />
+						<input type="hidden" name="intent" value={intent} />
 						<label for="wallet-topup-amount">Amount to add (USD)</label>
 						<input
 							id="wallet-topup-amount"
@@ -477,12 +592,90 @@ function insufficientPage(
 	);
 }
 
+async function chargeWallet(env: Env, member: WalletMember, spec: ItemSpec, qty: number, amount: number, key: string) {
+	const entry = await env.DB.prepare(`INSERT INTO wallet_entries (member_id, amount, item, key, details)
+    SELECT ?1, ?2, ?3, ?4, ?5 WHERE EXISTS (SELECT 1 FROM members WHERE member_id = ?1)
+    AND COALESCE((SELECT SUM(amount) FROM wallet_entries WHERE member_id = ?1), 0) >= ?6
+    AND NOT EXISTS (SELECT 1 FROM wallet_entries WHERE member_id = ?1 AND key = ?4)
+    RETURNING entry_id`)
+		.bind(
+			member.member_id,
+			-amount,
+			spec.name,
+			key,
+			JSON.stringify({ quantity: qty, unit: spec.unit, unit_price: spec.price }),
+			amount,
+		)
+		.first<{ entry_id: number }>();
+	if (entry) return entry.entry_id;
+	const replay = await env.DB.prepare('SELECT entry_id FROM wallet_entries WHERE member_id = ? AND key = ?')
+		.bind(member.member_id, key)
+		.first<{ entry_id: number }>();
+	return replay?.entry_id ?? null;
+}
+
 export async function redeemPage(request: Request, env: Env) {
 	const url = new URL(request.url);
 	const identity = await walletIdentity(request, env);
 	if (!identity) return loginRedirect(url.pathname + url.search);
 	const member = await loadMember(env, identity.sub);
 	if (!member) throw new HttpError(403, 'Your account isn’t registered with TheLab yet. Please contact leadership.');
+	const auto = url.searchParams.get('auto') || '';
+	if (auto) {
+		const intent = await readDonationIntent(env, auto, member.member_id);
+		const sessionID = url.searchParams.get('session_id') || '';
+		if (!intent || !/^cs_[A-Za-z0-9_]+$/.test(sessionID))
+			throw new HttpError(400, 'This donation return link is invalid or has expired.');
+		const session = await stripe<ReturnedCheckout>(env, `/checkout/sessions/${sessionID}`);
+		const expectedSuccessURL = `${origin(env)}/wallet/redeem?auto=${encodeURIComponent(auto)}&session_id={CHECKOUT_SESSION_ID}`;
+		const topupAmount = Number(session.metadata?.thelab_wallet_amount);
+		if (
+			session.id !== sessionID ||
+			session.mode !== 'payment' ||
+			session.success_url !== expectedSuccessURL ||
+			session.client_reference_id !== member.member_id ||
+			session.customer !== member.stripe_customer_id ||
+			session.metadata?.thelab_member_id !== member.member_id ||
+			!Number.isInteger(topupAmount) ||
+			topupAmount < intent.topup_min ||
+			topupAmount > intent.topup_max ||
+			session.metadata?.thelab_wallet_intent !== (await intentDigest(auto)) ||
+			session.currency !== 'usd' ||
+			session.amount_total !== topupAmount
+		)
+			throw new HttpError(400, 'This Checkout payment does not match the intended donation.');
+		if (session.status !== 'complete' || session.payment_status !== 'paid') {
+			return withCookie(
+				await insufficientPage(env, member, intent.spec, intent.qty, intent.amount, intent.key, {
+					pending: true,
+					sessionID,
+					retryPath: `${url.pathname}${url.search}`,
+					dev: devAuth(env),
+				}),
+				identity.cookie,
+			);
+		}
+		await creditWalletSession(env, session);
+		const credited = await env.DB.prepare('SELECT 1 FROM wallet_entries WHERE member_id = ? AND key = ?')
+			.bind(member.member_id, `stripe:${sessionID}`)
+			.first();
+		if (!credited)
+			throw new HttpError(
+				409,
+				`Your payment was received, but this top-up would exceed the ${formatMoney(WALLET_MAX_CENTS)} wallet limit. Please contact leadership.`,
+			);
+		const entryID = await chargeWallet(env, member, intent.spec, intent.qty, intent.amount, intent.key);
+		if (entryID) return withCookie(redirect(`/wallet/receipt/${entryID}?k=${intent.key}`), identity.cookie);
+		const current = await loadMember(env, identity.sub);
+		if (!current)
+			throw new HttpError(403, 'Your account isn’t registered with TheLab yet. Please contact leadership.');
+		return withCookie(
+			await insufficientPage(env, current, intent.spec, intent.qty, intent.amount, intent.key, {
+				dev: devAuth(env),
+			}),
+			identity.cookie,
+		);
+	}
 	const spec = readSpec(queryParam(url.searchParams));
 	const dev = devAuth(env),
 		topped = url.searchParams.get('notice') === 'topped';
@@ -503,7 +696,7 @@ export async function redeemPage(request: Request, env: Env) {
 		if (amount < 1) throw new HttpError(400, 'That charge is below one cent. Enter a larger quantity.');
 		const response =
 			amount > member.balance
-				? insufficientPage(member, spec, qty, amount, { pending, sessionID, dev })
+				? await insufficientPage(env, member, spec, qty, amount, randomToken(), { pending, sessionID, dev })
 				: reviewPage(spec, qty, amount, randomToken(), '', dev);
 		return withCookie(response, identity.cookie);
 	}
@@ -513,7 +706,7 @@ export async function redeemPage(request: Request, env: Env) {
 	// reports the payment state.
 	const response =
 		!spec.unit && topped && amount > member.balance
-			? insufficientPage(member, spec, 1, amount, { pending, sessionID, dev })
+			? await insufficientPage(env, member, spec, 1, amount, randomToken(), { pending, sessionID, dev })
 			: itemPage(spec, randomToken(), { dev });
 	return withCookie(response, identity.cookie);
 }
@@ -551,7 +744,10 @@ export async function redeem(request: Request, env: Env) {
 		amount = Math.round(spec.price * qty * 100);
 		if (!form.confirm) {
 			if (amount > member.balance) {
-				return withCookie(insufficientPage(member, spec, qty, amount, { dev: devAuth(env) }), identity.cookie);
+				return withCookie(
+					await insufficientPage(env, member, spec, qty, amount, key, { dev: devAuth(env) }),
+					identity.cookie,
+				);
 			}
 			return withCookie(reviewPage(spec, qty, amount, key, '', devAuth(env)), identity.cookie);
 		}
@@ -560,31 +756,14 @@ export async function redeem(request: Request, env: Env) {
 	}
 	if (amount < 1) throw new HttpError(400, 'That charge is below one cent. Enter a larger quantity.');
 
-	// One atomic statement: insert only when the balance covers the charge and
-	// this key has not already been recorded.
-	const entry = await env.DB.prepare(`INSERT INTO wallet_entries (member_id, amount, item, key, details)
-    SELECT ?1, ?2, ?3, ?4, ?5 WHERE EXISTS (SELECT 1 FROM members WHERE member_id = ?1)
-    AND COALESCE((SELECT SUM(amount) FROM wallet_entries WHERE member_id = ?1), 0) >= ?6
-    AND NOT EXISTS (SELECT 1 FROM wallet_entries WHERE member_id = ?1 AND key = ?4)
-    RETURNING entry_id`)
-		.bind(
-			member.member_id,
-			-amount,
-			spec.name,
-			key,
-			JSON.stringify({ quantity: qty, unit: spec.unit, unit_price: spec.price }),
-			amount,
-		)
-		.first<{ entry_id: number }>();
-	if (entry) return withCookie(redirect(`/wallet/receipt/${entry.entry_id}?k=${key}`), identity.cookie);
-	// A repeated submit finds its original entry and lands on the same receipt.
-	const replay = await env.DB.prepare('SELECT entry_id FROM wallet_entries WHERE member_id = ? AND key = ?')
-		.bind(member.member_id, key)
-		.first<{ entry_id: number }>();
-	if (replay) return withCookie(redirect(`/wallet/receipt/${replay.entry_id}?k=${key}`), identity.cookie);
+	const entryID = await chargeWallet(env, member, spec, qty, amount, key);
+	if (entryID) return withCookie(redirect(`/wallet/receipt/${entryID}?k=${key}`), identity.cookie);
 	const current = await loadMember(env, identity.sub);
 	if (!current) throw new HttpError(403, 'Your account isn’t registered with TheLab yet. Please contact leadership.');
-	return withCookie(insufficientPage(current, spec, qty, amount, { dev: devAuth(env) }), identity.cookie);
+	return withCookie(
+		await insufficientPage(env, current, spec, qty, amount, key, { dev: devAuth(env) }),
+		identity.cookie,
+	);
 }
 
 export async function walletReceipt(request: Request, env: Env) {

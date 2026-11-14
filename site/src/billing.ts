@@ -1,25 +1,26 @@
 // Stripe checkout, subscription webhooks, and the Discord member role.
+
+import { pushFobs } from './edge.tsx';
 import {
-	HttpError,
-	ProviderError,
 	currentMember,
 	discord,
 	grantsMembership,
+	HttpError,
 	isOngoingSubscription,
 	isRecord,
 	loginRedirect,
+	type Member,
 	now,
 	origin,
+	ProviderError,
 	redirect,
+	type Subscription,
 	selectCurrentSubscription,
 	stripe,
 	stripeList,
 	verifyStripe,
-	type Member,
-	type Subscription,
 	WALLET_MAX_CENTS,
 } from './lib.ts';
-import { pushFobs } from './edge.tsx';
 
 interface Customer {
 	id: string;
@@ -190,6 +191,13 @@ function walletCredit(env: Env, event: unknown): D1PreparedStatement | null {
 		JSON.stringify({ source: 'stripe', session_id: object.id }),
 		WALLET_MAX_CENTS,
 	);
+}
+
+// Browser returns can arrive before Stripe's webhook. Apply the same guarded,
+// idempotent ledger write after verifying the Checkout Session with Stripe.
+export async function creditWalletSession(env: Env, session: unknown) {
+	const credit = walletCredit(env, { type: 'checkout.session.completed', data: { object: session } });
+	if (credit) await credit.run();
 }
 
 export async function stripeWebhook(request: Request, env: Env) {
