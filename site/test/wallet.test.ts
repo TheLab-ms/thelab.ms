@@ -121,6 +121,18 @@ describe('Wallet', () => {
 		expect(rejected.status).toBe(400);
 		expect(await rejected.text()).toContain('between $5.00 and $200.00');
 		expect(calls).toHaveLength(0);
+
+		await credit(member.member_id, 9600, 'near-cap');
+		const overLimit = await call('/wallet/topup?amount=5', { headers: { Cookie: await walletSession() } });
+		expect(overLimit.status).toBe(400);
+		expect(await overLimit.text()).toContain('so you can add at most $4.00');
+		const cannotTopUp = await call(
+			'/wallet/redeem',
+			post({ n: 'Snack', p: '99', key }, { Cookie: await walletSession() }),
+		);
+		const cannotTopUpHTML = await cannotTopUp.text();
+		expect(cannotTopUpHTML).toContain('wallet limit leaves room for only $4.00');
+		expect(cannotTopUpHTML).not.toContain('with Stripe</button>');
 	});
 
 	it('offers the bounded shortfall and preserves the donation through Checkout', async () => {
@@ -152,7 +164,8 @@ describe('Wallet', () => {
 		expect(html).toContain('payment processor fees');
 		response = await call('/wallet/redeem', post({ n: 'Machine', p: '300', key }, { Cookie: cookie }));
 		html = await response.text();
-		expect(html).toContain('Add $200.00 with Stripe');
+		expect(html).toContain('exceeds the $100.00 wallet limit');
+		expect(html).not.toContain('with Stripe</button>');
 		expect(html).not.toContain('payment processor fees');
 
 		await env.DB.prepare("UPDATE members SET stripe_customer_id = 'cus_1' WHERE member_id = ?")
@@ -180,7 +193,8 @@ describe('Wallet', () => {
 		});
 		html = await response.text();
 		expect(html).not.toContain('Stripe is confirming your payment');
-		expect(html).toContain('Add $96.50 with Stripe');
+		expect(html).toContain('exceeds the $100.00 wallet limit');
+		expect(html).not.toContain('with Stripe</button>');
 	});
 
 	it('waits for a contextual credit, then resumes a quantity confirmation', async () => {
@@ -253,6 +267,36 @@ describe('Wallet', () => {
 		expect(await balance(member.member_id)).toBe(1000);
 		expect((await call('/webhooks/stripe', await event('cs_two'))).status).toBe(204);
 		expect(await balance(member.member_id)).toBe(2000);
+	});
+
+	it('does not let Stripe credits push a wallet above $100', async () => {
+		await credit(member.member_id, 9500);
+		await env.DB.prepare("UPDATE members SET stripe_customer_id = 'cus_1' WHERE member_id = ?")
+			.bind(member.member_id)
+			.run();
+		mockFetch([
+			['GET', `${stripeAPI}/customers/cus_1`, { id: 'cus_1' }],
+			['GET', /\/v1\/subscriptions\?/, list([])],
+			['DELETE', roleURL, new Response(null, { status: 204 })],
+		]);
+		const deliver = (id: string, amount: string) =>
+			stripeEvent({
+				type: 'checkout.session.completed',
+				data: {
+					object: {
+						id,
+						mode: 'payment',
+						payment_status: 'paid',
+						customer: 'cus_1',
+						client_reference_id: member.member_id,
+						metadata: { thelab_member_id: member.member_id, thelab_wallet_amount: amount },
+					},
+				},
+			});
+		expect((await call('/webhooks/stripe', await deliver('cs_too_much', '1000'))).status).toBe(204);
+		expect(await balance(member.member_id)).toBe(9500);
+		expect((await call('/webhooks/stripe', await deliver('cs_fits', '500'))).status).toBe(204);
+		expect(await balance(member.member_id)).toBe(10000);
 	});
 
 	it('charges a fixed-price item and makes repeated confirmation a replay', async () => {
@@ -375,6 +419,13 @@ describe('Wallet', () => {
 			post({ amount: '10', note: 'Cash top-up' }, { Cookie: admin }),
 		);
 		expect(response.status).toBe(303);
+		expect(await balance(member.member_id)).toBe(1000);
+		response = await call(
+			`/admin/members/${member.member_id}/wallet`,
+			post({ amount: '90.01', note: 'Over the wallet limit' }, { Cookie: admin }),
+		);
+		expect(response.status).toBe(400);
+		expect(await response.text()).toContain('Wallet balance cannot exceed $100.00');
 		expect(await balance(member.member_id)).toBe(1000);
 		const history = await (
 			await call(`/admin/members/${member.member_id}/events`, { headers: { Cookie: admin } })

@@ -17,6 +17,7 @@ import {
 	verifyStripe,
 	type Member,
 	type Subscription,
+	WALLET_MAX_CENTS,
 } from './lib.ts';
 import { pushFobs } from './edge.tsx';
 
@@ -181,11 +182,13 @@ function walletCredit(env: Env, event: unknown): D1PreparedStatement | null {
 	if (typeof memberID !== 'string' || !/^[a-f0-9]{32}$/.test(memberID)) return null;
 	return env.DB.prepare(`INSERT INTO wallet_entries (member_id, amount, item, key, details)
     SELECT ?1, ?2, '', ?3, ?4 WHERE EXISTS (SELECT 1 FROM members WHERE member_id = ?1)
+    AND COALESCE((SELECT SUM(amount) FROM wallet_entries WHERE member_id = ?1), 0) + ?2 <= ?5
     AND NOT EXISTS (SELECT 1 FROM wallet_entries WHERE member_id = ?1 AND key = ?3)`).bind(
 		memberID,
 		amount,
 		`stripe:${object.id}`,
 		JSON.stringify({ source: 'stripe', session_id: object.id }),
+		WALLET_MAX_CENTS,
 	);
 }
 

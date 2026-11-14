@@ -13,6 +13,7 @@ import {
 	safeNext,
 	stripe,
 	stripeList,
+	WALLET_MAX_CENTS,
 	walletIdentity,
 	withCookie,
 	type Form,
@@ -162,16 +163,24 @@ export async function walletPage(request: Request, env: Env) {
 			</p>
 			<section aria-labelledby="wallet-add">
 				<h2 id="wallet-add">Add credits</h2>
-				<div class="wallet-topups">
-					{[500, 1000, 2500, 5000].map(cents => (
-						<form method="get" action="/wallet/topup">
-							<input type="hidden" name="amount" value={cents / 100} />
-							<button class="btn btn-outline" type="submit">
-								{formatMoney(cents)}
-							</button>
-						</form>
-					))}
-				</div>
+				{[500, 1000, 2500, 5000].some(cents => cents <= WALLET_MAX_CENTS - member.balance) ? (
+					<div class="wallet-topups">
+						{[500, 1000, 2500, 5000]
+							.filter(cents => cents <= WALLET_MAX_CENTS - member.balance)
+							.map(cents => (
+								<form method="get" action="/wallet/topup">
+									<input type="hidden" name="amount" value={cents / 100} />
+									<button class="btn btn-outline" type="submit">
+										{formatMoney(cents)}
+									</button>
+								</form>
+							))}
+					</div>
+				) : (
+					<p class="card-desc">
+						Wallets can hold up to {formatMoney(WALLET_MAX_CENTS)}. Spend some balance before adding more.
+					</p>
+				)}
 			</section>
 			<section aria-labelledby="wallet-history">
 				<h2 id="wallet-history">Recent activity</h2>
@@ -219,6 +228,11 @@ export async function walletTopup(request: Request, env: Env) {
 	const amount = dollars.test(raw) ? Math.round(Number(raw) * 100) : 0;
 	if (amount < TOPUP_MIN || amount > TOPUP_MAX)
 		throw new HttpError(400, `Choose an amount between ${formatMoney(TOPUP_MIN)} and ${formatMoney(TOPUP_MAX)}.`);
+	if (member.balance + amount > WALLET_MAX_CENTS)
+		throw new HttpError(
+			400,
+			`A top-up cannot raise your wallet above ${formatMoney(WALLET_MAX_CENTS)}. Your current balance is ${formatMoney(member.balance)}, so you can add at most ${formatMoney(Math.max(0, WALLET_MAX_CENTS - member.balance))}.`,
+		);
 	const rawNext = url.searchParams.get('next') || '';
 	if (rawNext && safeNext(rawNext) !== rawNext) throw new HttpError(400, 'The donation return address is invalid.');
 	const returnPath = rawNext ? addParam(rawNext, 'notice', 'topped') : '/wallet?notice=topped';
@@ -374,14 +388,20 @@ function insufficientPage(
 	const next = donationPath(spec, spec.unit ? qty : undefined);
 	const retry = addParam(addParam(next, 'notice', 'topped'), 'session_id', sessionID);
 	const shortfall = amount - member.balance;
-	const topup = Math.min(TOPUP_MAX, Math.max(TOPUP_MIN, shortfall));
+	const available = Math.max(0, WALLET_MAX_CENTS - member.balance);
+	const topup = Math.min(available, TOPUP_MAX, Math.max(TOPUP_MIN, shortfall));
+	const impossible = amount > WALLET_MAX_CENTS || available < TOPUP_MIN;
 	return page(
 		'Add wallet credits',
 		<div class="wallet">
 			<p role={pending ? 'status' : 'alert'} class={pending ? '' : 'wallet-error'}>
 				{pending
 					? 'Stripe is confirming your payment. Check again shortly to continue your donation.'
-					: `Your balance is ${formatMoney(member.balance)}; add ${formatMoney(shortfall)} to complete this donation.`}
+					: impossible
+						? amount > WALLET_MAX_CENTS
+							? `This charge exceeds the ${formatMoney(WALLET_MAX_CENTS)} wallet limit and cannot be paid from the wallet.`
+							: `Your balance is ${formatMoney(member.balance)}; this donation needs ${formatMoney(amount)}. The ${formatMoney(WALLET_MAX_CENTS)} wallet limit leaves room for only ${formatMoney(available)} in additional credits.`
+						: `Your balance is ${formatMoney(member.balance)}; add ${formatMoney(shortfall)} to complete this donation.`}
 			</p>
 			<p class="wallet-price">
 				{spec.name} · <strong>{formatMoney(amount)}</strong>
@@ -392,7 +412,7 @@ function insufficientPage(
 						Check again
 					</a>
 				</p>
-			) : (
+			) : impossible ? null : (
 				<>
 					<form method="get" action="/wallet/topup" class="wallet-form">
 						<input type="hidden" name="amount" value={topup / 100} />
@@ -582,8 +602,20 @@ export async function adjustWallet(env: Env, memberID: string, adminID: string, 
 	const note = (form.note || '').trim();
 	if (!note) throw new HttpError(400, 'A note explaining the adjustment is required.');
 	if (note.length > 500 || CONTROL.test(note)) throw new HttpError(400, 'Keep the note under 500 characters.');
-	await env.DB.prepare(`INSERT INTO wallet_entries (member_id, amount, item, key, details)
-    VALUES (?, ?, 'Adjustment', ?, ?)`)
-		.bind(memberID, amount, `admin:${randomToken()}`, JSON.stringify({ source: 'admin', admin: adminID, note }))
-		.run();
+	const entry = await env.DB.prepare(`INSERT INTO wallet_entries (member_id, amount, item, key, details)
+    SELECT ?, ?, 'Adjustment', ?, ? WHERE ? <= 0 OR
+    COALESCE((SELECT SUM(amount) FROM wallet_entries WHERE member_id = ?), 0) + ? <= ?
+    RETURNING entry_id`)
+		.bind(
+			memberID,
+			amount,
+			`admin:${randomToken()}`,
+			JSON.stringify({ source: 'admin', admin: adminID, note }),
+			amount,
+			memberID,
+			amount,
+			WALLET_MAX_CENTS,
+		)
+		.first();
+	if (!entry) throw new HttpError(400, `Wallet balance cannot exceed ${formatMoney(WALLET_MAX_CENTS)}.`);
 }

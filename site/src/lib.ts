@@ -143,6 +143,8 @@ export interface CalendarRSVP {
 // Cents in, "$12.50" out; negative amounts keep their sign.
 export const formatMoney = (cents: number) => `${cents < 0 ? '-' : ''}$${(Math.abs(cents) / 100).toFixed(2)}`;
 
+export const WALLET_MAX_CENTS = 10000;
+
 // ────────────────────────────────────────────────────────────────────────
 // Responses and cookies
 // ────────────────────────────────────────────────────────────────────────
